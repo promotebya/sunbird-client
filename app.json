@@ -1,34 +1,58 @@
 {
   "expo": {
-    "name": "LovePointsApp",
-    "slug": "LovePointsApp",
+    "name": "LovePoints",
+    "slug": "lovepoints",
     "scheme": "lovepoints",
     "version": "1.0.0",
     "orientation": "portrait",
+
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+
+    "userInterfaceStyle": "automatic",
+
     "splash": {
       "image": "./assets/splash.png",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#F9D4E5"
     },
-    "updates": {
-      "fallbackToCacheTimeout": 0
-    },
+
     "assetBundlePatterns": ["**/*"],
+
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.yourcompany.lovepoints"
     },
+
     "android": {
       "package": "com.yourcompany.lovepoints",
       "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#FFFFFF"
+        "foregroundImage": "./assets/adaptive-icon-foreground.png",
+        "backgroundImage": "./assets/adaptive-icon-background.png",
+        "monochromeImage": "./assets/notification-icon.png"
       }
     },
+
+    "notification": {
+      "icon": "./assets/notification-icon.png",
+      "color": "#F0568A"
+    },
+
     "plugins": [
       "expo-notifications"
-    ]
+    ],
+
+    "extra": {
+      "eas": {
+        "projectId": "635b3b32-7a95-4d2b-82f5-82a44bf0679d"
+      }
+    },
+
+    "updates": {
+      "url": "https://u.expo.dev/YOUR-EAS-PROJECT-ID"
+    },
+
+    "runtimeVersion": {
+      "policy": "sdkVersion"
+    }
   }
 }

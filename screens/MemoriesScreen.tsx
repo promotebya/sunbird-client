@@ -1,10 +1,11 @@
 // screens/MemoriesScreen.tsx
+import { useNavigation } from '@react-navigation/native';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
+  FlatList,
   KeyboardAvoidingView,
   Platform,
-  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -16,269 +17,283 @@ import { Memory, MemoryKind } from '../types';
 import {
   addMemory,
   deleteMemory,
-  listenMemories,
-  scheduleDaily
+  listByKind,
+  updateMemory,
 } from '../utils/memories';
 
+const KINDS: MemoryKind[] = ['note', 'link', 'idea', 'gift'];
+
 export default function MemoriesScreen() {
+  const nav = useNavigation();
   const { user } = useAuthListener();
   const uid = user?.uid ?? '';
 
-  const [items, setItems] = useState<Memory[]>([]);
   const [kind, setKind] = useState<MemoryKind>('note');
-  const [label, setLabel] = useState('');
-  const [notes, setNotes] = useState('');
-  const [link, setLink] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [items, setItems] = useState<Memory[]>([]);
 
-  // Reminder fields
-  const [remHour, setRemHour] = useState('9');
-  const [remMinute, setRemMinute] = useState('0');
-  const [inSeconds, setInSeconds] = useState('30');
-  const [dateStr, setDateStr] = useState(''); // yyyy-mm-ddThh:mm (iOS/Android text input)
+  // form state
+  const [label, setLabel] = useState('');
+  const [value, setValue] = useState('');
+  const [notes, setNotes] = useState('');
+
+  const isLink = useMemo(() => kind === 'link', [kind]);
 
   useEffect(() => {
     if (!uid) return;
-    return listenMemories(uid, setItems);
-  }, [uid]);
+    (async () => {
+      setLoading(true);
+      try {
+        const data = await listByKind(uid, kind);
+        setItems(data);
+      } catch (e: any) {
+        console.error('Load memories error:', e?.message);
+        Alert.alert('Error', e?.message ?? 'Could not load memories.');
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [uid, kind]);
 
-  const canAdd = useMemo(() => !!uid && label.trim().length > 0, [uid, label]);
+  const resetForm = () => {
+    setLabel('');
+    setValue('');
+    setNotes('');
+  };
 
   const onAdd = async () => {
-    if (!canAdd) return;
+    if (!uid) return;
+    if (!label.trim()) {
+      Alert.alert('Add memory', 'Please enter a title/label.');
+      return;
+    }
     try {
-      const payload = {
-        ownerId: uid,
+      setLoading(true);
+      await addMemory(uid, {
         kind,
         label: label.trim(),
-        value: notes.trim() || undefined,
-        notes: notes.trim() || undefined,
-        link: link.trim() || undefined,
-      };
-      const id = await addMemory(payload);
-
-      // Optional: schedule when kind is reminder
-      if (kind === 'reminder') {
-        // three demo modes: (pick the one you want in UI later)
-        // 1) daily at hour:minute
-        const h = Number(remHour) || 9;
-        const m = Number(remMinute) || 0;
-        await scheduleDaily(h, m, 'Daily Memory Reminder', label.trim());
-
-        // 2) or in X seconds
-        // const s = Math.max(1, Number(inSeconds) || 30);
-        // await scheduleInSeconds(s, 'Memory Reminder', label.trim());
-
-        // 3) or one-off date (dateStr like 2025-08-30T21:00)
-        // if (dateStr) await scheduleOneOff(new Date(dateStr), 'Memory Reminder', label.trim());
-      }
-
-      setLabel('');
-      setNotes('');
-      setLink('');
-      Alert.alert('Saved', 'Memory added successfully.');
+        value: value.trim(),
+        notes: notes.trim(),
+      });
+      resetForm();
+      const data = await listByKind(uid, kind);
+      setItems(data);
     } catch (e: any) {
-      console.error(e);
-      Alert.alert('Error', e?.message ?? 'Failed to add memory.');
+      console.error('Add memory error:', e?.message);
+      Alert.alert('Error', e?.message ?? 'Could not add the memory.');
+    } finally {
+      setLoading(false);
     }
   };
 
-  const onDelete = async (id: string) => {
+  const onDelete = (id: string) => {
+    Alert.alert('Delete', 'Delete this memory?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            setLoading(true);
+            await deleteMemory(uid, id);
+            const data = await listByKind(uid, kind);
+            setItems(data);
+          } catch (e: any) {
+            console.error('Delete memory error:', e?.message);
+            Alert.alert('Error', e?.message ?? 'Could not delete memory.');
+          } finally {
+            setLoading(false);
+          }
+        },
+      },
+    ]);
+  };
+
+  const onInlineEdit = async (id: string, field: 'label' | 'notes', newVal: string) => {
     try {
-      await deleteMemory(id);
+      await updateMemory(uid, id, { [field]: newVal });
+      // Optimistic update in UI
+      setItems((prev) =>
+        prev.map((m) => (m.id === id ? { ...m, [field]: newVal } as Memory : m)),
+      );
     } catch (e: any) {
-      Alert.alert('Error', e?.message ?? 'Delete failed.');
+      console.error('Update memory error:', e?.message);
+      Alert.alert('Error', e?.message ?? 'Could not save your change.');
     }
+  };
+
+  const renderItem = ({ item }: { item: Memory }) => {
+    return (
+      <View style={styles.card}>
+        <TextInput
+          style={styles.title}
+          value={item.label}
+          placeholder="Title…"
+          onChangeText={(t) => onInlineEdit(item.id, 'label', t)}
+        />
+
+        {!!item.value && (
+          <Text style={styles.value} numberOfLines={2}>
+            {item.value}
+          </Text>
+        )}
+
+        <TextInput
+          style={styles.notes}
+          value={item.notes ?? ''}
+          placeholder="Notes…"
+          multiline
+          onChangeText={(t) => onInlineEdit(item.id, 'notes', t)}
+        />
+
+        <TouchableOpacity style={styles.deleteBtn} onPress={() => onDelete(item.id)}>
+          <Text style={styles.deleteText}>Delete</Text>
+        </TouchableOpacity>
+      </View>
+    );
   };
 
   return (
     <KeyboardAvoidingView
-      behavior={Platform.select({ ios: 'padding', android: undefined })}
-      style={{ flex: 1 }}
+      style={styles.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
-      <ScrollView contentContainerStyle={styles.container}>
-        <Text style={styles.title}>Memory Vault</Text>
-
-        {/* Kind selector */}
-        <View style={styles.segment}>
-          {(['note', 'reminder', 'surprise'] as MemoryKind[]).map((k) => (
+      {/* Kind Tabs */}
+      <View style={styles.tabs}>
+        {KINDS.map((k) => {
+          const active = k === kind;
+          return (
             <TouchableOpacity
               key={k}
-              style={[styles.segBtn, kind === k && styles.segBtnActive]}
+              style={[styles.tab, active && styles.tabActive]}
               onPress={() => setKind(k)}
             >
-              <Text style={[styles.segText, kind === k && styles.segTextActive]}>
+              <Text style={[styles.tabText, active && styles.tabTextActive]}>
                 {k.toUpperCase()}
               </Text>
             </TouchableOpacity>
-          ))}
-        </View>
+          );
+        })}
+      </View>
 
-        <View style={styles.card}>
-          <Text style={styles.label}>Title</Text>
-          <TextInput
-            value={label}
-            onChangeText={setLabel}
-            placeholder="e.g., Our first date idea"
-            placeholderTextColor="#8C8FA8"
-            style={styles.input}
-          />
+      {/* Add Form */}
+      <View style={styles.form}>
+        <TextInput
+          style={styles.input}
+          value={label}
+          placeholder={`Add a ${kind} title…`}
+          onChangeText={setLabel}
+        />
+        <TextInput
+          style={styles.input}
+          value={value}
+          placeholder={isLink ? 'Paste a link…' : 'Extra value (optional)…'}
+          onChangeText={setValue}
+          autoCapitalize="none"
+        />
+        <TextInput
+          style={[styles.input, styles.multiline]}
+          value={notes}
+          placeholder="Notes (optional)…"
+          onChangeText={setNotes}
+          multiline
+        />
 
-          <Text style={styles.label}>Notes (optional)</Text>
-          <TextInput
-            value={notes}
-            onChangeText={setNotes}
-            placeholder="Add some details…"
-            placeholderTextColor="#8C8FA8"
-            style={[styles.input, styles.area]}
-            multiline
-          />
+        <TouchableOpacity
+          disabled={loading}
+          style={[styles.addBtn, loading && { opacity: 0.7 }]}
+          onPress={onAdd}
+        >
+          <Text style={styles.addBtnText}>{loading ? 'Saving…' : 'Add memory'}</Text>
+        </TouchableOpacity>
+        <Text style={styles.hint}>
+          Tip: use “LINK” for URLs; “IDEA” for date ideas or gifts you might buy later.
+        </Text>
+      </View>
 
-          <Text style={styles.label}>Link (optional)</Text>
-          <TextInput
-            value={link}
-            onChangeText={setLink}
-            placeholder="https://"
-            placeholderTextColor="#8C8FA8"
-            autoCapitalize="none"
-            style={styles.input}
-          />
-
-          {kind === 'reminder' && (
-            <>
-              <Text style={[styles.label, { marginTop: 16 }]}>
-                Daily time (HH:MM)
-              </Text>
-              <View style={{ flexDirection: 'row', gap: 12 }}>
-                <TextInput
-                  value={remHour}
-                  onChangeText={setRemHour}
-                  keyboardType="number-pad"
-                  style={[styles.input, { flex: 1 }]}
-                  placeholder="Hour"
-                  placeholderTextColor="#8C8FA8"
-                />
-                <TextInput
-                  value={remMinute}
-                  onChangeText={setRemMinute}
-                  keyboardType="number-pad"
-                  style={[styles.input, { flex: 1 }]}
-                  placeholder="Minute"
-                  placeholderTextColor="#8C8FA8"
-                />
-              </View>
-
-              <Text style={[styles.hint, { marginTop: 6 }]}>
-                (We’ll schedule a daily local notification.)
-              </Text>
-
-              {/* Optional alternative inputs you can enable later */}
-              {/* <TextInput value={inSeconds} onChangeText={setInSeconds} keyboardType="number-pad" /> */}
-              {/* <TextInput value={dateStr} onChangeText={setDateStr} placeholder="2025-12-24T20:00" /> */}
-            </>
-          )}
-
-          <TouchableOpacity
-            style={[styles.primaryBtn, !canAdd && { opacity: 0.5 }]}
-            disabled={!canAdd}
-            onPress={onAdd}
-          >
-            <Text style={styles.primaryText}>Add memory</Text>
-          </TouchableOpacity>
-        </View>
-
-        <Text style={[styles.label, { marginTop: 24 }]}>Your memories</Text>
-        {items.length === 0 ? (
-          <Text style={styles.empty}>No memories yet — add your first one!</Text>
-        ) : (
-          items.map((m) => (
-            <View key={m.id} style={styles.item}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.itemTitle}>{m.label}</Text>
-                <Text style={styles.itemMeta}>
-                  {m.kind} • {new Date(m.createdAt ?? Date.now()).toLocaleString()}
-                </Text>
-              </View>
-              <TouchableOpacity onPress={() => onDelete(m.id)} style={styles.deleteBtn}>
-                <Text style={styles.smallBtnText}>Delete</Text>
-              </TouchableOpacity>
-            </View>
-          ))
-        )}
-      </ScrollView>
+      {/* List */}
+      <FlatList
+        data={items}
+        keyExtractor={(m) => m.id}
+        contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 24 }}
+        ListEmptyComponent={
+          <Text style={styles.empty}>{loading ? 'Loading…' : 'No memories yet.'}</Text>
+        }
+        renderItem={renderItem}
+      />
     </KeyboardAvoidingView>
   );
 }
 
+const PURPLE = '#5B58FF';
+const RED = '#E44';
+
 const styles = StyleSheet.create({
-  container: { padding: 16, paddingBottom: 48 },
-  title: { fontSize: 28, fontWeight: '800', marginBottom: 12 },
-  segment: { flexDirection: 'row', gap: 10, marginBottom: 12 },
-  segBtn: {
-    flex: 1,
+  container: { flex: 1, backgroundColor: '#F5F6FA' },
+  tabs: {
+    flexDirection: 'row',
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingTop: 16,
+  },
+  tab: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: '#E7E7FF',
+  },
+  tabActive: { backgroundColor: PURPLE },
+  tabText: { color: '#333', fontWeight: '700' },
+  tabTextActive: { color: '#fff' },
+
+  form: { padding: 16, gap: 8 },
+  input: {
+    backgroundColor: '#fff',
+    paddingHorizontal: 14,
     paddingVertical: 10,
     borderRadius: 10,
-    backgroundColor: '#ECEEFF',
+    borderWidth: 1,
+    borderColor: '#E0E3FF',
+  },
+  multiline: { minHeight: 64, textAlignVertical: 'top' },
+  addBtn: {
+    marginTop: 4,
+    backgroundColor: PURPLE,
+    paddingVertical: 12,
+    borderRadius: 12,
     alignItems: 'center',
   },
-  segBtnActive: { backgroundColor: '#5B58FF' },
-  segText: { fontWeight: '700', color: '#333' },
-  segTextActive: { color: '#fff' },
+  addBtnText: { color: '#fff', fontWeight: '800' },
+  hint: { marginTop: 6, color: '#6B7280', fontSize: 12 },
+
+  empty: { textAlign: 'center', color: '#777', marginTop: 24 },
 
   card: {
     backgroundColor: '#fff',
+    padding: 14,
     borderRadius: 14,
-    padding: 16,
-    shadowColor: '#000',
-    shadowOpacity: 0.06,
-    shadowRadius: 8,
-    elevation: 2,
-  },
-  label: { fontSize: 14, fontWeight: '700', marginBottom: 6 },
-  input: {
-    borderWidth: 1,
-    borderColor: '#C7C5FF',
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: Platform.select({ ios: 12, android: 8 }),
-    fontSize: 16,
-    color: '#111',
-    marginBottom: 12,
-  },
-  area: { minHeight: 90, textAlignVertical: 'top' },
-  hint: { fontSize: 12, color: '#6B7280' },
-
-  primaryBtn: {
-    marginTop: 8,
-    backgroundColor: '#5B58FF',
-    borderRadius: 12,
-    paddingVertical: 12,
-    alignItems: 'center',
-  },
-  primaryText: { color: '#fff', fontWeight: '800', fontSize: 16 },
-
-  empty: { textAlign: 'center', color: '#777', marginTop: 12 },
-
-  item: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#fff',
     marginTop: 10,
-    padding: 12,
-    borderRadius: 12,
-    shadowColor: '#000',
-    shadowOpacity: 0.05,
-    shadowRadius: 6,
-    elevation: 1,
+    borderWidth: 1,
+    borderColor: '#E6E9FF',
   },
-  itemTitle: { fontSize: 16, fontWeight: '700' },
-  itemMeta: { color: '#888', marginTop: 2 },
-
+  title: {
+    fontSize: 16,
+    fontWeight: '700',
+    marginBottom: 6,
+  },
+  value: { color: '#333', marginBottom: 6 },
+  notes: {
+    minHeight: 40,
+    textAlignVertical: 'top',
+    color: '#444',
+    marginBottom: 8,
+  },
   deleteBtn: {
-    backgroundColor: '#E65050',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 10,
-    marginLeft: 12,
+    alignSelf: 'flex-start',
+    backgroundColor: '#FCE7E7',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
   },
-  smallBtnText: { color: '#fff', fontWeight: '700' },
+  deleteText: { color: RED, fontWeight: '700' },
 });
