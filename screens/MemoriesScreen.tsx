@@ -1,5 +1,4 @@
 // screens/MemoriesScreen.tsx
-import { useNavigation } from '@react-navigation/native';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
@@ -13,287 +12,194 @@ import {
   View,
 } from 'react-native';
 import useAuthListener from '../hooks/useAuthListener';
-import { Memory, MemoryKind } from '../types';
-import {
-  addMemory,
-  deleteMemory,
-  listByKind,
-  updateMemory,
-} from '../utils/memories';
+import type { Memory, MemoryKind } from '../types';
+import { addMemory, deleteMemory, listByKind, listByOwner, updateMemory } from '../utils/memories';
 
-const KINDS: MemoryKind[] = ['note', 'link', 'idea', 'gift'];
+const KINDS: MemoryKind[] = ['note', 'link', 'idea', 'gift', 'photo'];
 
 export default function MemoriesScreen() {
-  const nav = useNavigation();
   const { user } = useAuthListener();
   const uid = user?.uid ?? '';
 
-  const [kind, setKind] = useState<MemoryKind>('note');
-  const [loading, setLoading] = useState(false);
   const [items, setItems] = useState<Memory[]>([]);
-
-  // form state
+  const [kind, setKind] = useState<MemoryKind>('note');
   const [label, setLabel] = useState('');
   const [value, setValue] = useState('');
   const [notes, setNotes] = useState('');
 
-  const isLink = useMemo(() => kind === 'link', [kind]);
+  const canSubmit = useMemo(
+    () => !!uid && !!label.trim() && !!value.trim(),
+    [uid, label, value],
+  );
 
+  // Load initial: all memories for owner
   useEffect(() => {
     if (!uid) return;
     (async () => {
-      setLoading(true);
-      try {
-        const data = await listByKind(uid, kind);
-        setItems(data);
-      } catch (e: any) {
-        console.error('Load memories error:', e?.message);
-        Alert.alert('Error', e?.message ?? 'Could not load memories.');
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, [uid, kind]);
-
-  const resetForm = () => {
-    setLabel('');
-    setValue('');
-    setNotes('');
-  };
-
-  const onAdd = async () => {
-    if (!uid) return;
-    if (!label.trim()) {
-      Alert.alert('Add memory', 'Please enter a title/label.');
-      return;
-    }
-    try {
-      setLoading(true);
-      await addMemory(uid, {
-        kind,
-        label: label.trim(),
-        value: value.trim(),
-        notes: notes.trim(),
-      });
-      resetForm();
-      const data = await listByKind(uid, kind);
+      const data = await listByOwner(uid);
       setItems(data);
-    } catch (e: any) {
-      console.error('Add memory error:', e?.message);
-      Alert.alert('Error', e?.message ?? 'Could not add the memory.');
-    } finally {
-      setLoading(false);
+    })();
+  }, [uid]);
+
+  async function reloadByKind(nextKind?: MemoryKind) {
+    if (!uid) return;
+    if (nextKind) {
+      const data = await listByKind(uid, nextKind);
+      setItems(data);
+    } else {
+      const data = await listByOwner(uid);
+      setItems(data);
     }
-  };
+  }
 
-  const onDelete = (id: string) => {
-    Alert.alert('Delete', 'Delete this memory?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            setLoading(true);
-            await deleteMemory(uid, id);
-            const data = await listByKind(uid, kind);
-            setItems(data);
-          } catch (e: any) {
-            console.error('Delete memory error:', e?.message);
-            Alert.alert('Error', e?.message ?? 'Could not delete memory.');
-          } finally {
-            setLoading(false);
-          }
-        },
-      },
-    ]);
-  };
-
-  const onInlineEdit = async (id: string, field: 'label' | 'notes', newVal: string) => {
+  async function onAdd() {
+    if (!canSubmit) return;
     try {
-      await updateMemory(uid, id, { [field]: newVal });
-      // Optimistic update in UI
-      setItems((prev) =>
-        prev.map((m) => (m.id === id ? { ...m, [field]: newVal } as Memory : m)),
-      );
+      await addMemory(uid, { kind, label: label.trim(), value: value.trim(), notes: notes.trim() });
+      setLabel('');
+      setValue('');
+      setNotes('');
+      await reloadByKind(kind);
     } catch (e: any) {
-      console.error('Update memory error:', e?.message);
-      Alert.alert('Error', e?.message ?? 'Could not save your change.');
+      Alert.alert('Error', e?.message ?? 'Failed to add memory');
     }
-  };
+  }
 
-  const renderItem = ({ item }: { item: Memory }) => {
-    return (
-      <View style={styles.card}>
-        <TextInput
-          style={styles.title}
-          value={item.label}
-          placeholder="Title…"
-          onChangeText={(t) => onInlineEdit(item.id, 'label', t)}
-        />
+  async function onDelete(id: string) {
+    try {
+      await deleteMemory(id);
+      setItems((prev) => prev.filter((m) => m.id !== id));
+    } catch (e: any) {
+      Alert.alert('Error', e?.message ?? 'Failed to delete memory');
+    }
+  }
 
-        {!!item.value && (
-          <Text style={styles.value} numberOfLines={2}>
-            {item.value}
-          </Text>
-        )}
-
-        <TextInput
-          style={styles.notes}
-          value={item.notes ?? ''}
-          placeholder="Notes…"
-          multiline
-          onChangeText={(t) => onInlineEdit(item.id, 'notes', t)}
-        />
-
-        <TouchableOpacity style={styles.deleteBtn} onPress={() => onDelete(item.id)}>
-          <Text style={styles.deleteText}>Delete</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  };
+  async function onQuickRename(m: Memory) {
+    try {
+      await updateMemory(m.id, { label: m.label + ' ✨' });
+      setItems((prev) => prev.map((it) => (it.id === m.id ? { ...it, label: it.label + ' ✨' } : it)));
+    } catch (e: any) {
+      Alert.alert('Error', e?.message ?? 'Failed to update memory');
+    }
+  }
 
   return (
     <KeyboardAvoidingView
       style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      behavior={Platform.select({ ios: 'padding', android: undefined })}
     >
-      {/* Kind Tabs */}
-      <View style={styles.tabs}>
-        {KINDS.map((k) => {
-          const active = k === kind;
-          return (
-            <TouchableOpacity
-              key={k}
-              style={[styles.tab, active && styles.tabActive]}
-              onPress={() => setKind(k)}
-            >
-              <Text style={[styles.tabText, active && styles.tabTextActive]}>
-                {k.toUpperCase()}
-              </Text>
-            </TouchableOpacity>
-          );
-        })}
+      <Text style={styles.title}>Memory Vault</Text>
+
+      {/* Kind Selector */}
+      <View style={styles.kindsRow}>
+        {KINDS.map((k) => (
+          <TouchableOpacity
+            key={k}
+            style={[styles.kindBtn, kind === k && styles.kindBtnActive]}
+            onPress={async () => {
+              setKind(k);
+              await reloadByKind(k);
+            }}
+          >
+            <Text style={[styles.kindText, kind === k && styles.kindTextActive]}>{k}</Text>
+          </TouchableOpacity>
+        ))}
       </View>
 
-      {/* Add Form */}
-      <View style={styles.form}>
+      {/* Composer */}
+      <View style={styles.composer}>
         <TextInput
-          style={styles.input}
+          placeholder="Title / label"
+          placeholderTextColor="#999"
           value={label}
-          placeholder={`Add a ${kind} title…`}
           onChangeText={setLabel}
-        />
-        <TextInput
           style={styles.input}
-          value={value}
-          placeholder={isLink ? 'Paste a link…' : 'Extra value (optional)…'}
-          onChangeText={setValue}
-          autoCapitalize="none"
         />
         <TextInput
-          style={[styles.input, styles.multiline]}
+          placeholder={kind === 'link' ? 'https://example.com' : 'Value / details'}
+          placeholderTextColor="#999"
+          value={value}
+          onChangeText={setValue}
+          style={styles.input}
+        />
+        <TextInput
+          placeholder="Notes (optional)"
+          placeholderTextColor="#999"
           value={notes}
-          placeholder="Notes (optional)…"
           onChangeText={setNotes}
+          style={[styles.input, { height: 72 }]}
           multiline
         />
 
         <TouchableOpacity
-          disabled={loading}
-          style={[styles.addBtn, loading && { opacity: 0.7 }]}
+          disabled={!canSubmit}
           onPress={onAdd}
+          style={[styles.addBtn, !canSubmit && { opacity: 0.5 }]}
         >
-          <Text style={styles.addBtnText}>{loading ? 'Saving…' : 'Add memory'}</Text>
+          <Text style={styles.addText}>Add memory</Text>
         </TouchableOpacity>
-        <Text style={styles.hint}>
-          Tip: use “LINK” for URLs; “IDEA” for date ideas or gifts you might buy later.
-        </Text>
       </View>
 
       {/* List */}
       <FlatList
+        style={{ flex: 1 }}
         data={items}
         keyExtractor={(m) => m.id}
-        contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 24 }}
-        ListEmptyComponent={
-          <Text style={styles.empty}>{loading ? 'Loading…' : 'No memories yet.'}</Text>
-        }
-        renderItem={renderItem}
+        ItemSeparatorComponent={() => <View style={{ height: 8 }} />}
+        ListEmptyComponent={<Text style={styles.empty}>No memories yet — add your first one!</Text>}
+        renderItem={({ item }) => (
+          <View style={styles.card}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.cardTitle}>{item.label}</Text>
+              <Text style={styles.cardMeta}>{item.kind} • {item.value}</Text>
+              {!!item.notes && <Text style={styles.cardNotes}>{item.notes}</Text>}
+            </View>
+            <View style={styles.cardActions}>
+              <TouchableOpacity style={styles.smallBtn} onPress={() => onQuickRename(item)}>
+                <Text style={styles.smallBtnText}>Edit</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.smallBtn, { backgroundColor: '#E65050' }]} onPress={() => onDelete(item.id)}>
+                <Text style={styles.smallBtnText}>Delete</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
       />
     </KeyboardAvoidingView>
   );
 }
 
-const PURPLE = '#5B58FF';
-const RED = '#E44';
-
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F5F6FA' },
-  tabs: {
-    flexDirection: 'row',
-    gap: 8,
-    paddingHorizontal: 16,
-    paddingTop: 16,
-  },
-  tab: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 10,
-    backgroundColor: '#E7E7FF',
-  },
-  tabActive: { backgroundColor: PURPLE },
-  tabText: { color: '#333', fontWeight: '700' },
-  tabTextActive: { color: '#fff' },
+  container: { flex: 1, paddingHorizontal: 16, paddingTop: 16, backgroundColor: '#fff' },
+  title: { fontSize: 28, fontWeight: '800', marginBottom: 12, color: '#333' },
 
-  form: { padding: 16, gap: 8 },
+  kindsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 10 },
+  kindBtn: { borderWidth: 1, borderColor: '#C7C5FF', borderRadius: 20, paddingHorizontal: 12, paddingVertical: 6 },
+  kindBtnActive: { backgroundColor: '#5B58FF', borderColor: '#5B58FF' },
+  kindText: { color: '#5B58FF', fontWeight: '700' },
+  kindTextActive: { color: '#fff' },
+
+  composer: { gap: 8, marginBottom: 12 },
   input: {
-    backgroundColor: '#fff',
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#E0E3FF',
+    borderWidth: 1, borderColor: '#E2E2F2', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10, color: '#333',
   },
-  multiline: { minHeight: 64, textAlignVertical: 'top' },
-  addBtn: {
-    marginTop: 4,
-    backgroundColor: PURPLE,
-    paddingVertical: 12,
-    borderRadius: 12,
-    alignItems: 'center',
-  },
-  addBtnText: { color: '#fff', fontWeight: '800' },
-  hint: { marginTop: 6, color: '#6B7280', fontSize: 12 },
+  addBtn: { backgroundColor: '#5B58FF', alignSelf: 'flex-start', paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10 },
+  addText: { color: '#fff', fontWeight: '800' },
 
   empty: { textAlign: 'center', color: '#777', marginTop: 24 },
 
   card: {
-    backgroundColor: '#fff',
-    padding: 14,
-    borderRadius: 14,
-    marginTop: 10,
+    flexDirection: 'row',
+    padding: 12,
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#E6E9FF',
+    borderColor: '#EEE',
+    backgroundColor: '#FAFAFF',
   },
-  title: {
-    fontSize: 16,
-    fontWeight: '700',
-    marginBottom: 6,
-  },
-  value: { color: '#333', marginBottom: 6 },
-  notes: {
-    minHeight: 40,
-    textAlignVertical: 'top',
-    color: '#444',
-    marginBottom: 8,
-  },
-  deleteBtn: {
-    alignSelf: 'flex-start',
-    backgroundColor: '#FCE7E7',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 8,
-  },
-  deleteText: { color: RED, fontWeight: '700' },
+  cardTitle: { fontSize: 16, fontWeight: '800', color: '#333' },
+  cardMeta: { marginTop: 4, color: '#666' },
+  cardNotes: { marginTop: 6, color: '#444' },
+  cardActions: { justifyContent: 'center', gap: 6, marginLeft: 8 },
+  smallBtn: { backgroundColor: '#5B58FF', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 8 },
+  smallBtnText: { color: '#fff', fontWeight: '700' },
 });

@@ -1,40 +1,37 @@
 // utils/reminders.ts
 import * as Notifications from 'expo-notifications';
 
-// Call once (App.tsx) – you already do this, but keep for reference:
-// Notifications.setNotificationHandler({
-//   handleNotification: async () => ({
-//     shouldShowAlert: true,
-//     shouldPlaySound: true,
-//     shouldSetBadge: false,
-//   }),
-// });
-
-/** fire once after N seconds */
-export async function remindInSeconds(seconds: number, title: string, body?: string) {
-  return Notifications.scheduleNotificationAsync({
-    content: { title, body },
-    trigger: { type: 'timeInterval', seconds, repeats: false },
-  });
+/** Shared entry point with a fully-typed trigger */
+export async function scheduleReminder(
+  content: Notifications.NotificationContentInput,
+  trigger: Notifications.NotificationTriggerInput,
+) {
+  return Notifications.scheduleNotificationAsync({ content, trigger });
 }
 
-/** fire every day at hour:minute (24h) */
-export async function remindDaily(hour: number, minute: number, title: string, body?: string) {
-  return Notifications.scheduleNotificationAsync({
-    content: { title, body },
-    trigger: { type: 'daily', hour, minute },
-  });
+/** After N seconds (optionally repeating) */
+export function triggerInSeconds(
+  seconds: number,
+  repeats = false,
+): Notifications.TimeIntervalTriggerInput {
+  return { type: 'timeInterval', seconds, repeats };
 }
 
-/** fire weekly on a specific weekday (1=Sun .. 7=Sat) at hour:minute */
-export async function remindWeekly(weekday: 1|2|3|4|5|6|7, hour: number, minute: number, title: string, body?: string) {
-  return Notifications.scheduleNotificationAsync({
-    content: { title, body },
-    trigger: { type: 'calendar', weekday, hour, minute, repeats: true },
-  });
+/** Every day at hour:minute (24h) */
+export function triggerDaily(hour: number, minute: number): Notifications.DailyTriggerInput {
+  return { type: 'daily', hour, minute };
 }
 
-/** cancel by id returned from scheduleNotificationAsync */
-export function cancelReminder(id: string) {
-  return Notifications.cancelScheduledNotificationAsync(id);
+/** Weekly: weekday 1=Sun..7=Sat; repeats true to keep firing */
+export function triggerWeekly(
+  weekday: 1 | 2 | 3 | 4 | 5 | 6 | 7,
+  hour: number,
+  minute: number,
+): Notifications.CalendarTriggerInput {
+  return { type: 'calendar', weekday, hour, minute, repeats: true };
+}
+
+/** On an exact Date */
+export function triggerOnDate(date: Date): Notifications.DateTriggerInput {
+  return { type: 'date', date };
 }

@@ -1,23 +1,20 @@
-// types.ts (project root)
+// types.ts
 
-export type MemoryKind = 'note' | 'reminder' | 'surprise';
+export type ID = string;
+
+/** Add any kinds you want to support in the UI */
+export type MemoryKind = 'note' | 'link' | 'idea' | 'gift' | 'photo';
 
 export interface Memory {
-  id: string;
-  ownerId: string;
+  id: ID;
+  ownerId: ID;
   kind: MemoryKind;
-  label: string;
-  value?: string;   // free text (note) or details for reminder/surprise
+  label: string;        // visible title/name
+  value: string;        // body/url/etc depending on kind
   notes?: string;
-  link?: string;
-  createdAt: number; // Date.now()
-}
-
-export interface AddMemoryInput {
-  ownerId: string;
-  kind: MemoryKind;
-  label: string;
-  value?: string;
-  notes?: string;
-  link?: string;
+  link?: string;        // convenience field for 'link'
+  gift?: string;        // convenience field for 'gift'
+  idea?: string;        // convenience field for 'idea'
+  createdAt: number;    // millis (read from serverTimestamp)
+  updatedAt?: number;   // millis
 }
