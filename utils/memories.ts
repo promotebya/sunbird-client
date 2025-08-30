@@ -6,109 +6,35 @@ import {
     deleteDoc,
     doc,
     getDocs,
+    onSnapshot,
     orderBy,
     query,
     serverTimestamp,
-    updateDoc,
     where,
 } from 'firebase/firestore';
 import { db } from '../firebase/firebaseConfig';
-import type { Memory, MemoryKind, MemoryReminder, NewMemory } from '../types';
+import { AddMemoryInput, Memory, MemoryKind } from '../types';
 
-/* Collection ref */
 const coll = collection(db, 'memories');
 
-/* ---------- Notification helpers ---------- */
-
-async function scheduleReminder(rem?: MemoryReminder): Promise<string | undefined> {
-  if (!rem || rem.type === 'none') return undefined;
-
-  // Ask once for permissions (no-op if already granted)
-  const settings = await Notifications.getPermissionsAsync();
-  if (!settings.granted) {
-    const req = await Notifications.requestPermissionsAsync();
-    if (!req.granted) return undefined;
-  }
-
-  // Build the trigger in the shape expo-notifications expects (no 'type' field)
-  let trigger: Notifications.NotificationTriggerInput;
-
-  if (rem.type === 'date' && rem.date) {
-    trigger = new Date(rem.date);
-  } else if (rem.type === 'interval' && rem.seconds) {
-    trigger = { seconds: rem.seconds, repeats: rem.repeats ?? true } satisfies Notifications.TimeIntervalTriggerInput;
-  } else if (rem.type === 'daily' && rem.hour !== undefined && rem.minute !== undefined) {
-    trigger = { hour: rem.hour, minute: rem.minute, repeats: true } satisfies Notifications.DailyTriggerInput;
-  } else {
-    return undefined;
-  }
-
-  const id = await Notifications.scheduleNotificationAsync({
-    content: {
-      title: 'Memory reminder',
-      body: 'Time to reflect ❤️',
-      sound: true,
-    },
-    trigger,
+export async function addMemory(input: AddMemoryInput): Promise<string> {
+  const docRef = await addDoc(coll, {
+    ...input,
+    createdAt: serverTimestamp(),
   });
-
-  return id;
+  return docRef.id;
 }
 
-async function cancelReminder(notificationId?: string) {
-  if (notificationId) {
-    try {
-      await Notifications.cancelScheduledNotificationAsync(notificationId);
-    } catch {
-      // ignore
-    }
-  }
+export function listenMemories(ownerId: string, cb: (items: Memory[]) => void) {
+  const q = query(coll, where('ownerId', '==', ownerId), orderBy('createdAt', 'desc'));
+  return onSnapshot(q, (snap) => {
+    const items = snap.docs.map(
+      (d) => ({ id: d.id, ...(d.data() as any) } as Memory),
+    );
+    cb(items);
+  });
 }
 
-/* ---------- CRUD ---------- */
-
-// Create: util adds ownerId & createdAt; returns Memory
-export async function addMemory(ownerId: string, data: NewMemory): Promise<Memory> {
-  // schedule (if any)
-  const notificationId = await scheduleReminder(data.reminder);
-
-  const record = {
-    ...data,
-    ownerId,
-    createdAt: Date.now(),
-    // store only the notificationId back on reminder
-    reminder: data.reminder ? { ...data.reminder, notificationId } : undefined,
-    // server timestamp for ordering consistency
-    createdAtServer: serverTimestamp(),
-  };
-
-  const ref = await addDoc(coll, record);
-  const mem: Memory = {
-    id: ref.id,
-    ownerId,
-    kind: data.kind,
-    label: data.label,
-    value: data.value,
-    notes: data.notes,
-    link: data.link,
-    favorite: data.favorite ?? false,
-    createdAt: record.createdAt,
-    reminder: record.reminder,
-  };
-
-  return mem;
-}
-
-export async function deleteMemory(id: string, reminder?: MemoryReminder) {
-  await cancelReminder(reminder?.notificationId);
-  await deleteDoc(doc(coll, id));
-}
-
-export async function toggleFavorite(id: string, value: boolean) {
-  await updateDoc(doc(coll, id), { favorite: value });
-}
-
-// List by kind for a user
 export async function listByKind(ownerId: string, kind: MemoryKind): Promise<Memory[]> {
   const q = query(
     coll,
@@ -117,5 +43,39 @@ export async function listByKind(ownerId: string, kind: MemoryKind): Promise<Mem
     orderBy('createdAt', 'desc'),
   );
   const snap = await getDocs(q);
-  return snap.docs.map(d => ({ id: d.id, ...(d.data() as any) })) as Memory[];
+  return snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) } as Memory));
+}
+
+export async function deleteMemory(id: string) {
+  await deleteDoc(doc(db, 'memories', id));
+}
+
+/* ---------------- Notifications helpers ----------------
+   NOTE: we cast triggers to `any` to be compatible across Expo SDKs.
+   You still get the correct runtime behaviour.
+*/
+
+export async function scheduleOneOff(date: Date, title: string, body?: string) {
+  await Notifications.scheduleNotificationAsync({
+    content: { title, body },
+    // SDKs vary: sometimes `trigger: date` is allowed, sometimes `{ date }`
+    // Cast to any for compatibility.
+    trigger: { date } as any,
+  });
+}
+
+export async function scheduleDaily(hour: number, minute: number, title: string, body?: string) {
+  await Notifications.scheduleNotificationAsync({
+    content: { title, body },
+    // Calendar/daily trigger
+    trigger: { hour, minute, repeats: true } as any,
+  });
+}
+
+export async function scheduleInSeconds(seconds: number, title: string, body?: string) {
+  await Notifications.scheduleNotificationAsync({
+    content: { title, body },
+    // Time interval trigger
+    trigger: { seconds, repeats: false } as any,
+  });
 }
