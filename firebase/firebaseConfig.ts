@@ -1,9 +1,10 @@
 // firebase/firebaseConfig.ts
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { initializeApp } from 'firebase/app';
-import { getAuth } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
+// IMPORTANT: in RN with v9.22.x use the react-native path:
+import { getReactNativePersistence, initializeAuth } from 'firebase/auth/react-native';
 
-// ⚠️ Your existing config (keep it as-is)
 const firebaseConfig = {
   apiKey: 'AIzaSyA9GMS43chgVSHXCH7i0A8FgACapq7uC38',
   authDomain: 'lovepointsapp-23880.firebaseapp.com',
@@ -14,6 +15,10 @@ const firebaseConfig = {
   measurementId: 'G-2PCYJEGDT5',
 };
 
-export const app = initializeApp(firebaseConfig);
-export const auth = getAuth(app);           // using default persistence for now
+const app = initializeApp(firebaseConfig);
+
+export const auth = initializeAuth(app, {
+  persistence: getReactNativePersistence(AsyncStorage),
+});
+
 export const db = getFirestore(app);

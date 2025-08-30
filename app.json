@@ -2,31 +2,33 @@
   "expo": {
     "name": "LovePointsApp",
     "slug": "LovePointsApp",
+    "scheme": "lovepoints",
     "version": "1.0.0",
-    "sdkVersion": "53.0.0",
-    "platforms": ["ios", "android"],
-    "jsEngine": "hermes",
-    "entryPoint": "./index.js",
-    "extra": {
-      "eas": {
-        "projectId": "d791c6d2-2f30-4b8e-b5b6-0f52eb421bf3"
-      }
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
     },
+    "updates": {
+      "fallbackToCacheTimeout": 0
+    },
+    "assetBundlePatterns": ["**/*"],
     "ios": {
-      "bundleIdentifier": "com.promotebya.LovePointsApp",
-      "infoPlist": {
-        "ITSAppUsesNonExemptEncryption": false
+      "supportsTablet": true,
+      "bundleIdentifier": "com.yourcompany.lovepoints"
+    },
+    "android": {
+      "package": "com.yourcompany.lovepoints",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#FFFFFF"
       }
     },
     "plugins": [
-      [
-        "expo-build-properties",
-        {
-          "ios": {
-            "useFrameworks": "static"
-          }
-        }
-      ]
+      "expo-notifications"
     ]
   }
 }
