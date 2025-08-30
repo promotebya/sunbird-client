@@ -1,104 +1,121 @@
 // utils/memories.ts
+import * as Notifications from 'expo-notifications';
 import {
     addDoc,
     collection,
     deleteDoc,
     doc,
-    DocumentData,
     getDocs,
-    onSnapshot,
     orderBy,
     query,
-    QueryDocumentSnapshot,
     serverTimestamp,
-    Timestamp,
     updateDoc,
     where,
 } from 'firebase/firestore';
 import { db } from '../firebase/firebaseConfig';
-import type { Memory, MemoryInput, MemoryKind, MemoryPatch } from '../types';
+import type { Memory, MemoryKind, MemoryReminder, NewMemory } from '../types';
 
+/* Collection ref */
 const coll = collection(db, 'memories');
 
-function toDate(v: any): Date | null {
-  if (!v) return null;
-  if (typeof v === 'object' && 'toDate' in v) return (v as Timestamp).toDate();
-  return v instanceof Date ? v : null;
+/* ---------- Notification helpers ---------- */
+
+async function scheduleReminder(rem?: MemoryReminder): Promise<string | undefined> {
+  if (!rem || rem.type === 'none') return undefined;
+
+  // Ask once for permissions (no-op if already granted)
+  const settings = await Notifications.getPermissionsAsync();
+  if (!settings.granted) {
+    const req = await Notifications.requestPermissionsAsync();
+    if (!req.granted) return undefined;
+  }
+
+  // Build the trigger in the shape expo-notifications expects (no 'type' field)
+  let trigger: Notifications.NotificationTriggerInput;
+
+  if (rem.type === 'date' && rem.date) {
+    trigger = new Date(rem.date);
+  } else if (rem.type === 'interval' && rem.seconds) {
+    trigger = { seconds: rem.seconds, repeats: rem.repeats ?? true } satisfies Notifications.TimeIntervalTriggerInput;
+  } else if (rem.type === 'daily' && rem.hour !== undefined && rem.minute !== undefined) {
+    trigger = { hour: rem.hour, minute: rem.minute, repeats: true } satisfies Notifications.DailyTriggerInput;
+  } else {
+    return undefined;
+  }
+
+  const id = await Notifications.scheduleNotificationAsync({
+    content: {
+      title: 'Memory reminder',
+      body: 'Time to reflect ❤️',
+      sound: true,
+    },
+    trigger,
+  });
+
+  return id;
 }
 
-function fromSnap(s: QueryDocumentSnapshot<DocumentData>): Memory {
-  const raw = s.data() || {};
-  return {
-    id: s.id,
-    ownerId: raw.ownerId,
-    kind: raw.kind,
-    label: raw.label ?? '',
-    value: raw.value ?? '',
-    notes: raw.notes ?? '',
-    link: raw.link ?? '',
-    date: toDate(raw.date),
-    remindOn: toDate(raw.remindOn),
-    createdAt: toDate(raw.createdAt),
-    updatedAt: toDate(raw.updatedAt),
-  } as Memory;
+async function cancelReminder(notificationId?: string) {
+  if (notificationId) {
+    try {
+      await Notifications.cancelScheduledNotificationAsync(notificationId);
+    } catch {
+      // ignore
+    }
+  }
 }
 
-export function listenMemories(
-  ownerId: string,
-  opts: { kind?: MemoryKind | 'all' },
-  cb: (rows: Memory[]) => void
-) {
-  const filters = [where('ownerId', '==', ownerId)];
-  if (opts.kind && opts.kind !== 'all') filters.push(where('kind', '==', opts.kind));
-  const q = query(coll, ...filters, orderBy('createdAt', 'desc'));
-  return onSnapshot(q, (snap) => cb(snap.docs.map(fromSnap)));
-}
+/* ---------- CRUD ---------- */
 
-export async function listByKind(
-  ownerId: string,
-  kind: MemoryKind | 'all' = 'all'
-): Promise<Memory[]> {
-  const filters = [where('ownerId', '==', ownerId)];
-  if (kind !== 'all') filters.push(where('kind', '==', kind));
-  const q = query(coll, ...filters, orderBy('createdAt', 'desc'));
-  const snap = await getDocs(q);
-  return snap.docs.map(fromSnap);
-}
+// Create: util adds ownerId & createdAt; returns Memory
+export async function addMemory(ownerId: string, data: NewMemory): Promise<Memory> {
+  // schedule (if any)
+  const notificationId = await scheduleReminder(data.reminder);
 
-export async function addMemory(ownerId: string, input: MemoryInput) {
-  const payload: any = {
+  const record = {
+    ...data,
     ownerId,
-    kind: input.kind,
-    label: input.label ?? '',
-    value: input.value ?? '',
-    notes: input.notes ?? '',
-    link: input.link ?? '',
-    date: input.date ? Timestamp.fromDate(input.date) : null,
-    remindOn: input.remindOn ? Timestamp.fromDate(input.remindOn) : null,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
+    createdAt: Date.now(),
+    // store only the notificationId back on reminder
+    reminder: data.reminder ? { ...data.reminder, notificationId } : undefined,
+    // server timestamp for ordering consistency
+    createdAtServer: serverTimestamp(),
   };
-  const ref = await addDoc(coll, payload);
-  return ref.id;
+
+  const ref = await addDoc(coll, record);
+  const mem: Memory = {
+    id: ref.id,
+    ownerId,
+    kind: data.kind,
+    label: data.label,
+    value: data.value,
+    notes: data.notes,
+    link: data.link,
+    favorite: data.favorite ?? false,
+    createdAt: record.createdAt,
+    reminder: record.reminder,
+  };
+
+  return mem;
 }
 
-export async function updateMemory(id: string, patch: MemoryPatch) {
-  const ref = doc(db, 'memories', id);
-  const payload: any = {
-    ...('label' in patch ? { label: patch.label } : {}),
-    ...('value' in patch ? { value: patch.value } : {}),
-    ...('notes' in patch ? { notes: patch.notes } : {}),
-    ...('link' in patch ? { link: patch.link } : {}),
-    ...('kind' in patch ? { kind: patch.kind } : {}),
-    ...('date' in patch ? { date: patch.date ? Timestamp.fromDate(patch.date) : null } : {}),
-    ...('remindOn' in patch
-      ? { remindOn: patch.remindOn ? Timestamp.fromDate(patch.remindOn) : null }
-      : {}),
-    updatedAt: serverTimestamp(),
-  };
-  await updateDoc(ref, payload);
+export async function deleteMemory(id: string, reminder?: MemoryReminder) {
+  await cancelReminder(reminder?.notificationId);
+  await deleteDoc(doc(coll, id));
 }
 
-export async function deleteMemory(id: string) {
-  await deleteDoc(doc(db, 'memories', id));
+export async function toggleFavorite(id: string, value: boolean) {
+  await updateDoc(doc(coll, id), { favorite: value });
+}
+
+// List by kind for a user
+export async function listByKind(ownerId: string, kind: MemoryKind): Promise<Memory[]> {
+  const q = query(
+    coll,
+    where('ownerId', '==', ownerId),
+    where('kind', '==', kind),
+    orderBy('createdAt', 'desc'),
+  );
+  const snap = await getDocs(q);
+  return snap.docs.map(d => ({ id: d.id, ...(d.data() as any) })) as Memory[];
 }

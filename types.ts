@@ -1,29 +1,38 @@
 // types.ts
 
-export type MemoryKind =
-  | 'favorite'
-  | 'size'
-  | 'allergy'
-  | 'date'
-  | 'gift'
-  | 'wishlist'
-  | 'note';
+/* ---------- Memory Vault ---------- */
 
-export type Memory = {
+export type MemoryKind = 'win' | 'gratitude' | 'appreciation' | 'idea';
+
+export type ReminderKind = 'none' | 'date' | 'interval' | 'daily';
+
+// Stored with a memory (only applicable fields are set)
+export type MemoryReminder = {
+  type: ReminderKind;
+  // 'date'
+  date?: number; // ms epoch (Date.now())
+  // 'interval'
+  seconds?: number; // every N seconds
+  repeats?: boolean;
+  // 'daily'
+  hour?: number;
+  minute?: number;
+  // always optional
+  notificationId?: string; // expo notification id
+};
+
+export interface Memory {
   id: string;
   ownerId: string;
   kind: MemoryKind;
   label: string;
-  value?: string;
+  value: string;
   notes?: string;
   link?: string;
-  date?: Date | null;
-  remindOn?: Date | null;
-  createdAt?: Date | null;
-  updatedAt?: Date | null;
-};
+  favorite?: boolean;
+  createdAt: number; // ms epoch
+  reminder?: MemoryReminder;
+}
 
-export type MemoryInput = Omit<Memory, 'id' | 'createdAt' | 'updatedAt'>;
-export type MemoryPatch = Partial<
-  Omit<Memory, 'id' | 'ownerId' | 'createdAt' | 'updatedAt'>
->;
+// When creating from the UI, you don’t provide id/ownerId/createdAt
+export type NewMemory = Omit<Memory, 'id' | 'ownerId' | 'createdAt'>;

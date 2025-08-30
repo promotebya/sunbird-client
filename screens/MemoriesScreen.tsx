@@ -1,336 +1,335 @@
 // screens/MemoriesScreen.tsx
-import * as Notifications from 'expo-notifications';
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   FlatList,
   KeyboardAvoidingView,
   Platform,
+  Pressable,
   StyleSheet,
   Text,
   TextInput,
-  TouchableOpacity,
   View,
 } from 'react-native';
+import useAuthListener from '../hooks/useAuthListener';
+import type { Memory, MemoryKind, MemoryReminder, NewMemory, ReminderKind } from '../types';
+import { addMemory, deleteMemory, listByKind, toggleFavorite } from '../utils/memories';
 
-import useAuthListener from '../hooks/useAuthListener'; // default export returning { user, loading }
-import type { Memory, MemoryKind } from '../types';
-import { addMemory, deleteMemory, listenMemories } from '../utils/memories';
-
-type TabKey = MemoryKind | 'all';
-
-const TABS: { key: TabKey; label: string }[] = [
-  { key: 'all', label: 'All' },
-  { key: 'favorite', label: 'Favorites' },
-  { key: 'size', label: 'Sizes' },
-  { key: 'allergy', label: 'Allergies' },
-  { key: 'date', label: 'Dates' },
-  { key: 'gift', label: 'Gifts' },
-  { key: 'wishlist', label: 'Wishlist' },
-  { key: 'note', label: 'Notes' },
-];
+const KINDS: MemoryKind[] = ['win', 'gratitude', 'appreciation', 'idea'];
 
 export default function MemoriesScreen() {
   const { user } = useAuthListener();
-  const ownerId = user?.uid ?? '';
-  const [tab, setTab] = useState<TabKey>('all');
-  const [items, setItems] = useState<Memory[]>([]);
+  const uid = user?.uid ?? '';
 
-  // form state
-  const [kind, setKind] = useState<MemoryKind>('favorite');
+  const [kind, setKind] = useState<MemoryKind>('win');
+
+  // form
   const [label, setLabel] = useState('');
   const [value, setValue] = useState('');
   const [notes, setNotes] = useState('');
   const [link, setLink] = useState('');
-  const [dateText, setDateText] = useState('');
-  const [remindText, setRemindText] = useState('');
+  const [remType, setRemType] = useState<ReminderKind>('none');
+  const [remDate, setRemDate] = useState<Date>(new Date(Date.now() + 60 * 60 * 1000)); // +1h
+  const [remSeconds, setRemSeconds] = useState('3600'); // string input
+  const [remHour, setRemHour] = useState('20');
+  const [remMinute, setRemMinute] = useState('0');
 
-  const unsubRef = useRef<(() => void) | undefined>(undefined);
+  // list
+  const [items, setItems] = useState<Memory[]>([]);
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (!ownerId) return;
-    unsubRef.current?.();
-    unsubRef.current = listenMemories(ownerId, { kind: tab }, setItems);
-    return () => unsubRef.current?.();
-  }, [ownerId, tab]);
+    if (!uid) return;
+    let mounted = true;
 
-  const canSubmit = useMemo(() => !!ownerId && !!label.trim(), [ownerId, label]);
-
-  const parseDate = (s: string): Date | null => {
-    if (!s) return null;
-    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s.trim());
-    if (!m) return null;
-    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-    return isNaN(d.getTime()) ? null : d;
-  };
-
-  const onAdd = async () => {
-    try {
-      if (!canSubmit) return;
-
-      const date = parseDate(dateText) ?? undefined;
-      const remindOn = parseDate(remindText) ?? undefined;
-
-      const id = await addMemory(ownerId, {
-        kind,
-        label: label.trim(),
-        value: value.trim(),
-        notes: notes.trim(),
-        link: link.trim(),
-        date,
-        remindOn,
-      });
-
-      // Expo SDK 52+ trigger types:
-      if (remindOn) {
-        await Notifications.scheduleNotificationAsync({
-          content: { title: 'Remember 💜', body: label.trim(), sound: true },
-          trigger: { type: 'date', date: remindOn },
-        });
+    (async () => {
+      setLoading(true);
+      try {
+        const data = await listByKind(uid, kind); // ✅ ownerId first, then kind
+        if (mounted) setItems(data);
+      } catch (e: any) {
+        console.error(e);
+        Alert.alert('Error', e?.message ?? 'Failed to load memories');
+      } finally {
+        if (mounted) setLoading(false);
       }
+    })();
 
+    return () => {
+      mounted = false;
+    };
+  }, [uid, kind]);
+
+  const reminder: MemoryReminder | undefined = useMemo(() => {
+    if (remType === 'none') return undefined;
+    if (remType === 'date') {
+      return { type: 'date', date: remDate.getTime() };
+    }
+    if (remType === 'interval') {
+      const secs = Number(remSeconds) || 0;
+      if (secs <= 0) return { type: 'none' };
+      return { type: 'interval', seconds: secs, repeats: true };
+    }
+    // daily
+    return {
+      type: 'daily',
+      hour: Math.max(0, Math.min(23, Number(remHour) || 0)),
+      minute: Math.max(0, Math.min(59, Number(remMinute) || 0)),
+    };
+  }, [remType, remDate, remSeconds, remHour, remMinute]);
+
+  async function onAdd() {
+    if (!uid) return;
+    if (!label.trim() && !value.trim()) {
+      Alert.alert('Add something', 'Type at least a label or a value.');
+      return;
+    }
+    const payload: NewMemory = {
+      kind,
+      label: label.trim(),
+      value: value.trim(),
+      notes: notes.trim() || undefined,
+      link: link.trim() || undefined,
+      favorite: false,
+      reminder,
+    };
+    try {
+      const created = await addMemory(uid, payload); // ✅ ownerId is set in util
+      setItems(prev => [created, ...prev]);
       setLabel('');
       setValue('');
       setNotes('');
       setLink('');
-      setDateText('');
-      setRemindText('');
+      setRemType('none');
+      Alert.alert('Saved', 'Memory added');
     } catch (e: any) {
-      Alert.alert('Error', e?.message ?? String(e));
+      console.error(e);
+      Alert.alert('Error', e?.message ?? 'Could not save memory');
     }
-  };
+  }
 
-  const onQuickRemind = async (m: Memory) => {
+  async function onDelete(m: Memory) {
     try {
-      await Notifications.scheduleNotificationAsync({
-        content: { title: 'Quick reminder 💌', body: m.label, sound: true },
-        trigger: { type: 'timeInterval', seconds: 24 * 60 * 60, repeats: false },
-      });
-      Alert.alert('Scheduled', 'We’ll remind you in ~24 hours.');
+      await deleteMemory(m.id, m.reminder);
+      setItems(prev => prev.filter(x => x.id !== m.id));
     } catch (e: any) {
-      Alert.alert('Error', e?.message ?? String(e));
+      console.error(e);
+      Alert.alert('Error', e?.message ?? 'Could not delete memory');
     }
-  };
+  }
 
-  const onDelete = (m: Memory) => {
-    Alert.alert('Delete memory', `Delete “${m.label}”?`, [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            await deleteMemory(m.id);
-          } catch (e: any) {
-            Alert.alert('Error', e?.message ?? String(e));
-          }
-        },
-      },
-    ]);
-  };
-
-  const renderItem = ({ item }: { item: Memory }) => (
-    <View style={styles.card}>
-      <View style={{ flex: 1 }}>
-        <Text style={styles.cardTitle}>{item.label}</Text>
-        {!!item.value && <Text style={styles.cardMeta}>{item.value}</Text>}
-        {!!item.notes && <Text style={styles.cardMeta}>{item.notes}</Text>}
-        {!!item.link && <Text style={styles.cardMeta}>{item.link}</Text>}
-        {!!item.date && (
-          <Text style={styles.cardMeta}>Date: {item.date.toISOString().slice(0, 10)}</Text>
-        )}
-        {!!item.remindOn && (
-          <Text style={styles.cardMeta}>
-            Reminder: {item.remindOn.toISOString().slice(0, 10)}
-          </Text>
-        )}
-      </View>
-      <View style={styles.cardActions}>
-        <TouchableOpacity
-          style={[styles.smallBtn, styles.remindBtn]}
-          onPress={() => onQuickRemind(item)}
-        >
-          <Text style={styles.smallBtnText}>Remind</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.smallBtn, styles.deleteBtn]}
-          onPress={() => onDelete(item)}
-        >
-          <Text style={styles.smallBtnText}>Delete</Text>
-        </TouchableOpacity>
-      </View>
-    </View>
-  );
+  async function onToggleFav(m: Memory) {
+    try {
+      await toggleFavorite(m.id, !m.favorite);
+      setItems(prev => prev.map(x => (x.id === m.id ? { ...x, favorite: !x.favorite } : x)));
+    } catch (e: any) {
+      console.error(e);
+    }
+  }
 
   return (
     <KeyboardAvoidingView
+      style={styles.container}
       behavior={Platform.select({ ios: 'padding', android: undefined })}
-      style={{ flex: 1 }}
     >
-      <View style={styles.container}>
-        <Text style={styles.h1}>Memories</Text>
+      <Text style={styles.h1}>Memories</Text>
 
-        {/* Tabs */}
-        <View style={styles.tabs}>
-          {TABS.map((t) => (
-            <TouchableOpacity
-              key={t.key}
-              style={[styles.tab, tab === t.key && styles.tabActive]}
-              onPress={() => setTab(t.key)}
+      {/* Kind tabs */}
+      <View style={styles.tabs}>
+        {KINDS.map(k => (
+          <Pressable
+            key={k}
+            onPress={() => setKind(k)}
+            style={[styles.tab, kind === k && styles.tabActive]}
+          >
+            <Text style={[styles.tabText, kind === k && styles.tabTextActive]}>
+              {k}
+            </Text>
+          </Pressable>
+        ))}
+      </View>
+
+      {/* Form */}
+      <View style={styles.card}>
+        <TextInput
+          placeholder="Label (e.g. 'Sweet message')"
+          value={label}
+          onChangeText={setLabel}
+          style={styles.input}
+        />
+        <TextInput
+          placeholder="Value / detail"
+          value={value}
+          onChangeText={setValue}
+          style={styles.input}
+        />
+        <TextInput
+          placeholder="Notes (optional)"
+          value={notes}
+          onChangeText={setNotes}
+          style={styles.input}
+        />
+        <TextInput
+          placeholder="Link (optional)"
+          value={link}
+          onChangeText={setLink}
+          style={styles.input}
+          autoCapitalize="none"
+        />
+
+        {/* Reminder quick selector */}
+        <View style={styles.remRow}>
+          {(['none', 'date', 'interval', 'daily'] as ReminderKind[]).map(r => (
+            <Pressable
+              key={r}
+              onPress={() => setRemType(r)}
+              style={[styles.smallBtn, remType === r && styles.smallBtnActive]}
             >
-              <Text style={[styles.tabText, tab === t.key && styles.tabTextActive]}>
-                {t.label}
-              </Text>
-            </TouchableOpacity>
+              <Text style={styles.smallBtnText}>{r}</Text>
+            </Pressable>
           ))}
         </View>
 
-        {/* Add form */}
-        <View style={styles.card}>
-          <Text style={styles.sectionTitle}>Add new</Text>
-
-          <View style={styles.kindsRow}>
-            {TABS.filter((t) => t.key !== 'all')
-              .slice(0, 6)
-              .map((t) => (
-                <TouchableOpacity
-                  key={t.key}
-                  style={[styles.kindPill, kind === t.key && styles.kindPillActive]}
-                  onPress={() => setKind(t.key as MemoryKind)}
-                >
-                  <Text style={[styles.kindText, kind === t.key && styles.kindTextActive]}>
-                    {t.label}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-          </View>
-
-          <TextInput
-            style={styles.input}
-            placeholder="Label (e.g., Favorite sushi, Ring size, Allergic to...)"
-            value={label}
-            onChangeText={setLabel}
-          />
-          <TextInput
-            style={styles.input}
-            placeholder="Value (e.g., salmon nigiri, EU 54, peanuts)"
-            value={value}
-            onChangeText={setValue}
-          />
-          <TextInput
-            style={styles.input}
-            placeholder="Link (optional)"
-            value={link}
-            onChangeText={setLink}
-            autoCapitalize="none"
-          />
-          <TextInput
-            style={styles.input}
-            placeholder="Notes (optional)"
-            value={notes}
-            onChangeText={setNotes}
-          />
-
-          <TextInput
-            style={styles.input}
-            placeholder="Date YYYY-MM-DD (optional)"
-            value={dateText}
-            onChangeText={setDateText}
-            autoCapitalize="none"
-          />
-          <TextInput
-            style={styles.input}
-            placeholder="Reminder YYYY-MM-DD (optional)"
-            value={remindText}
-            onChangeText={setRemindText}
-            autoCapitalize="none"
-          />
-
-          <TouchableOpacity
-            disabled={!canSubmit}
-            onPress={onAdd}
-            style={[styles.addBtn, !canSubmit && { opacity: 0.5 }]}
-          >
-            <Text style={styles.addBtnText}>Save memory</Text>
-          </TouchableOpacity>
-        </View>
-
-        {items.length === 0 ? (
-          <Text style={styles.empty}>No memories yet — add your first one!</Text>
-        ) : (
-          <FlatList
-            style={{ marginTop: 12 }}
-            data={items}
-            keyExtractor={(m) => m.id}
-            renderItem={renderItem}
-            contentContainerStyle={{ paddingBottom: 32 }}
-          />
+        {/* Minimal inputs for each reminder type (no extra libs) */}
+        {remType === 'date' && (
+          <Text style={styles.hint}>
+            Will remind on: {remDate.toLocaleString()}
+          </Text>
         )}
+        {remType === 'interval' && (
+          <View>
+            <TextInput
+              placeholder="Every N seconds (e.g. 3600)"
+              value={remSeconds}
+              onChangeText={setRemSeconds}
+              keyboardType="numeric"
+              style={styles.input}
+            />
+          </View>
+        )}
+        {remType === 'daily' && (
+          <View style={{ flexDirection: 'row', gap: 8 }}>
+            <TextInput
+              placeholder="Hour (0-23)"
+              value={remHour}
+              onChangeText={setRemHour}
+              keyboardType="numeric"
+              style={[styles.input, { flex: 1 }]}
+            />
+            <TextInput
+              placeholder="Minute (0-59)"
+              value={remMinute}
+              onChangeText={setRemMinute}
+              keyboardType="numeric"
+              style={[styles.input, { flex: 1 }]}
+            />
+          </View>
+        )}
+
+        <Pressable onPress={onAdd} style={[styles.btn, styles.addBtn]}>
+          <Text style={styles.btnText}>Save memory</Text>
+        </Pressable>
       </View>
+
+      {/* List */}
+      <FlatList
+        data={items}
+        keyExtractor={m => m.id}
+        refreshing={loading}
+        onRefresh={() => {
+          if (uid) listByKind(uid, kind).then(setItems).catch(() => {});
+        }}
+        ListEmptyComponent={
+          <Text style={styles.empty}>No memories yet — add your first one!</Text>
+        }
+        renderItem={({ item }) => (
+          <View style={styles.item}>
+            <Text style={styles.title}>
+              {item.label || '(no label)'}
+              {item.favorite ? ' ★' : ''}
+            </Text>
+            {!!item.value && <Text style={styles.meta}>{item.value}</Text>}
+            {!!item.notes && <Text style={styles.meta}>{item.notes}</Text>}
+            {!!item.link && <Text style={styles.meta}>{item.link}</Text>}
+
+            <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
+              <Pressable onPress={() => onToggleFav(item)} style={[styles.smallBtn, styles.editBtn]}>
+                <Text style={styles.smallBtnText}>{item.favorite ? 'Unfavorite' : 'Favorite'}</Text>
+              </Pressable>
+              <Pressable onPress={() => onDelete(item)} style={[styles.smallBtn, styles.deleteBtn]}>
+                <Text style={styles.smallBtnText}>Delete</Text>
+              </Pressable>
+            </View>
+          </View>
+        )}
+        contentContainerStyle={{ paddingBottom: 120 }}
+      />
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 16 },
-  h1: { fontSize: 28, fontWeight: '800', marginBottom: 8 },
-
-  tabs: {
-    flexDirection: 'row',
-    backgroundColor: '#F1EFFF',
-    padding: 4,
-    borderRadius: 10,
-    marginBottom: 12,
-    flexWrap: 'wrap',
-  },
-  tab: { paddingVertical: 8, paddingHorizontal: 12, borderRadius: 8, marginRight: 6, marginTop: 6 },
-  tabActive: { backgroundColor: '#5B58FF' },
-  tabText: { fontWeight: '700', color: '#444' },
-  tabTextActive: { color: '#fff' },
-
-  sectionTitle: { fontSize: 16, fontWeight: '700', marginBottom: 8 },
-  kindsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 8 },
-  kindPill: { paddingVertical: 6, paddingHorizontal: 10, borderRadius: 999, backgroundColor: '#EFEFFF' },
-  kindPillActive: { backgroundColor: '#DAD7FF' },
-  kindText: { fontSize: 12, fontWeight: '700', color: '#444' },
-  kindTextActive: { color: '#222' },
-
-  input: {
-    borderWidth: 1,
-    borderColor: '#CFCFEA',
-    borderRadius: 10,
+  container: { flex: 1, padding: 16, gap: 12 },
+  h1: { fontSize: 28, fontWeight: '800' },
+  tabs: { flexDirection: 'row', gap: 8 },
+  tab: {
     paddingHorizontal: 12,
-    paddingVertical: 10,
-    marginBottom: 8,
+    paddingVertical: 6,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#C7C5FF',
   },
-
-  addBtn: {
-    backgroundColor: '#6C63FF',
-    paddingVertical: 12,
-    alignItems: 'center',
-    borderRadius: 12,
-    marginTop: 6,
-  },
-  addBtnText: { color: '#fff', fontWeight: '800' },
-
+  tabActive: { backgroundColor: '#5B58FF' },
+  tabText: { fontWeight: '700' },
+  tabTextActive: { color: '#fff' },
   card: {
     backgroundColor: '#fff',
     borderRadius: 14,
     padding: 12,
-    marginTop: 8,
-    borderWidth: 1,
-    borderColor: '#EEE',
-    flexDirection: 'row',
-    gap: 10,
+    gap: 8,
+    shadowColor: '#000',
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 1,
   },
-  cardTitle: { fontSize: 16, fontWeight: '700', marginBottom: 2 },
-  cardMeta: { color: '#666', marginTop: 2, fontSize: 13 },
-  cardActions: { justifyContent: 'center', alignItems: 'flex-end', gap: 8 },
-
-  smallBtn: { paddingVertical: 6, paddingHorizontal: 10, borderRadius: 10 },
-  smallBtnText: { color: '#fff', fontWeight: '700' },
-  remindBtn: { backgroundColor: '#4E9C5F' },
+  input: {
+    borderWidth: 1,
+    borderColor: '#E4E4F5',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: Platform.OS === 'ios' ? 10 : 8,
+  },
+  remRow: { flexDirection: 'row', gap: 8, marginTop: 4 },
+  btn: {
+    paddingVertical: 12,
+    borderRadius: 12,
+    alignItems: 'center',
+    marginTop: 4,
+  },
+  addBtn: { backgroundColor: '#5B58FF' },
+  btnText: { color: '#fff', fontWeight: '700' },
+  smallBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#DDD',
+  },
+  smallBtnActive: { backgroundColor: '#EEE' },
+  editBtn: { backgroundColor: '#5B85FF' },
   deleteBtn: { backgroundColor: '#E65050' },
-
-  empty: { textAlign: 'center', marginTop: 24, color: '#777' },
+  smallBtnText: { color: '#fff', fontWeight: '700' },
+  empty: { textAlign: 'center', color: '#777', marginTop: 24 },
+  item: {
+    backgroundColor: '#fff',
+    borderRadius: 14,
+    padding: 12,
+    marginTop: 10,
+    shadowColor: '#000',
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    elevation: 1,
+  },
+  title: { fontSize: 16, fontWeight: '700' },
+  meta: { color: '#666', marginTop: 2 },
 });
