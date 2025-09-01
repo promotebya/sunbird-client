@@ -1,37 +1,75 @@
 // utils/reminders.ts
 import * as Notifications from 'expo-notifications';
 
-/** Shared entry point with a fully-typed trigger */
+// ---------- Thin wrapper so all scheduling goes through one place ----------
 export async function scheduleReminder(
   content: Notifications.NotificationContentInput,
-  trigger: Notifications.NotificationTriggerInput,
+  trigger: Notifications.NotificationTriggerInput
 ) {
+  // For your SDK typings, 'sound' is a string (e.g., 'default').
+  if (!('sound' in content)) {
+    content.sound = 'default' as any;
+  }
   return Notifications.scheduleNotificationAsync({ content, trigger });
 }
 
-/** After N seconds (optionally repeating) */
+export async function cancelReminder(id: string) {
+  try {
+    await Notifications.cancelScheduledNotificationAsync(id);
+  } catch {}
+}
+
+export async function cancelAllReminders() {
+  try {
+    await Notifications.cancelAllScheduledNotificationsAsync();
+  } catch {}
+}
+
+// ---------- Trigger builders (enum-based) ----------
+
+// After N seconds (optionally repeating)
 export function triggerInSeconds(
   seconds: number,
-  repeats = false,
+  repeats = false
 ): Notifications.TimeIntervalTriggerInput {
-  return { type: 'timeInterval', seconds, repeats };
+  return {
+    type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+    seconds,
+    repeats,
+  };
 }
 
-/** Every day at hour:minute (24h) */
-export function triggerDaily(hour: number, minute: number): Notifications.DailyTriggerInput {
-  return { type: 'daily', hour, minute };
+// Every day at given hour/minute (24h)
+export function triggerDaily(
+  hour: number,
+  minute: number
+): Notifications.DailyTriggerInput {
+  return {
+    type: Notifications.SchedulableTriggerInputTypes.DAILY,
+    hour,
+    minute,
+  };
 }
 
-/** Weekly: weekday 1=Sun..7=Sat; repeats true to keep firing */
+// Weekly on weekday (1=Sun .. 7=Sat), at hour/minute
 export function triggerWeekly(
   weekday: 1 | 2 | 3 | 4 | 5 | 6 | 7,
   hour: number,
-  minute: number,
+  minute: number
 ): Notifications.CalendarTriggerInput {
-  return { type: 'calendar', weekday, hour, minute, repeats: true };
+  return {
+    type: Notifications.SchedulableTriggerInputTypes.CALENDAR,
+    weekday,
+    hour,
+    minute,
+    repeats: true,
+  };
 }
 
-/** On an exact Date */
+// On a specific Date
 export function triggerOnDate(date: Date): Notifications.DateTriggerInput {
-  return { type: 'date', date };
+  return {
+    type: Notifications.SchedulableTriggerInputTypes.DATE,
+    date,
+  };
 }

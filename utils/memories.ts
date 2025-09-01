@@ -8,66 +8,90 @@ import {
     orderBy,
     query,
     serverTimestamp,
+    Timestamp,
     updateDoc,
     where,
 } from 'firebase/firestore';
 import { db } from '../firebase/firebaseConfig';
-import type { Memory, MemoryKind } from '../types';
 
-const coll = collection(db, 'memories');
+export type MemoryKind = 'idea' | 'link' | 'gift' | 'note';
 
-export type NewMemoryInput = {
+export type Memory = {
+  id: string;
+  ownerId: string;
+  kind: MemoryKind;
+  label: string;
+  value: string;      // url for links, text for others
+  notes?: string;
+  createdAt: number;  // millis
+};
+
+export type NewMemory = {
+  ownerId: string;
   kind: MemoryKind;
   label: string;
   value: string;
   notes?: string;
-  link?: string;
-  gift?: string;
-  idea?: string;
+  createdAt?: number; // optional; will default to serverTimestamp
 };
 
-/** Create: (ownerId, data) — matches how the screen calls it */
-export async function addMemory(ownerId: string, data: NewMemoryInput) {
-  const ref = await addDoc(coll, {
-    ownerId,
-    ...data,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  });
-  return ref.id;
-}
+export type UpdateMemoryInput = {
+  ownerId?: string;
+  kind?: MemoryKind;
+  label?: string;
+  value?: string;
+  notes?: string;
+};
 
-/** Update by doc id */
-export async function updateMemory(id: string, patch: Partial<NewMemoryInput>) {
-  await updateDoc(doc(db, 'memories', id), {
-    ...patch,
-    updatedAt: serverTimestamp(),
-  });
-}
+const coll = collection(db, 'memories');
 
-/** Delete by doc id */
-export async function deleteMemory(id: string) {
-  await deleteDoc(doc(db, 'memories', id));
-}
-
-/** List all for an owner (newest first) */
+/** List all memories for a user (newest first). Requires index on (ownerId, createdAt desc). */
 export async function listByOwner(ownerId: string): Promise<Memory[]> {
   const q = query(coll, where('ownerId', '==', ownerId), orderBy('createdAt', 'desc'));
   const snap = await getDocs(q);
-  return snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) } as Memory));
+  return snap.docs.map((d) => {
+    const data = d.data() as any;
+    // tolerate either Timestamp or number
+    const created =
+      data.createdAt instanceof Timestamp
+        ? data.createdAt.toMillis()
+        : typeof data.createdAt === 'number'
+        ? data.createdAt
+        : Date.now();
+    return {
+      id: d.id,
+      ownerId: data.ownerId,
+      kind: data.kind as MemoryKind,
+      label: data.label,
+      value: data.value,
+      notes: data.notes,
+      createdAt: created,
+    } as Memory;
+  });
 }
 
-/** List by kind for an owner (newest first) */
-export async function listByKind(ownerId: string, kind: MemoryKind): Promise<Memory[]> {
-  const q = query(
-    coll,
-    where('ownerId', '==', ownerId),
-    where('kind', '==', kind),
-    orderBy('createdAt', 'desc'),
-  );
-  const snap = await getDocs(q);
-  return snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) } as Memory));
+/** Create and return the new document id. */
+export async function createMemory(input: NewMemory): Promise<string> {
+  const payload: any = {
+    ownerId: input.ownerId,
+    kind: input.kind,
+    label: input.label,
+    value: input.value,
+    notes: input.notes ?? '',
+    createdAt: input.createdAt ?? serverTimestamp(),
+  };
+  const ref = await addDoc(coll, payload);
+  return ref.id;
 }
 
-/** (Optional) alias if your screen still imports this older name */
-export const createMemory = addMemory;
+/** Partial update by id. */
+export async function updateMemory(id: string, input: UpdateMemoryInput): Promise<void> {
+  const ref = doc(db, 'memories', id);
+  await updateDoc(ref, { ...input });
+}
+
+/** Delete by id. */
+export async function deleteMemory(id: string): Promise<void> {
+  const ref = doc(db, 'memories', id);
+  await deleteDoc(ref);
+}

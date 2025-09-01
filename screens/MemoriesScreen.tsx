@@ -4,7 +4,10 @@ import {
   Alert,
   FlatList,
   KeyboardAvoidingView,
+  Modal,
   Platform,
+  Pressable,
+  SafeAreaView,
   StyleSheet,
   Text,
   TextInput,
@@ -12,194 +15,343 @@ import {
   View,
 } from 'react-native';
 import useAuthListener from '../hooks/useAuthListener';
-import type { Memory, MemoryKind } from '../types';
-import { addMemory, deleteMemory, listByKind, listByOwner, updateMemory } from '../utils/memories';
+import { useThemeColor } from '../hooks/useThemeColor';
+import {
+  createMemory,
+  deleteMemory,
+  listByOwner,
+  Memory,
+  MemoryKind,
+  updateMemory,
+} from '../utils/memories';
 
-const KINDS: MemoryKind[] = ['note', 'link', 'idea', 'gift', 'photo'];
+const KINDS: { key: MemoryKind; label: string; emoji: string }[] = [
+  { key: 'idea', label: 'Ideas', emoji: '💡' },
+  { key: 'link', label: 'Links', emoji: '🔗' },
+  { key: 'gift', label: 'Gifts', emoji: '🎁' },
+  { key: 'note', label: 'Notes', emoji: '📝' },
+];
 
 export default function MemoriesScreen() {
   const { user } = useAuthListener();
-  const uid = user?.uid ?? '';
+  const tint = useThemeColor({}, 'tint');
+  const bg = useThemeColor({}, 'background');
+  const textColor = useThemeColor({}, 'text');
 
+  const [loading, setLoading] = useState(true);
   const [items, setItems] = useState<Memory[]>([]);
-  const [kind, setKind] = useState<MemoryKind>('note');
-  const [label, setLabel] = useState('');
-  const [value, setValue] = useState('');
-  const [notes, setNotes] = useState('');
+  const [filter, setFilter] = useState<MemoryKind | 'all'>('all');
+  const [query, setQuery] = useState('');
+  const [modalOpen, setModalOpen] = useState(false);
+  const [draft, setDraft] = useState<{ id?: string; kind: MemoryKind; label: string; value: string; notes?: string }>({
+    kind: 'note',
+    label: '',
+    value: '',
+    notes: '',
+  });
 
-  const canSubmit = useMemo(
-    () => !!uid && !!label.trim() && !!value.trim(),
-    [uid, label, value],
+  // Load
+  useEffect(() => {
+    let unsub: (() => void) | undefined;
+    (async () => {
+      if (!user?.uid) return;
+      setLoading(true);
+      // simple one-shot load (swap to realtime if you prefer)
+      const rows = await listByOwner(user.uid);
+      setItems(rows);
+      setLoading(false);
+    })();
+    return () => unsub?.();
+  }, [user?.uid]);
+
+  const filtered = useMemo(() => {
+    const f = filter === 'all' ? items : items.filter(i => i.kind === filter);
+    if (!query.trim()) return f;
+    const q = query.trim().toLowerCase();
+    return f.filter(i =>
+      [i.label, i.value, i.notes || ''].some(s => s?.toLowerCase().includes(q)),
+    );
+  }, [items, filter, query]);
+
+  function openNew(kind?: MemoryKind) {
+    setDraft({ id: undefined, kind: kind ?? 'note', label: '', value: '', notes: '' });
+    setModalOpen(true);
+  }
+
+  function openEdit(m: Memory) {
+    setDraft({ id: m.id, kind: m.kind, label: m.label, value: m.value, notes: m.notes ?? '' });
+    setModalOpen(true);
+  }
+
+  async function saveDraft() {
+    if (!user?.uid) return;
+    const payload = {
+      ownerId: user.uid,
+      kind: draft.kind,
+      label: draft.label.trim(),
+      value: draft.value.trim(),
+      notes: (draft.notes ?? '').trim(),
+    };
+    if (!payload.label || !payload.value) {
+      Alert.alert('Missing info', 'Please fill in label and value.');
+      return;
+    }
+    try {
+      if (draft.id) {
+        await updateMemory(draft.id, payload);
+        setItems(prev => prev.map(i => (i.id === draft.id ? { ...i, ...payload } as Memory : i)));
+      } else {
+        const id = await createMemory(payload);
+        setItems(prev => [{ id, createdAt: Date.now(), ...payload } as Memory, ...prev]);
+      }
+      setModalOpen(false);
+    } catch (e: any) {
+      Alert.alert('Save failed', e?.message ?? 'Unknown error');
+    }
+  }
+
+  async function confirmDelete(id: string) {
+    Alert.alert('Delete memory?', 'This cannot be undone.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await deleteMemory(id);
+            setItems(prev => prev.filter(i => i.id !== id));
+          } catch (e: any) {
+            Alert.alert('Delete failed', e?.message ?? 'Unknown error');
+          }
+        },
+      },
+    ]);
+  }
+
+  const renderItem = ({ item }: { item: Memory }) => (
+    <View style={[styles.card, { backgroundColor: '#ffffffcc' }]}>
+      <View style={styles.cardHeader}>
+        <Text style={[styles.kind, { color: textColor }]}>
+          {KINDS.find(k => k.key === item.kind)?.emoji} {item.label}
+        </Text>
+        <View style={styles.row}>
+          <TouchableOpacity onPress={() => openEdit(item)} style={[styles.smallBtn, { backgroundColor: tint }]}>
+            <Text style={styles.smallBtnText}>Edit</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => confirmDelete(item.id)} style={[styles.smallBtn, { backgroundColor: '#e65b50' }]}>
+            <Text style={styles.smallBtnText}>Delete</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+      <Text style={[styles.value]} numberOfLines={3}>
+        {item.value}
+      </Text>
+      {!!item.notes && <Text style={styles.notes}>{item.notes}</Text>}
+    </View>
   );
 
-  // Load initial: all memories for owner
-  useEffect(() => {
-    if (!uid) return;
-    (async () => {
-      const data = await listByOwner(uid);
-      setItems(data);
-    })();
-  }, [uid]);
-
-  async function reloadByKind(nextKind?: MemoryKind) {
-    if (!uid) return;
-    if (nextKind) {
-      const data = await listByKind(uid, nextKind);
-      setItems(data);
-    } else {
-      const data = await listByOwner(uid);
-      setItems(data);
-    }
-  }
-
-  async function onAdd() {
-    if (!canSubmit) return;
-    try {
-      await addMemory(uid, { kind, label: label.trim(), value: value.trim(), notes: notes.trim() });
-      setLabel('');
-      setValue('');
-      setNotes('');
-      await reloadByKind(kind);
-    } catch (e: any) {
-      Alert.alert('Error', e?.message ?? 'Failed to add memory');
-    }
-  }
-
-  async function onDelete(id: string) {
-    try {
-      await deleteMemory(id);
-      setItems((prev) => prev.filter((m) => m.id !== id));
-    } catch (e: any) {
-      Alert.alert('Error', e?.message ?? 'Failed to delete memory');
-    }
-  }
-
-  async function onQuickRename(m: Memory) {
-    try {
-      await updateMemory(m.id, { label: m.label + ' ✨' });
-      setItems((prev) => prev.map((it) => (it.id === m.id ? { ...it, label: it.label + ' ✨' } : it)));
-    } catch (e: any) {
-      Alert.alert('Error', e?.message ?? 'Failed to update memory');
-    }
-  }
-
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.select({ ios: 'padding', android: undefined })}
-    >
-      <Text style={styles.title}>Memory Vault</Text>
+    <SafeAreaView style={[styles.safe, { backgroundColor: bg }]}>
+      {/* rose-ish soft background */}
+      <View style={styles.roseBg} />
 
-      {/* Kind Selector */}
-      <View style={styles.kindsRow}>
-        {KINDS.map((k) => (
-          <TouchableOpacity
-            key={k}
-            style={[styles.kindBtn, kind === k && styles.kindBtnActive]}
-            onPress={async () => {
-              setKind(k);
-              await reloadByKind(k);
-            }}
-          >
-            <Text style={[styles.kindText, kind === k && styles.kindTextActive]}>{k}</Text>
-          </TouchableOpacity>
-        ))}
-      </View>
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
+        <View style={styles.header}>
+          <Text style={[styles.title, { color: textColor }]}>Memory Vault</Text>
+        </View>
 
-      {/* Composer */}
-      <View style={styles.composer}>
-        <TextInput
-          placeholder="Title / label"
-          placeholderTextColor="#999"
-          value={label}
-          onChangeText={setLabel}
-          style={styles.input}
-        />
-        <TextInput
-          placeholder={kind === 'link' ? 'https://example.com' : 'Value / details'}
-          placeholderTextColor="#999"
-          value={value}
-          onChangeText={setValue}
-          style={styles.input}
-        />
-        <TextInput
-          placeholder="Notes (optional)"
-          placeholderTextColor="#999"
-          value={notes}
-          onChangeText={setNotes}
-          style={[styles.input, { height: 72 }]}
-          multiline
-        />
-
-        <TouchableOpacity
-          disabled={!canSubmit}
-          onPress={onAdd}
-          style={[styles.addBtn, !canSubmit && { opacity: 0.5 }]}
-        >
-          <Text style={styles.addText}>Add memory</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* List */}
-      <FlatList
-        style={{ flex: 1 }}
-        data={items}
-        keyExtractor={(m) => m.id}
-        ItemSeparatorComponent={() => <View style={{ height: 8 }} />}
-        ListEmptyComponent={<Text style={styles.empty}>No memories yet — add your first one!</Text>}
-        renderItem={({ item }) => (
-          <View style={styles.card}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.cardTitle}>{item.label}</Text>
-              <Text style={styles.cardMeta}>{item.kind} • {item.value}</Text>
-              {!!item.notes && <Text style={styles.cardNotes}>{item.notes}</Text>}
-            </View>
-            <View style={styles.cardActions}>
-              <TouchableOpacity style={styles.smallBtn} onPress={() => onQuickRename(item)}>
-                <Text style={styles.smallBtnText}>Edit</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={[styles.smallBtn, { backgroundColor: '#E65050' }]} onPress={() => onDelete(item.id)}>
-                <Text style={styles.smallBtnText}>Delete</Text>
-              </TouchableOpacity>
-            </View>
+        <View style={styles.controls}>
+          <View style={styles.filters}>
+            <Chip
+              label="All"
+              active={filter === 'all'}
+              onPress={() => setFilter('all')}
+            />
+            {KINDS.map(k => (
+              <Chip
+                key={k.key}
+                label={`${k.emoji} ${k.label}`}
+                active={filter === k.key}
+                onPress={() => setFilter(k.key)}
+              />
+            ))}
           </View>
-        )}
-      />
-    </KeyboardAvoidingView>
+
+          <TextInput
+            placeholder="Search memories…"
+            placeholderTextColor="#8b8b8b"
+            value={query}
+            onChangeText={setQuery}
+            style={styles.search}
+          />
+
+          <View style={styles.quickRow}>
+            {KINDS.map(k => (
+              <TouchableOpacity
+                key={k.key}
+                style={[styles.quickAddBtn]}
+                onPress={() => openNew(k.key)}
+              >
+                <Text style={styles.quickAddText}>{k.emoji} Add {k.label.slice(0, -1)}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </View>
+
+        <FlatList
+          data={filtered}
+          keyExtractor={(i) => i.id}
+          contentContainerStyle={{ padding: 16, paddingBottom: 40 }}
+          renderItem={renderItem}
+          ListEmptyComponent={
+            <Text style={styles.empty}>
+              {loading ? 'Loading…' : 'Nothing here yet — add your first memory!'}
+            </Text>
+          }
+        />
+      </KeyboardAvoidingView>
+
+      {/* Add/Edit Modal */}
+      <Modal visible={modalOpen} transparent animationType="fade" onRequestClose={() => setModalOpen(false)}>
+        <Pressable style={styles.modalWrap} onPress={() => setModalOpen(false)}>
+          <Pressable style={styles.modalCard} onPress={(e) => e.stopPropagation()}>
+            <Text style={styles.modalTitle}>{draft.id ? 'Edit memory' : 'New memory'}</Text>
+
+            <View style={styles.rowWrap}>
+              {KINDS.map(k => (
+                <Chip
+                  key={k.key}
+                  label={k.emoji + ' ' + k.label}
+                  active={draft.kind === k.key}
+                  onPress={() => setDraft((d) => ({ ...d, kind: k.key }))}
+                />
+              ))}
+            </View>
+
+            <TextInput
+              placeholder="Label (e.g., Restaurant, Idea title)"
+              value={draft.label}
+              onChangeText={(label) => setDraft((d) => ({ ...d, label }))}
+              style={styles.input}
+            />
+            <TextInput
+              placeholder={draft.kind === 'link' ? 'URL' : 'Main content'}
+              value={draft.value}
+              onChangeText={(value) => setDraft((d) => ({ ...d, value }))}
+              style={[styles.input, { height: 48 }]}
+              autoCapitalize="none"
+            />
+            <TextInput
+              placeholder="Notes (optional)"
+              value={draft.notes}
+              onChangeText={(notes) => setDraft((d) => ({ ...d, notes }))}
+              style={[styles.input, { height: 80 }]}
+              multiline
+            />
+
+            <View style={styles.row}>
+              <TouchableOpacity style={[styles.actionBtn, { backgroundColor: '#e65b50' }]} onPress={() => setModalOpen(false)}>
+                <Text style={styles.actionText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.actionBtn, { backgroundColor: tint }]} onPress={saveDraft}>
+                <Text style={styles.actionText}>{draft.id ? 'Save' : 'Add'}</Text>
+              </TouchableOpacity>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+    </SafeAreaView>
+  );
+}
+
+/** Small pill chip */
+function Chip({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
+  return (
+    <TouchableOpacity
+      onPress={onPress}
+      style={[
+        styles.chip,
+        { backgroundColor: active ? '#f8d7e2' : '#f1f1f1', borderColor: active ? '#e56a8a' : '#d0d0d0' },
+      ]}
+    >
+      <Text style={{ color: active ? '#b03c5c' : '#444' }}>{label}</Text>
+    </TouchableOpacity>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, paddingHorizontal: 16, paddingTop: 16, backgroundColor: '#fff' },
-  title: { fontSize: 28, fontWeight: '800', marginBottom: 12, color: '#333' },
-
-  kindsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 10 },
-  kindBtn: { borderWidth: 1, borderColor: '#C7C5FF', borderRadius: 20, paddingHorizontal: 12, paddingVertical: 6 },
-  kindBtnActive: { backgroundColor: '#5B58FF', borderColor: '#5B58FF' },
-  kindText: { color: '#5B58FF', fontWeight: '700' },
-  kindTextActive: { color: '#fff' },
-
-  composer: { gap: 8, marginBottom: 12 },
-  input: {
-    borderWidth: 1, borderColor: '#E2E2F2', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10, color: '#333',
+  safe: { flex: 1 },
+  roseBg: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#ffeaf1',
   },
-  addBtn: { backgroundColor: '#5B58FF', alignSelf: 'flex-start', paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10 },
-  addText: { color: '#fff', fontWeight: '800' },
-
-  empty: { textAlign: 'center', color: '#777', marginTop: 24 },
+  header: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 4 },
+  title: { fontSize: 28, fontWeight: '800' },
+  controls: { paddingHorizontal: 16, paddingBottom: 8 },
+  filters: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 10 },
+  chip: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 18,
+    borderWidth: 1,
+  },
+  search: {
+    borderWidth: 1,
+    borderColor: '#ddd',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    height: 44,
+    backgroundColor: '#fff',
+    marginBottom: 10,
+  },
+  quickRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  quickAddBtn: {
+    backgroundColor: '#ffd3e1',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 12,
+  },
+  quickAddText: { fontWeight: '600', color: '#8a2a4b' },
 
   card: {
-    flexDirection: 'row',
-    padding: 12,
-    borderRadius: 12,
+    borderRadius: 16,
+    padding: 14,
+    marginBottom: 12,
     borderWidth: 1,
-    borderColor: '#EEE',
-    backgroundColor: '#FAFAFF',
+    borderColor: '#eee',
   },
-  cardTitle: { fontSize: 16, fontWeight: '800', color: '#333' },
-  cardMeta: { marginTop: 4, color: '#666' },
-  cardNotes: { marginTop: 6, color: '#444' },
-  cardActions: { justifyContent: 'center', gap: 6, marginLeft: 8 },
-  smallBtn: { backgroundColor: '#5B58FF', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 8 },
+  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
+  kind: { fontWeight: '800', fontSize: 16 },
+  row: { flexDirection: 'row', gap: 8, alignItems: 'center' },
+  rowWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 10 },
+  smallBtn: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 10 },
   smallBtnText: { color: '#fff', fontWeight: '700' },
+  value: { fontSize: 15, color: '#333' },
+  notes: { marginTop: 6, color: '#666' },
+
+  empty: { textAlign: 'center', color: '#777', marginTop: 28 },
+
+  modalWrap: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.25)',
+    justifyContent: 'center',
+    padding: 20,
+  },
+  modalCard: {
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 16,
+  },
+  modalTitle: { fontSize: 20, fontWeight: '800', marginBottom: 12 },
+  input: {
+    borderWidth: 1,
+    borderColor: '#e6e6e6',
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    marginBottom: 10,
+    height: 44,
+  },
+  actionBtn: { flex: 1, paddingVertical: 12, borderRadius: 12, alignItems: 'center' },
+  actionText: { color: '#fff', fontWeight: '800' },
 });
