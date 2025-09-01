@@ -1,105 +1,136 @@
-// utils/partner.ts
 import {
     collection,
     doc,
     getDoc,
-    serverTimestamp,
-    setDoc,
-    writeBatch
+    getDocs,
+    limit,
+    query,
+    where,
 } from 'firebase/firestore';
 import { db } from '../firebase/firebaseConfig';
 
 /**
- * Generate a short, friendly, uppercase code like "AB7KQ9".
- * (You can replace this with your own generator if you prefer)
+ * Return the *other* user's uid that is coupled with the given uid.
+ * Tries several known shapes:
+ * - partners/{uid} with partnerId: string
+ * - partners/{uid} with users: [uidA, uidB]
+ * - partners/{uid} with pairId -> pairs/{pairId}.users: [uidA, uidB]
+ * - couples (or pairs) collection where users array-contains uid
  */
-function genCode(len = 6) {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let out = '';
-  for (let i = 0; i < len; i++) out += chars[Math.floor(Math.random() * chars.length)];
-  return out;
-}
+export async function getPartnerUid(uid: string): Promise<string | null> {
+  if (!uid) return null;
 
-/**
- * Create/share an invite code.
- * - Stores a doc in partnerLinks/{code}: { code, ownerId, createdAt }
- * - If the same user creates again, we simply overwrite with a new code (last one wins).
- */
-export async function createInviteCode(uid: string): Promise<string> {
-  if (!uid) throw new Error('Missing uid');
+  // 1) partners/{uid}
+  try {
+    const pRef = doc(db, 'partners', uid);
+    const pSnap = await getDoc(pRef);
+    if (pSnap.exists()) {
+      const d = pSnap.data() as any;
 
-  // generate a code and ensure we don't collide with an existing doc
-  // (super rare; if it happens, just try again once)
-  let code = genCode(6);
-  const linkRef = doc(collection(db, 'partnerLinks'), code);
-  const snap = await getDoc(linkRef);
-  if (snap.exists()) {
-    code = genCode(6);
+      if (typeof d?.partnerId === 'string' && d.partnerId) {
+        return d.partnerId;
+      }
+
+      if (Array.isArray(d?.users)) {
+        const other = (d.users as string[]).find((u) => u && u !== uid);
+        if (other) return other;
+      }
+
+      if (typeof d?.pairId === 'string' && d.pairId) {
+        const pairDoc = await getDoc(doc(db, 'pairs', d.pairId));
+        if (pairDoc.exists()) {
+          const pd = pairDoc.data() as any;
+          if (Array.isArray(pd?.users)) {
+            const other = (pd.users as string[]).find((u) => u && u !== uid);
+            if (other) return other;
+          }
+        }
+      }
+    }
+  } catch (e) {
+    // non-fatal, we’ll try other shapes
+    console.warn('getPartnerUid: partners/{uid} path failed:', e);
   }
 
-  await setDoc(linkRef, {
-    code,
-    ownerId: uid,
-    createdAt: serverTimestamp(),
-  });
+  // 2) couples collection (users array)
+  try {
+    const q1 = query(
+      collection(db, 'couples'),
+      where('users', 'array-contains', uid),
+      limit(1)
+    );
+    const s1 = await getDocs(q1);
+    if (!s1.empty) {
+      const d = s1.docs[0].data() as any;
+      if (Array.isArray(d?.users)) {
+        const other = (d.users as string[]).find((u) => u && u !== uid);
+        if (other) return other;
+      }
+    }
+  } catch (e) {
+    console.warn('getPartnerUid: couples path failed:', e);
+  }
 
-  return code;
+  // 3) pairs collection (users array)
+  try {
+    const q2 = query(
+      collection(db, 'pairs'),
+      where('users', 'array-contains', uid),
+      limit(1)
+    );
+    const s2 = await getDocs(q2);
+    if (!s2.empty) {
+      const d = s2.docs[0].data() as any;
+      if (Array.isArray(d?.users)) {
+        const other = (d.users as string[]).find((u) => u && u !== uid);
+        if (other) return other;
+      }
+    }
+  } catch (e) {
+    console.warn('getPartnerUid: pairs path failed:', e);
+  }
+
+  return null;
 }
 
 /**
- * Join with an invite code.
- * Steps:
- *  - read partnerLinks/{code}
- *  - create pairs/{pairId} with both members
- *  - set users/{uid}.pairId and users/{other}.pairId
- *  - delete partnerLinks/{code}
- * Uses a transaction/batch so either all succeed or none.
+ * Optional helper if you ever need the user's pairId quickly.
+ * Tries partners/{uid}.pairId, then first couples/pairs doc that contains uid.
  */
-export async function joinWithCode(uid: string, code: string): Promise<void> {
-  if (!uid) throw new Error('Missing uid');
-  const cleanCode = code.trim().toUpperCase();
-  if (!cleanCode) throw new Error('Missing code');
+export async function getPairIdForUser(uid: string): Promise<string | null> {
+  if (!uid) return null;
 
-  const linkRef = doc(collection(db, 'partnerLinks'), cleanCode);
-  const linkSnap = await getDoc(linkRef);
-  if (!linkSnap.exists()) throw new Error('Code not found');
-  const link = linkSnap.data() as { ownerId: string };
-  const otherUid = link.ownerId;
+  // partners/{uid}.pairId
+  try {
+    const pRef = doc(db, 'partners', uid);
+    const pSnap = await getDoc(pRef);
+    if (pSnap.exists()) {
+      const d = pSnap.data() as any;
+      if (typeof d?.pairId === 'string' && d.pairId) return d.pairId;
+    }
+  } catch {}
 
-  if (otherUid === uid) throw new Error('You cannot use your own code');
+  // couples
+  try {
+    const q1 = query(
+      collection(db, 'couples'),
+      where('users', 'array-contains', uid),
+      limit(1)
+    );
+    const s1 = await getDocs(q1);
+    if (!s1.empty) return s1.docs[0].id;
+  } catch {}
 
-  // Guard: prevent joining if either user is already paired
-  const meRef = doc(db, 'users', uid);
-  const otherRef = doc(db, 'users', otherUid);
+  // pairs
+  try {
+    const q2 = query(
+      collection(db, 'pairs'),
+      where('users', 'array-contains', uid),
+      limit(1)
+    );
+    const s2 = await getDocs(q2);
+    if (!s2.empty) return s2.docs[0].id;
+  } catch {}
 
-  const meSnap = await getDoc(meRef);
-  const otherSnap = await getDoc(otherRef);
-
-  if (!meSnap.exists()) throw new Error('Your user profile is missing');
-  if (!otherSnap.exists()) throw new Error("Partner's user profile is missing");
-
-  const me = meSnap.data() as any;
-  const other = otherSnap.data() as any;
-
-  if (me.pairId) throw new Error('You are already linked to a partner');
-  if (other.pairId) throw new Error('That code owner is already linked to a partner');
-
-  // Create the pair and update both users + delete the code in one atomic batch
-  const batch = writeBatch(db);
-  // pairs/{pairId} — use a deterministic id sorted by uids to avoid dupes
-  const pairId =
-    uid < otherUid ? `${uid}_${otherUid}` : `${otherUid}_${uid}`;
-  const pairRef = doc(db, 'pairs', pairId);
-
-  batch.set(pairRef, {
-    members: [uid, otherUid],
-    createdAt: serverTimestamp(),
-  });
-
-  batch.update(meRef, { pairId, updatedAt: serverTimestamp() });
-  batch.update(otherRef, { pairId, updatedAt: serverTimestamp() });
-
-  batch.delete(linkRef);
-
-  await batch.commit();
+  return null;
 }

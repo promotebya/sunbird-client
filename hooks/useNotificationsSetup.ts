@@ -5,24 +5,27 @@ import { Platform } from 'react-native';
 
 export default function useNotificationsSetup() {
   useEffect(() => {
-    // --- Explicit return type fixes the TS error ---
     Notifications.setNotificationHandler({
-      handleNotification: async (): Promise<Notifications.NotificationBehavior> => ({
-        shouldShowAlert: true,
-        shouldPlaySound: true,
-        shouldSetBadge: false,
-      }),
+      handleNotification: async (): Promise<Notifications.NotificationBehavior> => {
+        return {
+          shouldShowAlert: true,
+          shouldPlaySound: true,
+          shouldSetBadge: false,
+          // iOS-specific flags — provide explicit booleans on all platforms
+          shouldShowBanner: Platform.OS === 'ios',
+          shouldShowList: Platform.OS === 'ios',
+        };
+      },
     });
-    // -----------------------------------------------
 
     (async () => {
+      // Ask permissions
       const current = await Notifications.getPermissionsAsync();
-      let status = current.status;
-      if (status !== 'granted') {
-        const req = await Notifications.requestPermissionsAsync();
-        status = req.status;
+      if (current.status !== 'granted') {
+        await Notifications.requestPermissionsAsync();
       }
 
+      // Android channel
       if (Platform.OS === 'android') {
         await Notifications.setNotificationChannelAsync('default', {
           name: 'default',

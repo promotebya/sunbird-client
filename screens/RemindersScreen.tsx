@@ -1,373 +1,286 @@
 import * as Notifications from 'expo-notifications';
-import React, { useCallback, useMemo, useRef, useState } from 'react';
-import {
-    Alert,
-    Animated,
-    Easing,
-    FlatList,
-    KeyboardAvoidingView,
-    Platform,
-    Pressable,
-    StyleSheet,
-    Text,
-    TextInput,
-    View,
-} from 'react-native';
-import useColorScheme from '../hooks/useColorScheme';
+import { addDoc, collection, serverTimestamp } from 'firebase/firestore';
+import React, { useMemo, useState } from 'react';
+import { Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { db } from '../firebase/firebaseConfig';
+import useAuthListener from '../hooks/useAuthListener';
+import useNotificationsSetup from '../hooks/useNotificationsSetup';
 
-type QuickChip =
-  | { id: 'daily'; label: string }
-  | { id: 'this-week'; label: string }
-  | { id: 'interval'; label: string };
+// If your util exposes a different name, adjust here.
+// e.g. you might have: export async function getPartnerUid(uid: string): Promise<string|null>
+import { getPartnerUid } from '../utils/partner';
 
-const QUICK_CHIPS: QuickChip[] = [
-  { id: 'daily', label: 'Daily 09:00' },
-  { id: 'this-week', label: 'Weekdays 18:00' },
-  { id: 'interval', label: 'Every 30 min' },
+const QUICK = [
+  'Drink water 💧',
+  'Text your partner 💬',
+  'Stand up + stretch 🧘',
+  'Smile together 😊',
 ];
 
 export default function RemindersScreen() {
-  const colorScheme = useColorScheme();
-  const isDark = colorScheme === 'dark';
+  // Ensure channels / permissions on mount
+  useNotificationsSetup();
 
+  const { user } = useAuthListener();
+  const uid = user?.uid ?? null;
+
+  // form
   const [title, setTitle] = useState('');
-  const [body, setBody] = useState('');
-  const [dateIso, setDateIso] = useState('');
-  const [hour, setHour] = useState('9');
-  const [minute, setMinute] = useState('0');
-  const [intervalSecs, setIntervalSecs] = useState('1800');
-  const [selectedChip, setSelectedChip] = useState<QuickChip['id'] | null>(null);
+  const [minutes, setMinutes] = useState('60'); // time interval in minutes
+  const [repeats, setRepeats] = useState(true);
+  const [createBoth, setCreateBoth] = useState(false);
 
-  const [errTitle, setErrTitle] = useState<string | null>(null);
-  const [errTiming, setErrTiming] = useState<string | null>(null);
+  // ui
+  const [saving, setSaving] = useState(false);
+  const [touched, setTouched] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+  const [showConfetti, setShowConfetti] = useState(false);
 
-  // tiny toast
-  const toastY = useRef(new Animated.Value(-50)).current;
-  const [toastMsg, setToastMsg] = useState('');
-  const showToast = useCallback((msg: string) => {
-    setToastMsg(msg);
-    Animated.sequence([
-      Animated.timing(toastY, { toValue: 0, duration: 200, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
-      Animated.delay(1200),
-      Animated.timing(toastY, { toValue: -50, duration: 200, easing: Easing.in(Easing.cubic), useNativeDriver: true }),
-    ]).start();
-  }, [toastY]);
+  const minutesNum = useMemo(() => {
+    const n = Number(minutes);
+    return Number.isFinite(n) && n > 0 ? Math.min(n, 24 * 60) : 0; // cap at 24h
+  }, [minutes]);
 
-  // tiny confetti
-  const confettiOpacity = useRef(new Animated.Value(0)).current;
-  const popConfetti = useCallback(() => {
-    confettiOpacity.setValue(0);
-    Animated.sequence([
-      Animated.timing(confettiOpacity, { toValue: 1, duration: 120, useNativeDriver: true }),
-      Animated.delay(600),
-      Animated.timing(confettiOpacity, { toValue: 0, duration: 200, useNativeDriver: true }),
-    ]).start();
-  }, [confettiOpacity]);
+  const valid = useMemo(() => {
+    return title.trim().length > 0 && minutesNum > 0;
+  }, [title, minutesNum]);
 
-  const content = useMemo<Notifications.NotificationContentInput>(() => ({
-    title: title.trim() || 'Reminder',
-    body: body.trim() || undefined,
-    sound: 'default',
-    // IMPORTANT: must be number | undefined, not null
-    badge: undefined,
-    data: { source: 'reminders' },
-  }), [title, body]);
+  function flashToast(msg: string) {
+    setToast(msg);
+    setTimeout(() => setToast(null), 1600);
+  }
 
-  const resetErrors = () => {
-    setErrTitle(null);
-    setErrTiming(null);
-  };
+  function burst() {
+    setShowConfetti(true);
+    setTimeout(() => setShowConfetti(false), 900);
+  }
 
-  const validateTitle = () => {
-    if (!title.trim()) {
-      setErrTitle('Please add a short title.');
-      return false;
+  async function createOne(ownerId: string) {
+    // 1) schedule local notification for THIS device only if it's the current user.
+    if (ownerId === uid) {
+      const trigger: Notifications.NotificationTriggerInput = {
+        type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+        seconds: minutesNum * 60,
+        repeats,
+      };
+
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: title.trim(),
+          body: repeats
+            ? `Every ~${minutesNum} min`
+            : `In ~${minutesNum} min`,
+          sound: 'default',
+        },
+        trigger,
+      });
     }
-    return true;
-  };
 
-  const scheduleDate = async () => {
-    resetErrors();
-    if (!validateTitle()) return;
+    // 2) persist to Firestore (your partner’s device will read & schedule via its own app)
+    await addDoc(collection(db, 'reminders'), {
+      ownerId,
+      title: title.trim(),
+      triggerType: 'timeInterval',
+      minutes: minutesNum,
+      repeats,
+      createdAt: serverTimestamp(),
+      platform: Platform.OS,
+    });
+  }
 
-    const d = new Date(dateIso);
-    if (Number.isNaN(d.getTime())) {
-      setErrTiming('Please enter a valid date/time (e.g., 2025-09-01T19:30).');
+  async function onSave() {
+    setTouched(true);
+    if (!uid) {
+      flashToast('Please sign in first.');
+      return;
+    }
+    if (!valid) {
+      flashToast('Please fill the required fields.');
       return;
     }
 
-    const trigger: Notifications.DateTriggerInput = {
-      type: Notifications.SchedulableTriggerInputTypes.DATE,
-      date: d, // NOTE: no repeats on Date triggers
-    };
-
-    await Notifications.scheduleNotificationAsync({ content, trigger });
-  };
-
-  const scheduleDaily = async () => {
-    resetErrors();
-    if (!validateTitle()) return;
-
-    const h = Number(hour);
-    const m = Number(minute);
-    if (!Number.isFinite(h) || !Number.isFinite(m) || h < 0 || h > 23 || m < 0 || m > 59) {
-      setErrTiming('Please enter a valid hour/minute (0–23 / 0–59).');
-      return;
-    }
-
-    const trigger: Notifications.DailyTriggerInput = {
-      type: Notifications.SchedulableTriggerInputTypes.DAILY,
-      hour: h,
-      minute: m,
-    };
-
-    await Notifications.scheduleNotificationAsync({ content, trigger });
-  };
-
-  const scheduleWeekdays = async () => {
-    resetErrors();
-    if (!validateTitle()) return;
-
-    const h = 18;
-    const m = 0;
-    const weekdays = [2, 3, 4, 5, 6]; // Mon–Fri (Expo uses 1..7 for Sun..Sat)
-
-    await Promise.all(
-      weekdays.map((weekday) => {
-        const trigger: Notifications.CalendarTriggerInput = {
-          type: Notifications.SchedulableTriggerInputTypes.CALENDAR,
-          weekday,
-          hour: h,
-          minute: m,
-          repeats: true,
-        };
-        return Notifications.scheduleNotificationAsync({ content, trigger });
-      })
-    );
-  };
-
-  const scheduleInterval = async () => {
-    resetErrors();
-    if (!validateTitle()) return;
-
-    const secs = Number(intervalSecs);
-    if (!Number.isFinite(secs) || secs <= 0) {
-      setErrTiming('Please enter a positive number of seconds.');
-      return;
-    }
-
-    const trigger: Notifications.TimeIntervalTriggerInput = {
-      type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
-      seconds: secs,
-      repeats: true,
-    };
-
-    await Notifications.scheduleNotificationAsync({ content, trigger });
-  };
-
-  const onSubmit = async () => {
     try {
-      if (selectedChip === 'daily') {
-        await scheduleDaily();
-      } else if (selectedChip === 'this-week') {
-        await scheduleWeekdays();
-      } else if (selectedChip === 'interval') {
-        await scheduleInterval();
-      } else {
-        await scheduleDate();
-      }
-      showToast('Reminder scheduled ✅');
-      popConfetti();
-      setTitle('');
-      setBody('');
-      setDateIso('');
-    } catch (e: any) {
-      console.error(e);
-      Alert.alert('Oops', e?.message ?? 'Could not schedule reminder.');
-    }
-  };
+      setSaving(true);
 
-  const renderChip = ({ item }: { item: QuickChip }) => {
-    const active = selectedChip === item.id;
-    return (
-      <Pressable
-        onPress={() => setSelectedChip(item.id)}
-        style={[styles.chip, active && styles.chipActive]}
-      >
-        <Text style={[styles.chipText, active && styles.chipTextActive]}>{item.label}</Text>
-      </Pressable>
-    );
-  };
+      // always create for me
+      await createOne(uid);
+
+      // optionally create for partner
+      if (createBoth) {
+        try {
+          const partnerUid = await getPartnerUid(uid);
+          if (partnerUid) {
+            await createOne(partnerUid);
+          } else {
+            flashToast("Couldn't find your partner – saved only for you.");
+          }
+        } catch {
+          flashToast("Couldn't reach partner – saved only for you.");
+        }
+      }
+
+      // success ✨
+      burst();
+      flashToast('Reminder saved ✅');
+
+      // reset light
+      setTitle('');
+      setTouched(false);
+    } catch (e) {
+      console.error('Save reminder failed', e);
+      flashToast('Something went wrong. Try again.');
+    } finally {
+      setSaving(false);
+    }
+  }
 
   return (
-    <KeyboardAvoidingView
-      style={[styles.container, isDark && { backgroundColor: '#0b0b0d' }]}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-    >
+    <View style={styles.wrap}>
+      {/* Confetti emoji burst */}
+      {showConfetti && (
+        <View style={styles.confettiWrap}>
+          <Text style={styles.confetti}>🎉✨🎊</Text>
+        </View>
+      )}
+
       {/* Toast */}
-      <Animated.View style={[styles.toast, { transform: [{ translateY: toastY }] }]}>
-        <Text style={styles.toastText}>{toastMsg}</Text>
-      </Animated.View>
+      {toast && (
+        <View style={styles.toast}>
+          <Text style={styles.toastText}>{toast}</Text>
+        </View>
+      )}
 
-      {/* Confetti */}
-      <Animated.View style={[styles.confettiWrap, { opacity: confettiOpacity }]}>
-        <Text style={styles.confetti}>🎉🎉🎉</Text>
-      </Animated.View>
+      <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+        <Text style={styles.title}>Create a reminder</Text>
 
-      <View style={styles.header}>
-        <Text style={[styles.title, isDark && { color: '#fff' }]}>Reminders</Text>
-        <Text style={styles.subtitle}>Lightweight nudges to keep love top of mind</Text>
-      </View>
-
-      <View style={styles.card}>
+        <Text style={styles.label}>Title</Text>
         <TextInput
-          placeholder="Title (e.g., Text your partner 💌)"
-          placeholderTextColor="#999"
           value={title}
           onChangeText={setTitle}
+          placeholder="e.g., Send a sweet note 💌"
           style={styles.input}
+          onBlur={() => setTouched(true)}
+          autoCapitalize="sentences"
+          returnKeyType="done"
         />
-        {errTitle ? <Text style={styles.error}>{errTitle}</Text> : null}
-
-        <TextInput
-          placeholder="Optional note"
-          placeholderTextColor="#999"
-          value={body}
-          onChangeText={setBody}
-          style={[styles.input, { height: 44 }]}
-        />
-
-        <FlatList
-          data={QUICK_CHIPS}
-          keyExtractor={(c) => c.id}
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={{ paddingVertical: 8 }}
-          renderItem={renderChip}
-        />
-
-        {/* Date-only inputs (used when no chip is selected) */}
-        {selectedChip === null && (
-          <TextInput
-            placeholder="Exact date/time (ISO) e.g. 2025-09-01T19:30"
-            placeholderTextColor="#999"
-            value={dateIso}
-            onChangeText={setDateIso}
-            style={styles.input}
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
+        {touched && title.trim().length === 0 && (
+          <Text style={styles.hint}>Please enter something sweet 😊</Text>
         )}
 
-        {/* Daily */}
-        {selectedChip === 'daily' && (
-          <View style={styles.row}>
+        {/* Quick chips */}
+        <Text style={[styles.label, { marginTop: 16 }]}>Quick ideas</Text>
+        <View style={styles.chips}>
+          {QUICK.map((q) => (
+            <Pressable key={q} onPress={() => setTitle(q)} style={({ pressed }) => [styles.chip, pressed && { opacity: 0.85 }]}>
+              <Text style={styles.chipText}>{q}</Text>
+            </Pressable>
+          ))}
+        </View>
+
+        <View style={styles.row}>
+          <View style={{ flex: 1, marginRight: 12 }}>
+            <Text style={styles.label}>Every N minutes</Text>
             <TextInput
-              placeholder="Hour (0–23)"
-              placeholderTextColor="#999"
-              keyboardType="numeric"
-              value={hour}
-              onChangeText={setHour}
-              style={[styles.input, styles.inputHalf]}
-            />
-            <TextInput
-              placeholder="Minute (0–59)"
-              placeholderTextColor="#999"
-              keyboardType="numeric"
-              value={minute}
-              onChangeText={setMinute}
-              style={[styles.input, styles.inputHalf]}
+              value={minutes}
+              onChangeText={setMinutes}
+              keyboardType="number-pad"
+              placeholder="60"
+              style={styles.input}
             />
           </View>
-        )}
+          <View style={{ alignItems: 'flex-end', justifyContent: 'center' }}>
+            <Text style={styles.label}>Repeats</Text>
+            <Switch value={repeats} onValueChange={setRepeats} />
+          </View>
+        </View>
 
-        {/* Interval */}
-        {selectedChip === 'interval' && (
-          <TextInput
-            placeholder="Every N seconds (e.g., 1800)"
-            placeholderTextColor="#999"
-            keyboardType="numeric"
-            value={intervalSecs}
-            onChangeText={setIntervalSecs}
-            style={styles.input}
-          />
-        )}
+        <View style={[styles.row, { marginTop: 8 }]}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.label}>Create for both</Text>
+            <Text style={styles.small}>
+              Duplicates this reminder for your partner too (their device will schedule it).
+            </Text>
+          </View>
+          <Switch value={createBoth} onValueChange={setCreateBoth} />
+        </View>
 
-        {errTiming ? <Text style={styles.error}>{errTiming}</Text> : null}
-
-        <Pressable onPress={onSubmit} style={styles.actionBtn}>
-          <Text style={styles.actionText}>Schedule</Text>
+        <Pressable
+          onPress={onSave}
+          disabled={!valid || saving}
+          style={({ pressed }) => [
+            styles.actionBtn,
+            (!valid || saving) && { opacity: 0.5 },
+            pressed && valid && !saving && { opacity: 0.85 },
+          ]}
+        >
+          <Text style={styles.actionText}>{saving ? 'Saving…' : 'Save reminder'}</Text>
         </Pressable>
 
-        <Text style={styles.hint}>
-          Pro tip: use quick chips for daily / weekday / interval reminders. Exact date uses ISO:{' '}
-          <Text style={{ fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace' }) }}>
-            2025-09-01T19:30
-          </Text>
+        {/* Empty state helper (optional) */}
+        <Text style={styles.empty}>
+          Tip: try a quick idea above or set your own — tiny habits, big smiles 💖
         </Text>
-      </View>
-    </KeyboardAvoidingView>
+      </ScrollView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 16, backgroundColor: '#fbfbff' },
-  header: { marginTop: 8, marginBottom: 12 },
-  title: { fontSize: 28, fontWeight: '800', color: '#121212' },
-  subtitle: { color: '#6b7280', marginTop: 4 },
-  card: {
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    padding: 16,
-    shadowColor: '#000',
-    shadowOpacity: 0.06,
-    shadowOffset: { width: 0, height: 6 },
-    shadowRadius: 12,
-    elevation: 2,
-  },
+  wrap: { flex: 1, backgroundColor: '#fff' },
+  content: { padding: 20, paddingBottom: 40 },
+  title: { fontSize: 22, fontWeight: '800', color: '#111827', marginBottom: 8 },
+  label: { fontSize: 13, fontWeight: '700', color: '#6B7280', marginBottom: 6 },
+  small: { fontSize: 12, color: '#6B7280' },
+
   input: {
-    backgroundColor: '#f5f6f8',
-    borderRadius: 12,
+    backgroundColor: '#F9FAFB',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
     paddingHorizontal: 12,
-    height: 44,
-    color: '#111',
-    marginBottom: 10,
-  },
-  row: { flexDirection: 'row', gap: 10 },
-  inputHalf: { flex: 1 },
-  chip: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    backgroundColor: '#f3f4f6',
-    borderRadius: 999,
-    marginRight: 8,
-  },
-  chipActive: { backgroundColor: '#EAD7F5' },
-  chipText: { color: '#4b5563', fontWeight: '600' },
-  chipTextActive: { color: '#5b21b6' },
-  actionBtn: {
-    backgroundColor: '#5B58FF',
     paddingVertical: 12,
     borderRadius: 12,
-    alignItems: 'center',
-    marginTop: 6,
+    fontSize: 16,
   },
-  actionText: { color: '#fff', fontWeight: '800' },
-  error: { color: '#E11D48', marginBottom: 8, fontWeight: '600' },
-  hint: { marginTop: 10, color: '#6b7280' },
+
+  chips: { flexDirection: 'row', flexWrap: 'wrap' },
+  chip: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    backgroundColor: '#FDECF2',
+    borderColor: '#F7B7CC',
+    borderWidth: 1,
+    borderRadius: 20,
+    marginRight: 8,
+    marginBottom: 8,
+  },
+  chipText: { color: '#B84772', fontWeight: '700' },
+
+  row: { flexDirection: 'row', alignItems: 'center', marginTop: 12 },
+
+  actionBtn: {
+    marginTop: 18,
+    backgroundColor: '#5B85FF',
+    paddingVertical: 14,
+    borderRadius: 14,
+    alignItems: 'center',
+  },
+  actionText: { color: '#fff', fontWeight: '800', letterSpacing: 0.3 },
+
+  hint: { color: '#E65B50', marginTop: 6 },
+  empty: { textAlign: 'center', color: '#888', marginTop: 24 },
 
   toast: {
     position: 'absolute',
-    left: 16,
+    top: 56,
     right: 16,
-    top: 8,
-    zIndex: 20,
-    paddingVertical: 10,
-    borderRadius: 10,
+    left: 16,
     backgroundColor: '#111827',
-    alignItems: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    zIndex: 20,
   },
-  toastText: { color: '#fff', fontWeight: '700' },
+  toastText: { color: '#fff', fontWeight: '700', textAlign: 'center' },
 
   confettiWrap: { position: 'absolute', top: 56, right: 16, zIndex: 19 },
   confetti: { fontSize: 24 },
