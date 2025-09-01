@@ -1,9 +1,12 @@
+// navigation/AppNavigator.tsx
 import { Ionicons } from '@expo/vector-icons';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { DarkTheme, DefaultTheme, NavigationContainer } from '@react-navigation/native';
 import React from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { useColorScheme } from '../hooks/useColorScheme';
+
+import useColorScheme from '../hooks/useColorScheme';
+
 import HomeScreen from '../screens/HomeScreen';
 import MemoriesScreen from '../screens/MemoriesScreen';
 import PointsScreen from '../screens/PointsScreen';
@@ -28,21 +31,20 @@ export default function AppNavigator() {
       <NavigationContainer theme={scheme === 'dark' ? DarkTheme : DefaultTheme}>
         <Tab.Navigator
           screenOptions={({ route }) => ({
+            headerShown: false,
+            tabBarActiveTintColor: '#5B5BFF',
+            tabBarStyle: { height: 62, paddingTop: 4 },
+            tabBarLabelStyle: { fontWeight: '700', marginBottom: 6 },
             tabBarIcon: ({ color, size }) => {
-              const map: Record<string, keyof typeof Ionicons.glyphMap> = {
+              const icon: Record<string, keyof typeof Ionicons.glyphMap> = {
                 Home: 'home',
                 Tasks: 'checkbox',
                 Points: 'trophy',
                 Memories: 'images',
                 Reminders: 'notifications',
               };
-              const name = map[route.name] ?? 'ellipse';
-              return <Ionicons name={name} size={size} color={color} />;
+              return <Ionicons name={icon[route.name] ?? 'ellipse'} size={size} color={color} />;
             },
-            headerShown: false,
-            tabBarActiveTintColor: '#5B5BFF',
-            tabBarStyle: { paddingTop: 4, height: 62 },
-            tabBarLabelStyle: { fontWeight: '700', marginBottom: 6 },
           })}
         >
           <Tab.Screen name="Home" component={HomeScreen} />
