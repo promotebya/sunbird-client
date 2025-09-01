@@ -5,16 +5,15 @@ import { Platform } from 'react-native';
 
 export default function useNotificationsSetup() {
   useEffect(() => {
-    // Foreground behavior
+    // Foreground behavior — return a plain object (no async)
     Notifications.setNotificationHandler({
-      handleNotification: async () => ({
+      handleNotification: () => ({
         shouldShowAlert: true,
         shouldPlaySound: true,
         shouldSetBadge: false,
       }),
     });
 
-    // Ask permissions + Android channel
     (async () => {
       const { status } = await Notifications.getPermissionsAsync();
       if (status !== 'granted') {
