@@ -4,13 +4,11 @@ import {
   collection,
   deleteDoc,
   doc,
-  DocumentData,
   getDoc,
   getDocs,
   onSnapshot,
   orderBy,
   query,
-  QuerySnapshot,
   serverTimestamp,
   Timestamp,
   updateDoc,
@@ -18,7 +16,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '../firebase/firebaseConfig';
 
-/** Kinds we currently use around the app (extend freely) */
+/** Extend/adjust kinds freely */
 export type MemoryKind =
   | 'favoriteFood'
   | 'place'
@@ -31,55 +29,63 @@ export type MemoryKind =
 export interface Memory {
   id: string;
   ownerId: string;
-  /** When a memory is “shared”, associate to a pair/couple if you use pairing */
   pairId?: string | null;
   kind: MemoryKind;
 
-  /** A short title/label (what we show in chips and lists) */
+  /** Primary display text */
   label: string;
 
-  /** Optional extra text/notes */
-  notes?: string | null;
+  /** Back-compat alias some screens still read */
+  value?: string | null;
 
-  /** Optional URL if this memory is a link/website */
+  /** Optional extras */
+  notes?: string | null;
   url?: string | null;
 
-  /** Firestore server timestamps (nullable while pending write) */
+  /** Timestamps (nullable while pending) */
   createdAt: Timestamp | null;
   updatedAt: Timestamp | null;
 }
 
-/** Input to create a memory */
 export interface CreateMemoryInput {
   ownerId: string;
   pairId?: string | null;
   kind: MemoryKind;
-  label: string;
+  label?: string;        // allow either label or value
+  value?: string;        // (we'll normalize)
   notes?: string | null;
   url?: string | null;
 }
 
-/** Partial update */
 export type UpdateMemoryInput = Partial<
   Omit<Memory, 'id' | 'ownerId' | 'createdAt' | 'updatedAt'>
 > & { pairId?: string | null };
 
-/** Firestore collection ref */
 const coll = collection(db, 'memories');
 
-/** Normalize a Firestore doc into our Memory shape */
-function normalize(docSnap: QuerySnapshot<DocumentData>['docs'][number]): Memory {
-  const data = docSnap.data() as Omit<Memory, 'id'>;
+/** Defensive normalizer that tolerates older/newer shapes */
+function normalize(docSnap: any): Memory {
+  const data = (docSnap?.data?.() ?? {}) as Record<string, any>;
+
+  const label = (data.label ?? data.value ?? '').toString();
+  const value = data.value ?? data.label ?? null;
+
+  const createdAt =
+    (data.createdAt as Timestamp | undefined) ?? null;
+  const updatedAt =
+    (data.updatedAt as Timestamp | undefined) ?? null;
+
   return {
     id: docSnap.id,
     ownerId: data.ownerId,
     pairId: data.pairId ?? null,
     kind: data.kind,
-    label: data.label,
+    label,
+    value,
     notes: data.notes ?? null,
     url: data.url ?? null,
-    createdAt: (data as any).createdAt ?? null,
-    updatedAt: (data as any).updatedAt ?? null,
+    createdAt,
+    updatedAt,
   };
 }
 
@@ -88,11 +94,13 @@ function normalize(docSnap: QuerySnapshot<DocumentData>['docs'][number]): Memory
  * --------------------------------------------------------------------------*/
 
 export async function createMemory(input: CreateMemoryInput): Promise<string> {
+  const label = input.label ?? input.value ?? '';
   const ref = await addDoc(coll, {
     ownerId: input.ownerId,
     pairId: input.pairId ?? null,
     kind: input.kind,
-    label: input.label,
+    label,
+    value: label, // keep both for compatibility
     notes: input.notes ?? null,
     url: input.url ?? null,
     createdAt: serverTimestamp(),
@@ -102,42 +110,38 @@ export async function createMemory(input: CreateMemoryInput): Promise<string> {
 }
 
 export async function updateMemory(id: string, patch: UpdateMemoryInput) {
+  // Keep label/value in sync if either is provided
+  const updates: Record<string, any> = { ...patch, updatedAt: serverTimestamp() };
+  if (patch.label != null && updates.value == null) updates.value = patch.label;
+  if (patch.value != null && updates.label == null) updates.label = patch.value;
+
   const ref = doc(db, 'memories', id);
-  await updateDoc(ref, {
-    ...patch,
-    updatedAt: serverTimestamp(),
-  });
+  await updateDoc(ref, updates);
 }
 
 export async function deleteMemory(id: string) {
-  const ref = doc(db, 'memories', id);
-  await deleteDoc(ref);
+  await deleteDoc(doc(db, 'memories', id));
 }
 
 export async function getMemory(id: string): Promise<Memory | null> {
-  const ref = doc(db, 'memories', id);
-  const snap = await getDoc(ref);
+  const snap = await getDoc(doc(db, 'memories', id));
   if (!snap.exists()) return null;
-  return normalize(snap as any);
+  return normalize(snap);
 }
 
 /* ----------------------------------------------------------------------------
- * Queries (one-shot)
+ * One-shot queries (newest first)
  * --------------------------------------------------------------------------*/
 
-/** All memories for an owner (newest first) */
-export async function listMine(ownerId: string, limitCount?: number): Promise<Memory[]> {
-  const q = query(
-    coll,
-    where('ownerId', '==', ownerId),
-    orderBy('createdAt', 'desc'),
-    ...(limitCount ? ([{ type: 'limit', value: limitCount }] as any) : [])
-  ) as any;
+export async function listMine(ownerId: string): Promise<Memory[]> {
+  const q = query(coll, where('ownerId', '==', ownerId), orderBy('createdAt', 'desc'));
   const snap = await getDocs(q);
   return snap.docs.map(normalize);
 }
 
-/** Memories by kind for an owner (used for quick prompts) */
+/** Alias so existing imports (`listByOwner`) keep working */
+export const listByOwner = listMine;
+
 export async function listByKind(ownerId: string, kind: MemoryKind): Promise<Memory[]> {
   const q = query(
     coll,
@@ -149,13 +153,8 @@ export async function listByKind(ownerId: string, kind: MemoryKind): Promise<Mem
   return snap.docs.map(normalize);
 }
 
-/** Shared memories for a pair/couple (if you use `pairId`) */
 export async function listByPair(pairId: string): Promise<Memory[]> {
-  const q = query(
-    coll,
-    where('pairId', '==', pairId),
-    orderBy('createdAt', 'desc')
-  );
+  const q = query(coll, where('pairId', '==', pairId), orderBy('createdAt', 'desc'));
   const snap = await getDocs(q);
   return snap.docs.map(normalize);
 }
@@ -164,22 +163,11 @@ export async function listByPair(pairId: string): Promise<Memory[]> {
  * Live listeners
  * --------------------------------------------------------------------------*/
 
-/** Live list for owner (unsubscribe returned) */
-export function listenMine(
-  ownerId: string,
-  cb: (items: Memory[]) => void
-) {
-  const q = query(
-    coll,
-    where('ownerId', '==', ownerId),
-    orderBy('createdAt', 'desc')
-  );
-  return onSnapshot(q, (snap) => {
-    cb(snap.docs.map(normalize));
-  });
+export function listenMine(ownerId: string, cb: (items: Memory[]) => void) {
+  const q = query(coll, where('ownerId', '==', ownerId), orderBy('createdAt', 'desc'));
+  return onSnapshot(q, (snap) => cb(snap.docs.map(normalize)));
 }
 
-/** Live list by kind for owner (unsubscribe returned) */
 export function listenByKind(
   ownerId: string,
   kind: MemoryKind,
@@ -191,22 +179,10 @@ export function listenByKind(
     where('kind', '==', kind),
     orderBy('createdAt', 'desc')
   );
-  return onSnapshot(q, (snap) => {
-    cb(snap.docs.map(normalize));
-  });
+  return onSnapshot(q, (snap) => cb(snap.docs.map(normalize)));
 }
 
-/** Live list for a pair (unsubscribe returned) */
-export function listenByPair(
-  pairId: string,
-  cb: (items: Memory[]) => void
-) {
-  const q = query(
-    coll,
-    where('pairId', '==', pairId),
-    orderBy('createdAt', 'desc')
-  );
-  return onSnapshot(q, (snap) => {
-    cb(snap.docs.map(normalize));
-  });
+export function listenByPair(pairId: string, cb: (items: Memory[]) => void) {
+  const q = query(coll, where('pairId', '==', pairId), orderBy('createdAt', 'desc'));
+  return onSnapshot(q, (snap) => cb(snap.docs.map(normalize)));
 }
