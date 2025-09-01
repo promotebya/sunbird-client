@@ -30,23 +30,20 @@ export default function RemindersScreen() {
   const colorScheme = useColorScheme();
   const isDark = colorScheme === 'dark';
 
-  // form state
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
-  const [dateIso, setDateIso] = useState(''); // ISO like 2025-09-01T19:30
+  const [dateIso, setDateIso] = useState('');
   const [hour, setHour] = useState('9');
   const [minute, setMinute] = useState('0');
-  const [intervalSecs, setIntervalSecs] = useState('1800'); // 30 min
+  const [intervalSecs, setIntervalSecs] = useState('1800');
   const [selectedChip, setSelectedChip] = useState<QuickChip['id'] | null>(null);
 
-  // inline errors
   const [errTitle, setErrTitle] = useState<string | null>(null);
   const [errTiming, setErrTiming] = useState<string | null>(null);
 
   // tiny toast
   const toastY = useRef(new Animated.Value(-50)).current;
   const [toastMsg, setToastMsg] = useState('');
-
   const showToast = useCallback((msg: string) => {
     setToastMsg(msg);
     Animated.sequence([
@@ -56,7 +53,7 @@ export default function RemindersScreen() {
     ]).start();
   }, [toastY]);
 
-  // tiny confetti (emoji burst)
+  // tiny confetti
   const confettiOpacity = useRef(new Animated.Value(0)).current;
   const popConfetti = useCallback(() => {
     confettiOpacity.setValue(0);
@@ -69,9 +66,10 @@ export default function RemindersScreen() {
 
   const content = useMemo<Notifications.NotificationContentInput>(() => ({
     title: title.trim() || 'Reminder',
-    body: body.trim() || null,
+    body: body.trim() || undefined,
     sound: 'default',
-    badge: null,
+    // IMPORTANT: must be number | undefined, not null
+    badge: undefined,
     data: { source: 'reminders' },
   }), [title, body]);
 
@@ -132,8 +130,7 @@ export default function RemindersScreen() {
 
     const h = 18;
     const m = 0;
-    // Weekdays 1..7 (Mon=2 in some locales; Expo uses 1..7 Sun..Sat)
-    const weekdays = [2, 3, 4, 5, 6]; // Mon-Fri
+    const weekdays = [2, 3, 4, 5, 6]; // Mon–Fri (Expo uses 1..7 for Sun..Sat)
 
     await Promise.all(
       weekdays.map((weekday) => {
@@ -251,17 +248,15 @@ export default function RemindersScreen() {
 
         {/* Date-only inputs (used when no chip is selected) */}
         {selectedChip === null && (
-          <>
-            <TextInput
-              placeholder="Exact date/time (ISO) e.g. 2025-09-01T19:30"
-              placeholderTextColor="#999"
-              value={dateIso}
-              onChangeText={setDateIso}
-              style={styles.input}
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-          </>
+          <TextInput
+            placeholder="Exact date/time (ISO) e.g. 2025-09-01T19:30"
+            placeholderTextColor="#999"
+            value={dateIso}
+            onChangeText={setDateIso}
+            style={styles.input}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
         )}
 
         {/* Daily */}
@@ -305,8 +300,7 @@ export default function RemindersScreen() {
         </Pressable>
 
         <Text style={styles.hint}>
-          Pro tip: use quick chips for daily / weekday / interval reminders. Exact date uses ISO:
-          {' '}
+          Pro tip: use quick chips for daily / weekday / interval reminders. Exact date uses ISO:{' '}
           <Text style={{ fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace' }) }}>
             2025-09-01T19:30
           </Text>

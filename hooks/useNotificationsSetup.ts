@@ -5,19 +5,22 @@ import { Platform } from 'react-native';
 
 export default function useNotificationsSetup() {
   useEffect(() => {
-    // Foreground behavior — return a plain object (no async)
+    // --- Explicit return type fixes the TS error ---
     Notifications.setNotificationHandler({
-      handleNotification: () => ({
+      handleNotification: async (): Promise<Notifications.NotificationBehavior> => ({
         shouldShowAlert: true,
         shouldPlaySound: true,
         shouldSetBadge: false,
       }),
     });
+    // -----------------------------------------------
 
     (async () => {
-      const { status } = await Notifications.getPermissionsAsync();
+      const current = await Notifications.getPermissionsAsync();
+      let status = current.status;
       if (status !== 'granted') {
-        await Notifications.requestPermissionsAsync();
+        const req = await Notifications.requestPermissionsAsync();
+        status = req.status;
       }
 
       if (Platform.OS === 'android') {
