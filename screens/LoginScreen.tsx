@@ -1,8 +1,8 @@
-import { auth } from "@/firebaseConfig";
-import { ensureUser } from "@/utils/user";
 import { signInWithEmailAndPassword } from "firebase/auth";
 import { useState } from "react";
 import { Alert, Button, StyleSheet, Text, TextInput, View } from "react-native";
+import { auth } from "../firebaseConfig";
+import { ensureUser } from "../utils/user";
 
 export default function LoginScreen() {
   const [email, setEmail] = useState("");
@@ -48,10 +48,5 @@ export default function LoginScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 20, justifyContent: "center", gap: 12 },
   h1: { fontSize: 24, fontWeight: "600", marginBottom: 12 },
-  input: {
-    borderWidth: 1,
-    borderColor: "#ddd",
-    borderRadius: 8,
-    padding: 12,
-  },
+  input: { borderWidth: 1, borderColor: "#ddd", borderRadius: 8, padding: 12 }
 });

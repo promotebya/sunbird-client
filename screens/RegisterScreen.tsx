@@ -1,8 +1,8 @@
-import { auth } from "@/firebaseConfig";
-import { ensureUser } from "@/utils/user";
 import { createUserWithEmailAndPassword, updateProfile } from "firebase/auth";
 import { useState } from "react";
 import { Alert, Button, StyleSheet, Text, TextInput, View } from "react-native";
+import { auth } from "../firebaseConfig";
+import { ensureUser } from "../utils/user";
 
 export default function RegisterScreen() {
   const [name, setName] = useState("");
@@ -14,9 +14,7 @@ export default function RegisterScreen() {
     try {
       setLoading(true);
       const res = await createUserWithEmailAndPassword(auth, email.trim(), pass);
-      if (name.trim()) {
-        await updateProfile(res.user, { displayName: name.trim() });
-      }
+      if (name.trim()) await updateProfile(res.user, { displayName: name.trim() });
       await ensureUser({ uid: res.user.uid, email: res.user.email, displayName: name.trim() });
       Alert.alert("Register", "Account created.");
     } catch (e: any) {
@@ -38,13 +36,7 @@ export default function RegisterScreen() {
         onChangeText={setEmail}
         style={styles.input}
       />
-      <TextInput
-        placeholder="Password"
-        secureTextEntry
-        value={pass}
-        onChangeText={setPass}
-        style={styles.input}
-      />
+      <TextInput placeholder="Password" secureTextEntry value={pass} onChangeText={setPass} style={styles.input} />
       <Button title={loading ? "Please wait…" : "Register"} onPress={onRegister} disabled={loading} />
     </View>
   );
@@ -53,5 +45,5 @@ export default function RegisterScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 20, justifyContent: "center", gap: 12 },
   h1: { fontSize: 24, fontWeight: "600", marginBottom: 12 },
-  input: { borderWidth: 1, borderColor: "#ddd", borderRadius: 8, padding: 12 },
+  input: { borderWidth: 1, borderColor: "#ddd", borderRadius: 8, padding: 12 }
 });

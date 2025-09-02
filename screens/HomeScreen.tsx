@@ -1,10 +1,10 @@
-import { auth } from "@/firebaseConfig";
-import useAuthListener from "@/hooks/useAuthListener";
-import { getPairId } from "@/utils/partner";
-import { getPointsTotal } from "@/utils/points";
 import { signOut } from "firebase/auth";
 import { useEffect, useState } from "react";
 import { Button, StyleSheet, Text, View } from "react-native";
+import { auth } from "../firebaseConfig";
+import useAuthListener from "../hooks/useAuthListener";
+import { getPairId } from "../utils/partner";
+import { getPointsTotal } from "../utils/points";
 
 export default function HomeScreen() {
   const { user } = useAuthListener();
@@ -19,9 +19,7 @@ export default function HomeScreen() {
       if (!cancelled) setTotal(sum);
     };
     run();
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [user]);
 
   return (
@@ -36,5 +34,5 @@ export default function HomeScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 20, gap: 12 },
   h1: { fontSize: 24, fontWeight: "600", marginTop: 8 },
-  p: { fontSize: 16 },
+  p: { fontSize: 16 }
 });

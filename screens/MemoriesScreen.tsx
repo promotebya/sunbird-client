@@ -1,8 +1,8 @@
-import useAuthListener from "@/hooks/useAuthListener";
-import { Memory, MemoryKind, create, listByOwner, listByPair, remove } from "@/utils/memories";
-import { getPairId } from "@/utils/partner";
 import { useEffect, useMemo, useState } from "react";
 import { Button, FlatList, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import useAuthListener from "../hooks/useAuthListener";
+import { Memory, MemoryKind, create, listByOwner, listByPair, remove } from "../utils/memories";
+import { getPairId } from "../utils/partner";
 
 export default function MemoriesScreen() {
   const { user } = useAuthListener();
@@ -26,14 +26,13 @@ export default function MemoriesScreen() {
   const onAdd = async () => {
     if (!user) return;
     const pairId = await getPairId(user.uid);
-    const id = await create({
+    await create({
       ownerId: user.uid,
       pairId: pairId ?? null,
       title: title || "Untitled",
       note: note || undefined,
-      kind,
+      kind
     });
-    // naive refresh
     const data = pairId ? await listByPair(pairId) : await listByOwner(user.uid);
     setItems(data);
     setTitle("");
@@ -57,13 +56,7 @@ export default function MemoriesScreen() {
       <View style={styles.row}>
         <TextInput style={[styles.input, { flex: 1 }]} value={title} onChangeText={setTitle} placeholder="Title" />
       </View>
-      <TextInput
-        style={[styles.input, { minHeight: 44 }]}
-        value={note}
-        onChangeText={setNote}
-        placeholder="Note"
-        multiline
-      />
+      <TextInput style={[styles.input, { minHeight: 44 }]} value={note} onChangeText={setNote} placeholder="Note" multiline />
       <View style={styles.row}>
         <Button title="Photo" onPress={() => setKind(MemoryKind.Photo)} />
         <Button title="Text" onPress={() => setKind(MemoryKind.Text)} />
@@ -95,5 +88,5 @@ const styles = StyleSheet.create({
   card: { borderWidth: 1, borderColor: "#eee", borderRadius: 10, padding: 12, backgroundColor: "#fff" },
   title: { fontWeight: "700", marginBottom: 4 },
   note: { opacity: 0.9 },
-  tag: { marginTop: 6, fontSize: 12, opacity: 0.7 },
+  tag: { marginTop: 6, fontSize: 12, opacity: 0.7 }
 });

@@ -1,8 +1,8 @@
-import useAuthListener from "@/hooks/useAuthListener";
-import { getPairId } from "@/utils/partner";
-import { Task, create as createTask, listPersonal, listShared, remove, setDone } from "@/utils/tasks";
 import { useEffect, useState } from "react";
 import { Button, FlatList, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import useAuthListener from "../hooks/useAuthListener";
+import { getPairId } from "../utils/partner";
+import { Task, create as createTask, listPersonal, listShared, remove, setDone } from "../utils/tasks";
 
 type Tab = "Personal" | "Shared";
 
@@ -82,5 +82,5 @@ const styles = StyleSheet.create({
   task: { flexDirection: "row", justifyContent: "space-between", borderWidth: 1, borderColor: "#eee", borderRadius: 10, padding: 12, backgroundColor: "#fff" },
   taskTitle: { fontSize: 16 },
   done: { textDecorationLine: "line-through", opacity: 0.6 },
-  doneTag: { fontWeight: "700" },
+  doneTag: { fontWeight: "700" }
 });

@@ -4,12 +4,11 @@
     "strict": true,
     "noEmit": true,
     "jsx": "react-jsx",
-    "moduleResolution": "nodenext",
-    "customConditions": ["react-native"],
+    "moduleResolution": "node",
     "resolveJsonModule": true,
     "skipLibCheck": true,
     "baseUrl": ".",
-    "paths": { "@/*": ["*"] }
+    "types": ["react", "react-native", "expo"]
   },
   "include": ["**/*.ts", "**/*.tsx"]
 }
