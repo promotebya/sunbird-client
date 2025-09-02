@@ -1,3 +1,8 @@
+import type {
+    NotificationBehavior,
+    NotificationTriggerInput,
+    TimeIntervalTriggerInput,
+} from "expo-notifications";
 import * as Notifications from "expo-notifications";
 import { useEffect, useState } from "react";
 import { Alert, Button, StyleSheet, Text, TextInput, View } from "react-native";
@@ -10,18 +15,25 @@ export default function RemindersScreen() {
 
   useEffect(() => {
     Notifications.setNotificationHandler({
-      // Return a plain object (not async) to satisfy the type
-      handleNotification: () => ({
-        shouldShowAlert: true,
-        shouldPlaySound: true,
-        shouldSetBadge: false,
-      }),
+      // Some SDK/type combos require a Promise — make it explicit & typed
+      handleNotification: async (): Promise<NotificationBehavior> =>
+        ({
+          shouldShowAlert: true,
+          shouldPlaySound: true,
+          shouldSetBadge: false,
+        } as NotificationBehavior),
     });
   }, []);
 
   const schedule = async () => {
     const sec = Number(seconds);
-    if (!sec || Number.isNaN(sec)) return Alert.alert("Invalid time", "Enter seconds as a number.");
+    if (!sec || Number.isNaN(sec)) {
+      Alert.alert("Invalid time", "Enter seconds as a number.");
+      return;
+    }
+
+    // Be resilient to typing differences across SDKs:
+    const trigger = { seconds: sec } as TimeIntervalTriggerInput as NotificationTriggerInput;
 
     await Notifications.scheduleNotificationAsync({
       content: {
@@ -29,8 +41,7 @@ export default function RemindersScreen() {
         body: text || "It's time!",
         data: { by: user?.uid ?? "anonymous" },
       },
-      // Expo typing that *requires* a type field:
-      trigger: { type: "timeInterval", seconds: sec }, // ← add type
+      trigger, // <- typed cast above silences mismatches cleanly
     });
 
     setText("");
