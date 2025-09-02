@@ -28,6 +28,7 @@ export default function RemindersScreen() {
     const sec = Number(seconds);
     if (!sec || Number.isNaN(sec)) { setToast({visible:true,msg:'Enter seconds as a number',variant:'danger'}); return; }
 
+    // cross-SDK typing compatibility:
     const trigger = { seconds: sec } as TimeIntervalTriggerInput as NotificationTriggerInput;
 
     await Notifications.scheduleNotificationAsync({

@@ -11,7 +11,7 @@ import ConfettiTiny from "../components/ConfettiTiny";
 import Input from "../components/Input";
 import PressableScale from "../components/PressableScale";
 import Toast from "../components/Toast";
-import Chip from "../components/ui/Chip"; // ← use your existing Chip
+import Chip from "../components/ui/Chip"; // ← your existing Chip
 
 import { shared } from "../components/sharedStyles";
 import { colors, r, s, type } from "../components/tokens";
