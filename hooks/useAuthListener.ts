@@ -1,6 +1,6 @@
-import { auth } from "@/firebaseConfig";
 import { onAuthStateChanged, User } from "firebase/auth";
 import { useEffect, useState } from "react";
+import { auth } from "../firebaseConfig"; // ← relative path (no "@")
 
 function useAuthListener() {
   const [user, setUser] = useState<User | null>(null);

@@ -10,7 +10,8 @@ export default function RemindersScreen() {
 
   useEffect(() => {
     Notifications.setNotificationHandler({
-      handleNotification: async () => ({
+      // Return a plain object (not async) to satisfy the type
+      handleNotification: () => ({
         shouldShowAlert: true,
         shouldPlaySound: true,
         shouldSetBadge: false,
@@ -21,15 +22,17 @@ export default function RemindersScreen() {
   const schedule = async () => {
     const sec = Number(seconds);
     if (!sec || Number.isNaN(sec)) return Alert.alert("Invalid time", "Enter seconds as a number.");
+
     await Notifications.scheduleNotificationAsync({
       content: {
         title: "Reminder",
         body: text || "It's time!",
         data: { by: user?.uid ?? "anonymous" },
       },
-      // Expo SDK 53 typing: simple "time interval" trigger = { seconds, repeats? }
-      trigger: { seconds: sec }, // <-- remove "type: 'timeInterval'"
+      // Expo typing that *requires* a type field:
+      trigger: { type: "timeInterval", seconds: sec }, // ← add type
     });
+
     setText("");
   };
 
