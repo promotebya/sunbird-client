@@ -1,373 +1,361 @@
-// screens/LoveNotesScreen.tsx
-import { Ionicons } from '@expo/vector-icons';
-import * as Notifications from 'expo-notifications';
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     Alert,
-    Animated,
-    Easing,
     FlatList,
     KeyboardAvoidingView,
+    LayoutAnimation,
     Platform,
-    Pressable,
     StyleSheet,
     Text,
     TextInput,
     TouchableOpacity,
+    UIManager,
     View,
 } from 'react-native';
-
 import useAuthListener from '../hooks/useAuthListener';
-import { listByKind } from '../utils/memories';
-import { addNote, deleteNote, listenNotes, Note, NoteKind, updateNote } from '../utils/notes';
-// If you store partner uid somewhere, import your helper here:
-// import { getPartnerUid } from '../utils/partner';
+import { create as createNote, listByKind, Note, NoteKind, remove as removeNote } from '../utils/notes';
 
-const PINK = '#E14C7B';
-const PINK_SOFT = '#FFE5EF';
-const BORDER = '#E7E9ED';
-const TEXT = '#111';
-const MUTED = '#8A8F98';
-const BG = '#FAFAFC';
+// Enable LayoutAnimation on Android
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
 
-type Template = { key: string; text: string };
+const NOTE_KINDS: NoteKind[] = [
+  'loveNote',
+  'favoriteFood',
+  'habit',
+  'place',
+  'appreciation',
+  'insideJoke',
+  'gratitude',
+  'memorySnippet',
+];
 
-const TEMPLATES: Template[] = [
-  { key: 'gratitude', text: 'Grateful for you because…' },
-  { key: 'today', text: 'Today made me think of you when…' },
-  { key: 'cheer', text: 'You’ve got this because…' },
-  { key: 'memory', text: 'Favorite little memory with you: …' },
-  { key: 'plan', text: 'Let’s plan a tiny date: …' },
+// quick romantic chips (tap to insert)
+const PROMPTS: string[] = [
+  'You made my day 💗',
+  '3 things I love about you…',
+  'Coffee & cuddles soon?',
+  'A tiny love note for my favorite person ✨',
+  'Thank you for being you.',
 ];
 
 export default function LoveNotesScreen() {
   const { user } = useAuthListener();
-
-  const [pairId, setPairId] = useState<string | null>(null); // wire from your partner utils if available
+  const ownerId = user?.uid ?? '';
+  const [kind, setKind] = useState<NoteKind>('loveNote');
   const [notes, setNotes] = useState<Note[]>([]);
-  const [kind, setKind] = useState<NoteKind>('private');
-  const [createForBoth, setCreateForBoth] = useState(false);
-  const [sendPush, setSendPush] = useState(false);
   const [text, setText] = useState('');
-  const [busy, setBusy] = useState(false);
-
-  const [quick, setQuick] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [isAdding, setIsAdding] = useState(false);
   const inputRef = useRef<TextInput>(null);
 
-  // Listen to notes
+  const canAdd = text.trim().length >= 3;
+
+  const load = useCallback(async () => {
+    if (!ownerId) return;
+    const rows = await listByKind(ownerId, kind);
+    setNotes(rows);
+  }, [ownerId, kind]);
+
   useEffect(() => {
-    if (!user) return;
-    const unsub = listenNotes(user.uid, pairId, setNotes);
-    return unsub;
-  }, [user?.uid, pairId]);
+    load();
+  }, [load]);
 
-  // Quick prompts from Memory Vault
-  useEffect(() => {
-    (async () => {
-      if (!user) return;
-
-      const foods = await listByKind(user.uid, 'favoriteFood').catch(() => []);
-      const places = await listByKind(user.uid, 'place').catch(() => []);
-      const ideas = await listByKind(user.uid, 'idea').catch(() => []);
-      const habits = await listByKind(user.uid, 'habit').catch(() => []);
-
-      const f = foods?.[0]?.label;
-      const p = places?.[0]?.label;
-      const i = ideas?.[0]?.label;
-      const h = habits?.[0]?.label;
-
-      const hour = new Date().getHours();
-      const timeWord = hour < 12 ? 'morning' : hour < 18 ? 'afternoon' : 'evening';
-
-      const prompts = [
-        f ? `Snack surprise: ${f} waiting when you get home.` : null,
-        p ? `Walk together at ${p} this ${timeWord}?` : null,
-        i ? `Tiny surprise tonight: ${i}?` : null,
-        h ? `Proud of your ${h} streak—keep going!` : null,
-        'One thing I adore about you today is…',
-        'Thanks for the little things you do. Like…',
-      ].filter(Boolean) as string[];
-
-      setQuick(prompts.slice(0, 6));
-    })();
-  }, [user?.uid]);
-
-  const canSend = useMemo(() => text.trim().length > 0 && !!user, [text, user]);
-
-  async function handleSend(templateKey?: string) {
-    if (!user || !canSend) return;
-    setBusy(true);
+  const onAdd = useCallback(async () => {
+    if (!ownerId) return;
+    if (!canAdd) {
+      setError('Write at least 3 characters 😊');
+      return;
+    }
     try {
-      // create the primary note
-      await addNote({
-        ownerId: user.uid,
-        pairId: kind === 'shared' ? pairId ?? null : null,
+      setIsAdding(true);
+      setError(null);
+
+      await createNote(ownerId, {
         kind,
         text: text.trim(),
-        templateKey: templateKey ?? null,
+        context: null,
+        templateId: null,
       });
 
-      // optional duplicate to partner as private
-      if (createForBoth && kind === 'private' && pairId) {
-        await addNote({
-          ownerId: pairId, // partner receives same note privately
-          pairId: null,
-          kind: 'private',
-          text: text.trim(),
-          templateKey: templateKey ?? null,
-        });
-      }
-
-      // optional local push
-      if (sendPush) {
-        await Notifications.scheduleNotificationAsync({
-          content: {
-            title: 'Love Note 💌',
-            body: text.trim(),
-            sound: 'default',
-          },
-          trigger: null, // fire immediately
-        });
-      }
-
+      // subtle list animation
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       setText('');
       inputRef.current?.clear();
-      Alert.alert('Sent 💌', kind === 'shared' ? 'Shared note posted.' : 'Saved to your private notes.');
-    } catch (e: any) {
-      Alert.alert('Oops', e?.message ?? 'Could not send note');
+      await load();
+    } catch (e) {
+      console.error(e);
+      Alert.alert('Could not save your note', 'Please try again in a moment.');
     } finally {
-      setBusy(false);
+      setIsAdding(false);
     }
-  }
+  }, [ownerId, canAdd, kind, text, load]);
 
-  // Animated card item
-  const Card = ({ item, index }: { item: Note; index: number }) => {
-    const anim = useRef(new Animated.Value(0)).current;
-    useEffect(() => {
-      Animated.timing(anim, {
-        toValue: 1,
-        duration: 260,
-        delay: index * 35,
-        easing: Easing.out(Easing.quad),
-        useNativeDriver: true,
-      }).start();
-    }, [anim, index]);
+  const onInsertPrompt = useCallback((p: string) => {
+    setText(t => (t ? `${t} ${p}` : p));
+    setError(null);
+    inputRef.current?.focus();
+  }, []);
 
-    const translateY = anim.interpolate({ inputRange: [0, 1], outputRange: [8, 0] });
-    const opacity = anim;
-
-    const onLongPress = () => {
-      Alert.alert('Note', 'What would you like to do?', [
-        {
-          text: 'Edit (add ❤️)',
-          onPress: () => updateNote(item.id, { text: item.text + ' ❤️ (edited)' }),
-        },
+  const onLongPressRow = useCallback((item: Note) => {
+    Alert.alert(
+      'Delete note?',
+      'This note will be removed for you.',
+      [
+        { text: 'Cancel', style: 'cancel' },
         {
           text: 'Delete',
           style: 'destructive',
-          onPress: () => deleteNote(item.id),
+          onPress: async () => {
+            try {
+              await removeNote(item.id);
+              LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+              setNotes(prev => prev.filter(n => n.id !== item.id));
+            } catch (e) {
+              console.error(e);
+              Alert.alert('Delete failed', 'Please try again.');
+            }
+          },
         },
-        { text: 'Cancel', style: 'cancel' },
-      ]);
-    };
-
-    return (
-      <Animated.View style={[styles.card, { opacity, transform: [{ translateY }] }]}>
-        <Pressable onLongPress={onLongPress}>
-          <Text style={styles.cardText}>{item.text}</Text>
-          <View style={styles.row}>
-            <Text style={styles.pill}>{item.kind === 'shared' ? 'Shared' : 'Private'}</Text>
-            <View style={{ flex: 1 }} />
-            <TouchableOpacity onPress={() => updateNote(item.id, { text: item.text + ' ❤️' })}>
-              <Ionicons name="heart-outline" size={20} color={PINK} />
-            </TouchableOpacity>
-            <View style={{ width: 12 }} />
-            <TouchableOpacity onPress={() => deleteNote(item.id)}>
-              <Ionicons name="trash-outline" size={20} color="#999" />
-            </TouchableOpacity>
-          </View>
-        </Pressable>
-      </Animated.View>
+      ],
+      { cancelable: true }
     );
-  };
+  }, []);
 
-  return (
-    <KeyboardAvoidingView behavior={Platform.select({ ios: 'padding', android: undefined })} style={styles.wrap}>
-      <View style={styles.header}>
-        <Text style={styles.title}>Love Notes</Text>
-        <View style={styles.kindRow}>
-          <Chip selected={kind === 'private'} label="Private" onPress={() => setKind('private')} />
-          <Chip selected={kind === 'shared'} label="Shared" onPress={() => setKind('shared')} />
-          <View style={{ width: 8 }} />
-          <Toggle value={createForBoth} onChange={setCreateForBoth} label="Create for both" hint="Duplicate to partner" />
-          <View style={{ width: 8 }} />
-          <Toggle value={sendPush} onChange={setSendPush} label="Send as push" hint="Local notification" />
-        </View>
-      </View>
-
-      {/* Templates */}
-      <FlatList
-        data={TEMPLATES}
-        keyExtractor={t => t.key}
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={{ paddingHorizontal: 16 }}
-        style={{ maxHeight: 48, marginBottom: 8 }}
-        renderItem={({ item }) => (
-          <Chip
-            label={item.text}
-            onPress={() => {
-              setText(item.text + ' ');
-              inputRef.current?.focus();
-            }}
-          />
-        )}
-      />
-
-      {/* Quick romantic prompts */}
-      {quick.length > 0 && (
+  const header = useMemo(
+    () => (
+      <View>
+        {/* Kind chips */}
         <FlatList
-          data={quick}
-          keyExtractor={(t, i) => String(i)}
+          data={NOTE_KINDS}
+          keyExtractor={(k) => k}
           horizontal
           showsHorizontalScrollIndicator={false}
-          contentContainerStyle={{ paddingHorizontal: 16 }}
-          style={{ maxHeight: 44, marginBottom: 8 }}
+          contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: 6 }}
+          renderItem={({ item }) => {
+            const active = item === kind;
+            return (
+              <TouchableOpacity
+                onPress={() => setKind(item)}
+                style={[styles.chip, active && styles.chipActive]}
+              >
+                <Text style={[styles.chipText, active && styles.chipTextActive]}>
+                  {prettyKind(item)}
+                </Text>
+              </TouchableOpacity>
+            );
+          }}
+        />
+
+        {/* Input + Add */}
+        <View style={styles.inputRow}>
+          <TextInput
+            ref={inputRef}
+            style={styles.input}
+            placeholder="Write something sweet…"
+            placeholderTextColor="#9CA3AF"
+            value={text}
+            onChangeText={(v) => {
+              setText(v);
+              if (error && v.trim().length >= 3) setError(null);
+            }}
+            returnKeyType="done"
+            onSubmitEditing={onAdd}
+          />
+          <TouchableOpacity
+            onPress={onAdd}
+            disabled={!canAdd || isAdding}
+            style={[styles.addBtn, (!canAdd || isAdding) && styles.addBtnDisabled]}
+          >
+            <Text style={styles.addBtnText}>{isAdding ? '…' : 'Add'}</Text>
+          </TouchableOpacity>
+        </View>
+        {!!error && <Text style={styles.error}>{error}</Text>}
+
+        {/* Prompt chips */}
+        <FlatList
+          data={PROMPTS}
+          keyExtractor={(p, i) => `${i}-${p.slice(0, 8)}`}
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 6, paddingBottom: 12 }}
           renderItem={({ item }) => (
-            <Chip
-              label={item}
-              onPress={() => {
-                setText(item + ' ');
-                inputRef.current?.focus();
-              }}
-              ghost
-            />
+            <TouchableOpacity onPress={() => onInsertPrompt(item)} style={styles.promptChip}>
+              <Text style={styles.promptText}>{item}</Text>
+            </TouchableOpacity>
           )}
         />
-      )}
-
-      {/* Composer */}
-      <View style={styles.inputRow}>
-        <TextInput
-          ref={inputRef}
-          style={styles.input}
-          placeholder="Write a sweet note…"
-          placeholderTextColor="#9BA1A6"
-          value={text}
-          onChangeText={setText}
-          multiline
-        />
       </View>
+    ),
+    [kind, text, canAdd, isAdding, error, onAdd, onInsertPrompt]
+  );
 
-      <View style={styles.actions}>
-        <TouchableOpacity
-          style={[styles.btn, { backgroundColor: canSend ? PINK : '#C7CAD0' }]}
-          disabled={!canSend || busy}
-          onPress={() => handleSend()}
-        >
-          <Text style={styles.btnText}>{kind === 'shared' ? 'Post' : 'Save'}</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Feed */}
+  return (
+    <KeyboardAvoidingView
+      style={{ flex: 1, backgroundColor: '#0D0F12' }}
+      behavior={Platform.select({ ios: 'padding', android: undefined })}
+    >
       <FlatList
         data={notes}
-        keyExtractor={n => n.id}
-        contentContainerStyle={{ padding: 16, paddingTop: 8, paddingBottom: 24 }}
-        renderItem={({ item, index }) => <Card item={item} index={index} />}
-        ListEmptyComponent={<Text style={styles.empty}>No notes yet. Try a template or a quick prompt 🌸</Text>}
+        keyExtractor={(n) => n.id}
+        ListHeaderComponent={header}
+        contentContainerStyle={{ paddingBottom: 32 }}
+        ListEmptyComponent={
+          <Text style={styles.empty}>
+            No love notes yet. Start with a quick prompt above 💌
+          </Text>
+        }
+        renderItem={({ item }) => (
+          <TouchableOpacity
+            activeOpacity={0.7}
+            onLongPress={() => onLongPressRow(item)}
+            style={styles.card}
+          >
+            <Text style={styles.cardText}>{item.text}</Text>
+            {/* timestamp (optional) */}
+            {item.createdAt ? (
+              <Text style={styles.cardMeta}>{formatWhen(item.createdAt)}</Text>
+            ) : null}
+          </TouchableOpacity>
+        )}
       />
     </KeyboardAvoidingView>
   );
 }
 
-/* Tiny UI bits */
-
-function Chip({
-  label, onPress, selected, ghost,
-}: { label: string; onPress?: () => void; selected?: boolean; ghost?: boolean }) {
-  return (
-    <TouchableOpacity
-      onPress={onPress}
-      style={[
-        {
-          paddingHorizontal: 12,
-          paddingVertical: 8,
-          borderRadius: 999,
-          marginRight: 8,
-          borderWidth: 1,
-          borderColor: ghost ? '#EAD7E0' : selected ? PINK : '#E0E2E6',
-          backgroundColor: selected ? PINK_SOFT : ghost ? 'transparent' : '#FFF',
-        },
-      ]}
-    >
-      <Text style={{ color: selected ? PINK : TEXT }} numberOfLines={1}>
-        {label}
-      </Text>
-    </TouchableOpacity>
-  );
+function prettyKind(k: NoteKind) {
+  switch (k) {
+    case 'loveNote':
+      return 'Love';
+    case 'favoriteFood':
+      return 'Fav Food';
+    case 'habit':
+      return 'Habit';
+    case 'place':
+      return 'Place';
+    case 'appreciation':
+      return 'Thanks';
+    case 'insideJoke':
+      return 'Joke';
+    case 'gratitude':
+      return 'Gratitude';
+    case 'memorySnippet':
+      return 'Snippet';
+    default:
+      return k;
+  }
 }
 
-function Toggle({ value, onChange, label, hint }: { value: boolean; onChange: (v: boolean) => void; label: string; hint?: string }) {
-  return (
-    <TouchableOpacity onPress={() => onChange(!value)} style={styles.toggle}>
-      <View style={[styles.switch, value ? styles.switchOn : styles.switchOff]} />
-      <View>
-        <Text style={styles.toggleLabel}>{label}</Text>
-        {hint ? <Text style={styles.toggleHint}>{hint}</Text> : null}
-      </View>
-    </TouchableOpacity>
-  );
+function formatWhen(ts: any) {
+  try {
+    // Firestore Timestamp or Date
+    const d =
+      typeof ts?.toDate === 'function'
+        ? (ts.toDate() as Date)
+        : ts instanceof Date
+        ? ts
+        : new Date();
+    return d.toLocaleString();
+  } catch {
+    return '';
+  }
 }
 
 const styles = StyleSheet.create({
-  wrap: { flex: 1, backgroundColor: BG },
-  header: { paddingHorizontal: 16, paddingTop: 16, paddingBottom: 8 },
-  title: { fontSize: 24, fontWeight: '800', color: TEXT },
-  kindRow: { flexDirection: 'row', alignItems: 'center', marginTop: 8 },
-
-  inputRow: { paddingHorizontal: 16, paddingTop: 8 },
-  input: {
-    minHeight: 48,
-    maxHeight: 120,
-    backgroundColor: '#FFF',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
+  chip: {
     paddingHorizontal: 12,
-    paddingVertical: 12,
-    fontSize: 16,
-    color: TEXT,
-  },
-
-  actions: { paddingHorizontal: 16, paddingTop: 8 },
-  btn: { height: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-  btnText: { color: '#FFF', fontWeight: '700' },
-
-  card: {
-    backgroundColor: '#FFF',
-    borderRadius: 14,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: BORDER,
-    marginBottom: 12,
-  },
-  cardText: { fontSize: 16, color: '#222', marginBottom: 10 },
-  row: { flexDirection: 'row', alignItems: 'center' },
-  pill: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
+    paddingVertical: 8,
+    backgroundColor: '#1F2430',
     borderRadius: 999,
-    backgroundColor: '#F4F5F8',
-    color: '#555',
+    marginRight: 8,
+    borderWidth: 1,
+    borderColor: '#2F3644',
+  },
+  chipActive: {
+    backgroundColor: '#E14C7B',
+    borderColor: '#E14C7B',
+  },
+  chipText: {
+    color: '#C9D1D9',
+    fontWeight: '700',
     fontSize: 12,
-  } as any,
-  empty: { textAlign: 'center', color: MUTED, marginTop: 24 },
-
-  toggle: { flexDirection: 'row', alignItems: 'center' },
-  switch: { width: 36, height: 22, borderRadius: 999, marginRight: 8 },
-  switchOn: { backgroundColor: PINK },
-  switchOff: { backgroundColor: '#D2D6DB' },
-  toggleLabel: { fontWeight: '700', color: TEXT },
-  toggleHint: { color: MUTED, fontSize: 12 },
+  },
+  chipTextActive: {
+    color: '#fff',
+  },
+  inputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    marginTop: 6,
+  },
+  input: {
+    flex: 1,
+    backgroundColor: '#12161C',
+    borderWidth: 1,
+    borderColor: '#2B3240',
+    color: '#fff',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: Platform.select({ ios: 12, android: 10 }),
+  },
+  addBtn: {
+    marginLeft: 10,
+    backgroundColor: '#8B5CF6',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  addBtnDisabled: {
+    backgroundColor: '#4C4F5A',
+  },
+  addBtnText: {
+    color: '#fff',
+    fontWeight: '800',
+  },
+  error: {
+    color: '#FCA5A5',
+    paddingHorizontal: 16,
+    marginTop: 6,
+    fontSize: 12,
+  },
+  promptChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: '#16202A',
+    borderRadius: 999,
+    marginRight: 8,
+    borderWidth: 1,
+    borderColor: '#243040',
+  },
+  promptText: {
+    color: '#9CC5FF',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  empty: {
+    color: '#A1A7B3',
+    textAlign: 'center',
+    marginTop: 32,
+  },
+  card: {
+    backgroundColor: '#10151C',
+    borderColor: '#1E2532',
+    borderWidth: 1,
+    marginHorizontal: 16,
+    marginTop: 12,
+    padding: 14,
+    borderRadius: 14,
+  },
+  cardText: {
+    color: '#E6E7EB',
+    fontSize: 15,
+    lineHeight: 20,
+  },
+  cardMeta: {
+    marginTop: 6,
+    color: '#8B97A8',
+    fontSize: 12,
+  },
 });

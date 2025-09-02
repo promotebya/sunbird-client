@@ -1,59 +1,66 @@
-// navigation/AppNavigator.tsx
 import { Ionicons } from '@expo/vector-icons';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { DarkTheme, DefaultTheme, NavigationContainer } from '@react-navigation/native';
-import React from 'react';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
+import * as React from 'react';
 
-import useColorScheme from '../hooks/useColorScheme';
+import type { RootTabParamList } from './types';
 
+// Screens
 import HomeScreen from '../screens/HomeScreen';
+import LoveNotesScreen from '../screens/LoveNotesScreen';
 import MemoriesScreen from '../screens/MemoriesScreen';
 import PointsScreen from '../screens/PointsScreen';
 import RemindersScreen from '../screens/RemindersScreen';
 import TasksScreen from '../screens/TasksScreen';
 
-export type RootTabParamList = {
-  Home: undefined;
-  Tasks: undefined;
-  Points: undefined;
-  Memories: undefined;
-  Reminders: undefined;
-};
+// IMPORTANT: Do NOT wrap this in <NavigationContainer/> here.
+// App.tsx should own the single NavigationContainer.
 
 const Tab = createBottomTabNavigator<RootTabParamList>();
 
 export default function AppNavigator() {
-  const scheme = useColorScheme();
-
   return (
-    <SafeAreaProvider>
-      <NavigationContainer theme={scheme === 'dark' ? DarkTheme : DefaultTheme}>
-        <Tab.Navigator
-          screenOptions={({ route }) => ({
-            headerShown: false,
-            tabBarActiveTintColor: '#5B5BFF',
-            tabBarStyle: { height: 62, paddingTop: 4 },
-            tabBarLabelStyle: { fontWeight: '700', marginBottom: 6 },
-            tabBarIcon: ({ color, size }) => {
-              const icon: Record<string, keyof typeof Ionicons.glyphMap> = {
-                Home: 'home',
-                Tasks: 'checkbox',
-                Points: 'trophy',
-                Memories: 'images',
-                Reminders: 'notifications',
-              };
-              return <Ionicons name={icon[route.name] ?? 'ellipse'} size={size} color={color} />;
-            },
-          })}
-        >
-          <Tab.Screen name="Home" component={HomeScreen} />
-          <Tab.Screen name="Tasks" component={TasksScreen} />
-          <Tab.Screen name="Points" component={PointsScreen} />
-          <Tab.Screen name="Memories" component={MemoriesScreen} />
-          <Tab.Screen name="Reminders" component={RemindersScreen} />
-        </Tab.Navigator>
-      </NavigationContainer>
-    </SafeAreaProvider>
+    <Tab.Navigator
+      screenOptions={({ route }) => ({
+        headerShown: false,
+        tabBarActiveTintColor: '#e91e63',
+        tabBarInactiveTintColor: '#8e8e93',
+        tabBarIcon: ({ focused, color, size }) => {
+          let iconName: keyof typeof Ionicons.glyphMap = 'ellipse';
+
+          switch (route.name) {
+            case 'Home':
+              iconName = focused ? 'home' : 'home-outline';
+              break;
+            case 'Memories':
+              iconName = focused ? 'images' : 'images-outline';
+              break;
+            case 'Points':
+              iconName = focused ? 'trophy' : 'trophy-outline';
+              break;
+            case 'Tasks':
+              iconName = focused ? 'checkbox' : 'checkbox-outline';
+              break;
+            case 'Reminders':
+              iconName = focused ? 'alarm' : 'alarm-outline';
+              break;
+            case 'LoveNotes':
+              iconName = focused ? 'heart' : 'heart-outline';
+              break;
+          }
+          return <Ionicons name={iconName} size={size} color={color} />;
+        },
+      })}
+    >
+      <Tab.Screen name="Home" component={HomeScreen} />
+      <Tab.Screen name="Memories" component={MemoriesScreen} />
+      <Tab.Screen name="Points" component={PointsScreen} />
+      <Tab.Screen name="Tasks" component={TasksScreen} />
+      <Tab.Screen name="Reminders" component={RemindersScreen} />
+      <Tab.Screen
+        name="LoveNotes"
+        component={LoveNotesScreen}
+        options={{ title: 'Love Notes' }}
+      />
+    </Tab.Navigator>
   );
 }

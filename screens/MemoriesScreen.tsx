@@ -13,33 +13,33 @@ import useAuthListener from '../hooks/useAuthListener';
 import {
   Memory,
   MemoryKind,
-  create as createMemory,
-  remove as deleteMemory,
-  listByOwner
+  create,
+  listByOwner,
+  remove
 } from '../utils/memories';
 
 const KINDS: MemoryKind[] = ['idea', 'link', 'gift', 'note'];
 
 export default function MemoriesScreen() {
   const { user } = useAuthListener();
+  const ownerId = user?.uid ?? '';
+
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState<Memory[]>([]);
   const [filterKind, setFilterKind] = useState<MemoryKind | 'all'>('all');
 
-  // form state
+  // form
   const [kind, setKind] = useState<MemoryKind>('idea');
   const [label, setLabel] = useState('');
   const [value, setValue] = useState('');
   const [notes, setNotes] = useState('');
 
-  // tiny toast
+  // toast
   const [toast, setToast] = useState<string | null>(null);
   const showToast = useCallback((msg: string) => {
     setToast(msg);
     setTimeout(() => setToast(null), 1400);
   }, []);
-
-  const ownerId = user?.uid ?? '';
 
   const load = useCallback(async () => {
     if (!ownerId) return;
@@ -47,8 +47,8 @@ export default function MemoriesScreen() {
     try {
       const data = await listByOwner(ownerId);
       setItems(data);
-    } catch (e: any) {
-      console.error('memories load error', e);
+    } catch (e) {
+      console.error(e);
       showToast('Could not load memories');
     } finally {
       setLoading(false);
@@ -57,14 +57,14 @@ export default function MemoriesScreen() {
 
   useEffect(() => {
     load();
-  }, [load]); // ✅ only 1 dependency array (no third arg)
+  }, [load]);
 
   const filtered = useMemo(() => {
     if (filterKind === 'all') return items;
-    return items.filter(m => m.kind === filterKind);
+    return items.filter((m) => m.kind === filterKind);
   }, [items, filterKind]);
 
-  const canSubmit = useMemo(() => label.trim().length > 0, [label]);
+  const canSubmit = label.trim().length > 0;
 
   const resetForm = () => {
     setKind('idea');
@@ -76,12 +76,12 @@ export default function MemoriesScreen() {
   const onCreate = async () => {
     if (!ownerId) return;
     if (!canSubmit) {
-      showToast('Add a short title first');
+      showToast('Title is required');
       return;
     }
     try {
       setLoading(true);
-      await createMemory(ownerId, {
+      await create(ownerId, {
         kind,
         label: label.trim(),
         value: value.trim() || null,
@@ -91,8 +91,8 @@ export default function MemoriesScreen() {
       Keyboard.dismiss();
       showToast('Saved ✨');
       await load();
-    } catch (e: any) {
-      console.error('create memory error', e);
+    } catch (e) {
+      console.error(e);
       showToast('Save failed');
     } finally {
       setLoading(false);
@@ -107,7 +107,7 @@ export default function MemoriesScreen() {
         style: 'destructive',
         onPress: async () => {
           try {
-            await deleteMemory(m.id);
+            await remove(m.id);
             showToast('Deleted');
             await load();
           } catch (e) {
@@ -127,26 +127,22 @@ export default function MemoriesScreen() {
         onPress={() => setFilterKind(k)}
         style={[styles.chip, active && styles.chipActive]}
       >
-        <Text style={[styles.chipText, active && styles.chipTextActive]}>
-          {k === 'all' ? 'all' : k}
-        </Text>
+        <Text style={[styles.chipText, active && styles.chipTextActive]}>{k}</Text>
       </TouchableOpacity>
     );
   };
 
   return (
     <View style={styles.container}>
-      {/* Filter chips */}
-      <View style={styles.row}>
-        {(['all', ...KINDS] as (MemoryKind | 'all')[]).map(renderKindChip)}
-      </View>
+      {/* Filter */}
+      <View style={styles.row}>{(['all', ...KINDS] as const).map(renderKindChip)}</View>
 
       {/* Create form */}
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Add a memory</Text>
 
         <View style={styles.row}>
-          {KINDS.map(k => {
+          {KINDS.map((k) => {
             const active = kind === k;
             return (
               <TouchableOpacity
@@ -169,7 +165,6 @@ export default function MemoriesScreen() {
           style={styles.input}
         />
 
-        {/* Optional fields vary a bit by kind */}
         {kind === 'link' ? (
           <TextInput
             placeholder="URL (optional)"
@@ -191,7 +186,7 @@ export default function MemoriesScreen() {
           />
         ) : null}
 
-        {(kind === 'idea' || kind === 'note') ? (
+        {(kind === 'idea' || kind === 'note') && (
           <TextInput
             placeholder="Details / notes (optional)"
             value={notes}
@@ -199,7 +194,7 @@ export default function MemoriesScreen() {
             multiline
             style={[styles.input, { height: 88 }]}
           />
-        ) : null}
+        )}
 
         <TouchableOpacity
           style={[styles.btn, !canSubmit && styles.btnDisabled]}
@@ -217,11 +212,7 @@ export default function MemoriesScreen() {
         data={filtered}
         keyExtractor={(m) => m.id}
         contentContainerStyle={{ paddingBottom: 48 }}
-        ListEmptyComponent={
-          <Text style={styles.empty}>
-            No memories yet. Add your first above 💡
-          </Text>
-        }
+        ListEmptyComponent={<Text style={styles.empty}>No memories yet. Add one above 💡</Text>}
         renderItem={({ item }) => (
           <View style={styles.item}>
             <View style={{ flex: 1 }}>
@@ -233,14 +224,9 @@ export default function MemoriesScreen() {
               {!!item.notes && <Text style={styles.itemNotes}>{item.notes}</Text>}
             </View>
 
-            <View style={{ alignItems: 'flex-end', gap: 6 }}>
-              <TouchableOpacity
-                style={[styles.smallBtn, styles.danger]}
-                onPress={() => onDelete(item)}
-              >
-                <Text style={styles.smallBtnText}>Delete</Text>
-              </TouchableOpacity>
-            </View>
+            <TouchableOpacity style={[styles.smallBtn, styles.danger]} onPress={() => onDelete(item)}>
+              <Text style={styles.smallBtnText}>Delete</Text>
+            </TouchableOpacity>
           </View>
         )}
       />
@@ -297,7 +283,6 @@ const styles = StyleSheet.create({
   btnDisabled: { opacity: 0.5 },
   btnText: { color: '#fff', fontWeight: '800' },
 
-  // small action pill (fixes the missing style keys)
   smallBtn: {
     paddingHorizontal: 10,
     height: 28,
@@ -318,12 +303,16 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     borderBottomWidth: 1,
     borderBottomColor: '#eee',
+    alignItems: 'center',
   },
   itemTitle: { fontWeight: '800', color: '#111' },
   itemMeta: { color: '#777', marginTop: 2 },
   itemNotes: { color: '#444', marginTop: 4 },
 
   empty: { textAlign: 'center', color: '#888', marginTop: 24 },
+
+  // <-- missing key that error complained about
+  hint: { color: '#888', marginTop: 6 },
 
   toast: {
     position: 'absolute',

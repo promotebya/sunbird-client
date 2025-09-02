@@ -1,12 +1,9 @@
-// utils/memories.ts
 import {
   addDoc,
   collection,
   deleteDoc,
   doc,
-  getDoc,
   getDocs,
-  onSnapshot,
   orderBy,
   query,
   serverTimestamp,
@@ -16,132 +13,73 @@ import {
 } from 'firebase/firestore';
 import { db } from '../firebase/firebaseConfig';
 
-/** Extend/adjust kinds freely */
-export type MemoryKind =
-  | 'favoriteFood'
-  | 'place'
-  | 'idea'
-  | 'gift'
-  | 'habit'
-  | 'link'
-  | string;
+export type MemoryKind = 'idea' | 'link' | 'gift' | 'note';
 
-export interface Memory {
+export interface MemoryCreate {
+  kind: MemoryKind;
+  label: string;
+  value?: string | null;
+  notes?: string | null;
+}
+
+export interface Memory extends MemoryCreate {
   id: string;
   ownerId: string;
-  pairId?: string | null;
-  kind: MemoryKind;
-
-  /** Primary display text */
-  label: string;
-
-  /** Back-compat alias some screens still read */
-  value?: string | null;
-
-  /** Optional extras */
-  notes?: string | null;
-  url?: string | null;
-
-  /** Timestamps (nullable while pending) */
-  createdAt: Timestamp | null;
-  updatedAt: Timestamp | null;
+  createdAt: Timestamp | Date | null;
+  updatedAt?: Timestamp | Date | null;
+  value: string | null;
+  notes: string | null;
 }
-
-export interface CreateMemoryInput {
-  ownerId: string;
-  pairId?: string | null;
-  kind: MemoryKind;
-  label?: string;        // allow either label or value
-  value?: string;        // (we'll normalize)
-  notes?: string | null;
-  url?: string | null;
-}
-
-export type UpdateMemoryInput = Partial<
-  Omit<Memory, 'id' | 'ownerId' | 'createdAt' | 'updatedAt'>
-> & { pairId?: string | null };
 
 const coll = collection(db, 'memories');
 
-/** Defensive normalizer that tolerates older/newer shapes */
-function normalize(docSnap: any): Memory {
-  const data = (docSnap?.data?.() ?? {}) as Record<string, any>;
-
-  const label = (data.label ?? data.value ?? '').toString();
-  const value = data.value ?? data.label ?? null;
-
-  const createdAt =
-    (data.createdAt as Timestamp | undefined) ?? null;
-  const updatedAt =
-    (data.updatedAt as Timestamp | undefined) ?? null;
-
-  return {
-    id: docSnap.id,
-    ownerId: data.ownerId,
-    pairId: data.pairId ?? null,
+export async function create(ownerId: string, data: MemoryCreate): Promise<string> {
+  const payload = {
+    ownerId,
     kind: data.kind,
-    label,
-    value,
-    notes: data.notes ?? null,
-    url: data.url ?? null,
-    createdAt,
-    updatedAt,
-  };
-}
-
-/* ----------------------------------------------------------------------------
- * CRUD
- * --------------------------------------------------------------------------*/
-
-export async function createMemory(input: CreateMemoryInput): Promise<string> {
-  const label = input.label ?? input.value ?? '';
-  const ref = await addDoc(coll, {
-    ownerId: input.ownerId,
-    pairId: input.pairId ?? null,
-    kind: input.kind,
-    label,
-    value: label, // keep both for compatibility
-    notes: input.notes ?? null,
-    url: input.url ?? null,
+    label: data.label,
+    value: (data.value ?? null) as string | null,
+    notes: (data.notes ?? null) as string | null,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
-  });
+  };
+  const ref = await addDoc(coll, payload);
   return ref.id;
 }
 
-export async function updateMemory(id: string, patch: UpdateMemoryInput) {
-  // Keep label/value in sync if either is provided
-  const updates: Record<string, any> = { ...patch, updatedAt: serverTimestamp() };
-  if (patch.label != null && updates.value == null) updates.value = patch.label;
-  if (patch.value != null && updates.label == null) updates.label = patch.value;
-
-  const ref = doc(db, 'memories', id);
-  await updateDoc(ref, updates);
-}
-
-export async function deleteMemory(id: string) {
+export async function remove(id: string): Promise<void> {
   await deleteDoc(doc(db, 'memories', id));
 }
 
-export async function getMemory(id: string): Promise<Memory | null> {
-  const snap = await getDoc(doc(db, 'memories', id));
-  if (!snap.exists()) return null;
-  return normalize(snap);
+export async function update(
+  id: string,
+  data: Partial<Pick<Memory, 'label' | 'value' | 'notes' | 'kind'>>
+): Promise<void> {
+  await updateDoc(doc(db, 'memories', id), {
+    ...data,
+    updatedAt: serverTimestamp(),
+  });
 }
 
-/* ----------------------------------------------------------------------------
- * One-shot queries (newest first)
- * --------------------------------------------------------------------------*/
-
-export async function listMine(ownerId: string): Promise<Memory[]> {
+export async function listByOwner(ownerId: string): Promise<Memory[]> {
   const q = query(coll, where('ownerId', '==', ownerId), orderBy('createdAt', 'desc'));
   const snap = await getDocs(q);
-  return snap.docs.map(normalize);
+  return snap.docs.map((d) => {
+    const raw = d.data() as any;
+    return {
+      id: d.id,
+      ownerId: raw.ownerId as string,
+      kind: raw.kind as MemoryKind,
+      label: raw.label as string,
+      value: (raw.value ?? null) as string | null,
+      notes: (raw.notes ?? null) as string | null,
+      createdAt: (raw.createdAt ?? null) as Timestamp | Date | null,
+      updatedAt: (raw.updatedAt ?? null) as Timestamp | Date | null,
+    } as Memory;
+  });
 }
 
-/** Alias so existing imports (`listByOwner`) keep working */
-export const listByOwner = listMine;
-
+/** NEW: list by owner & kind (requires composite index: ownerId + kind + createdAt desc) */
 export async function listByKind(ownerId: string, kind: MemoryKind): Promise<Memory[]> {
   const q = query(
     coll,
@@ -150,39 +88,17 @@ export async function listByKind(ownerId: string, kind: MemoryKind): Promise<Mem
     orderBy('createdAt', 'desc')
   );
   const snap = await getDocs(q);
-  return snap.docs.map(normalize);
-}
-
-export async function listByPair(pairId: string): Promise<Memory[]> {
-  const q = query(coll, where('pairId', '==', pairId), orderBy('createdAt', 'desc'));
-  const snap = await getDocs(q);
-  return snap.docs.map(normalize);
-}
-
-/* ----------------------------------------------------------------------------
- * Live listeners
- * --------------------------------------------------------------------------*/
-
-export function listenMine(ownerId: string, cb: (items: Memory[]) => void) {
-  const q = query(coll, where('ownerId', '==', ownerId), orderBy('createdAt', 'desc'));
-  return onSnapshot(q, (snap) => cb(snap.docs.map(normalize)));
-}
-
-export function listenByKind(
-  ownerId: string,
-  kind: MemoryKind,
-  cb: (items: Memory[]) => void
-) {
-  const q = query(
-    coll,
-    where('ownerId', '==', ownerId),
-    where('kind', '==', kind),
-    orderBy('createdAt', 'desc')
-  );
-  return onSnapshot(q, (snap) => cb(snap.docs.map(normalize)));
-}
-
-export function listenByPair(pairId: string, cb: (items: Memory[]) => void) {
-  const q = query(coll, where('pairId', '==', pairId), orderBy('createdAt', 'desc'));
-  return onSnapshot(q, (snap) => cb(snap.docs.map(normalize)));
+  return snap.docs.map((d) => {
+    const raw = d.data() as any;
+    return {
+      id: d.id,
+      ownerId: raw.ownerId as string,
+      kind: raw.kind as MemoryKind,
+      label: raw.label as string,
+      value: (raw.value ?? null) as string | null,
+      notes: (raw.notes ?? null) as string | null,
+      createdAt: (raw.createdAt ?? null) as Timestamp | Date | null,
+      updatedAt: (raw.updatedAt ?? null) as Timestamp | Date | null,
+    } as Memory;
+  });
 }

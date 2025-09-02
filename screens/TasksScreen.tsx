@@ -1,290 +1,236 @@
 // screens/TasksScreen.tsx
-import {
-    addDoc,
-    collection,
-    deleteDoc,
-    doc,
-    onSnapshot,
-    orderBy,
-    query,
-    serverTimestamp,
-    where,
-} from 'firebase/firestore';
+import { addDoc, collection, onSnapshot, orderBy, query, serverTimestamp, where } from 'firebase/firestore';
 import React, { useEffect, useMemo, useState } from 'react';
-import {
-    Alert,
-    FlatList,
-    KeyboardAvoidingView,
-    Platform,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View,
-} from 'react-native';
-import { auth, db } from '../firebase/firebaseConfig';
-import { completeTask, Task } from '../utils/tasks';
+import { Alert, Keyboard, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { db } from '../firebase/firebaseConfig';
+import useAuthListener from '../hooks/useAuthListener';
+import makeCoupleId from '../utils/makeCoupleId';
+import { getPartnerUid } from '../utils/partner';
 
-type Tab = 'personal' | 'shared';
+type Task = {
+  id: string;
+  text: string;
+  points: number;
+  ownerId?: string;
+  pairId?: string | null;
+  createdAt?: any;
+  done?: boolean;
+};
+
+type TabKey = 'personal' | 'shared';
 
 export default function TasksScreen() {
-  const uid = auth.currentUser?.uid ?? '';
-  const [tab, setTab] = useState<Tab>('personal');
-  const [pairId, setPairId] = useState<string | null>(null);
+  const user = useAuthListener();
+  const [tab, setTab] = useState<TabKey>('personal');
 
-  const [title, setTitle] = useState('');
-  const [points, setPoints] = useState('10');
-  const [personal, setPersonal] = useState<Task[]>([]);
-  const [shared, setShared] = useState<Task[]>([]);
-  const [busy, setBusy] = useState(false);
+  const [input, setInput] = useState('');
+  const [points, setPoints] = useState<string>('10');
 
-  // Load my pairId once (from users/{uid})
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const tasksCol = useMemo(() => collection(db, 'tasks'), []);
+
+  // subscribe to personal or shared tasks depending on tab
   useEffect(() => {
-    if (!uid) return;
-    const unsub = onSnapshot(doc(db, 'users', uid), (snap) => {
-      setPairId((snap.data() as any)?.pairId ?? null);
-    });
-    return unsub;
-  }, [uid]);
+    if (!user?.uid) return;
 
-  // Listen personal tasks (owned by me, not completed)
-  useEffect(() => {
-    if (!uid) return;
-    const q = query(
-      collection(db, 'tasks'),
-      where('ownerId', '==', uid),
-      where('completed', '!=', true),
-      orderBy('completed'), // required when using '!='
-      orderBy('createdAt', 'desc')
-    );
-    return onSnapshot(
-      q,
-      (snap) => {
-        const list = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Task[];
-        setPersonal(list);
-      },
-      (err) => {
-        console.error('Personal tasks listener error:', err);
-        Alert.alert('Error', err.message);
+    let unsub: (() => void) | undefined;
+
+    (async () => {
+      setLoading(true);
+      try {
+        if (tab === 'personal') {
+          const q = query(
+            tasksCol,
+            where('ownerId', '==', user.uid),
+            orderBy('createdAt', 'desc')
+          );
+          unsub = onSnapshot(
+            q,
+            (snap) => {
+              const list: Task[] = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+              setTasks(list);
+              setLoading(false);
+            },
+            (err) => {
+              setLoading(false);
+              console.error('Personal tasks listener error:', err);
+              Alert.alert('Error', err.message.includes('index')
+                ? 'The query requires an index. Please run the provided index link or deploy indexes.'
+                : err.message);
+            }
+          );
+        } else {
+          // shared tab: use the couple id
+          const partnerUid = await getPartnerUid(user.uid);
+          const pairId = partnerUid ? makeCoupleId(user.uid, partnerUid) : null;
+
+          if (!pairId) {
+            setTasks([]);
+            setLoading(false);
+            return;
+          }
+
+          const q = query(
+            tasksCol,
+            where('pairId', '==', pairId),
+            orderBy('createdAt', 'desc')
+          );
+          unsub = onSnapshot(
+            q,
+            (snap) => {
+              const list: Task[] = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+              setTasks(list);
+              setLoading(false);
+            },
+            (err) => {
+              setLoading(false);
+              console.error('Shared tasks listener error:', err);
+              Alert.alert('Error', err.message.includes('index')
+                ? 'The query requires an index. Please run the provided index link or deploy indexes.'
+                : err.message);
+            }
+          );
+        }
+      } catch (e: any) {
+        setLoading(false);
+        console.error(e);
+        Alert.alert('Error', e?.message ?? 'Something went wrong');
       }
-    );
-  }, [uid]);
+    })();
 
-  // Listen shared tasks (pairId matches, not completed)
-  useEffect(() => {
-    if (!pairId) {
-      setShared([]);
+    return () => {
+      if (unsub) unsub();
+    };
+  }, [tab, user?.uid, tasksCol]);
+
+  const onAdd = async () => {
+    if (!user?.uid) {
+      Alert.alert('Error', 'You must be logged in.');
       return;
     }
-    const q = query(
-      collection(db, 'tasks'),
-      where('pairId', '==', pairId),
-      where('completed', '!=', true),
-      orderBy('completed'),
-      orderBy('createdAt', 'desc')
-    );
-    return onSnapshot(
-      q,
-      (snap) => {
-        const list = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Task[];
-        setShared(list);
-      },
-      (err) => {
-        console.error('Shared tasks listener error:', err);
-        Alert.alert('Error', err.message);
-      }
-    );
-  }, [pairId]);
+    const text = input.trim();
+    if (!text) {
+      Alert.alert('Please add a task', 'Task description cannot be empty.');
+      return;
+    }
+    const pts = Number(points);
+    if (Number.isNaN(pts) || pts < 0) {
+      Alert.alert('Invalid points', 'Enter a valid non-negative number.');
+      return;
+    }
 
-  const currentList = useMemo(() => (tab === 'personal' ? personal : shared), [tab, personal, shared]);
-
-  const addTask = async () => {
     try {
-      if (!uid) return;
-      if (!title.trim()) {
-        Alert.alert('Add task', 'Please enter a task title.');
-        return;
-      }
-      const pts = Math.max(1, Number(points || 0));
-      const payload: any = {
-        title: title.trim(),
-        points: pts,
-        ownerId: uid,
-        createdAt: serverTimestamp(),
-        completed: false,
-      };
-      if (tab === 'shared') {
+      setLoading(true);
+
+      if (tab === 'personal') {
+        await addDoc(tasksCol, {
+          text,
+          points: pts,
+          ownerId: user.uid,
+          pairId: null,
+          createdAt: serverTimestamp(),
+          done: false,
+        });
+      } else {
+        const partnerUid = await getPartnerUid(user.uid);
+        const pairId = partnerUid ? makeCoupleId(user.uid, partnerUid) : null;
         if (!pairId) {
-          Alert.alert('Shared tasks', 'Link a partner on Home first.');
+          Alert.alert('No couple set', 'You need a partner to add shared tasks.');
+          setLoading(false);
           return;
         }
-        payload.pairId = pairId;
+        await addDoc(tasksCol, {
+          text,
+          points: pts,
+          ownerId: user.uid,
+          pairId,
+          createdAt: serverTimestamp(),
+          done: false,
+        });
       }
-      await addDoc(collection(db, 'tasks'), payload);
-      setTitle('');
-    } catch (e: any) {
-      console.error(e);
-      Alert.alert('Add task failed', e.message);
-    }
-  };
 
-  const handleComplete = async (task: Task) => {
-    if (busy) return;
-    try {
-      setBusy(true);
-      const actor = auth.currentUser?.uid!;
-      await completeTask(task, actor);
-      // Optionally: Alert.alert('Nice!', `+${task.points} points awarded.`);
+      setInput('');
+      Keyboard.dismiss();
     } catch (e: any) {
       console.error(e);
-      Alert.alert('Complete failed', e.message);
+      Alert.alert('Error', e?.message ?? 'Failed to add task.');
     } finally {
-      setBusy(false);
+      setLoading(false);
     }
   };
-
-  const handleDelete = async (task: Task) => {
-    Alert.alert('Delete task', `Delete "${task.title}"?`, [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            await deleteDoc(doc(db, 'tasks', task.id));
-          } catch (e: any) {
-            Alert.alert('Delete failed', e.message);
-          }
-        },
-      },
-    ]);
-  };
-
-  const renderItem = ({ item }: { item: Task }) => (
-    <View style={styles.taskItem}>
-      <Text style={styles.taskTitle}>{item.title}</Text>
-      <View style={{ flexDirection: 'row', gap: 8, marginTop: 6 }}>
-        <TouchableOpacity
-          disabled={busy}
-          onPress={() => handleComplete(item)}
-          style={[styles.actionBtn, busy && { opacity: 0.7 }]}
-        >
-          <Text style={styles.actionText}>Complete +{item.points}</Text>
-        </TouchableOpacity>
-        <TouchableOpacity onPress={() => handleDelete(item)} style={[styles.actionBtn, styles.deleteBtn]}>
-          <Text style={styles.actionText}>Delete</Text>
-        </TouchableOpacity>
-      </View>
-      <Text style={styles.taskMeta}>
-        {item.pairId ? 'shared' : 'personal'} • {item.points} pts
-      </Text>
-    </View>
-  );
 
   return (
-    <KeyboardAvoidingView
-      style={{ flex: 1 }}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-    >
-      <View style={styles.container}>
-        {/* Tabs */}
-        <View style={styles.tabs}>
-          <TouchableOpacity
-            onPress={() => setTab('personal')}
-            style={[styles.tab, tab === 'personal' && styles.tabActive]}
-          >
-            <Text style={[styles.tabText, tab === 'personal' && styles.tabTextActive]}>Personal</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            onPress={() => setTab('shared')}
-            style={[styles.tab, tab === 'shared' && styles.tabActive]}
-          >
-            <Text style={[styles.tabText, tab === 'shared' && styles.tabTextActive]}>Shared</Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* Composer */}
-        <View style={styles.composer}>
-          <TextInput
-            style={styles.input}
-            placeholder={tab === 'personal' ? 'Add a personal task…' : 'Add a shared task…'}
-            value={title}
-            onChangeText={setTitle}
-          />
-          <View style={styles.row}>
-            <TextInput
-              style={styles.pointsInput}
-              value={points}
-              onChangeText={setPoints}
-              placeholder="10"
-              keyboardType="number-pad"
-            />
-            <TouchableOpacity onPress={addTask} style={styles.addBtn}>
-              <Text style={styles.addBtnText}>Add task</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {/* List */}
-        <FlatList
-          data={currentList}
-          keyExtractor={(t) => t.id}
-          renderItem={renderItem}
-          ListEmptyComponent={
-            <Text style={styles.empty}>No tasks yet — add your first one!</Text>
-          }
-          contentContainerStyle={{ paddingBottom: 24 }}
-        />
+    <View style={styles.container}>
+      {/* Tabs */}
+      <View style={styles.tabs}>
+        <Pressable onPress={() => setTab('personal')} style={[styles.tab, tab === 'personal' && styles.tabActive]}>
+          <Text style={[styles.tabText, tab === 'personal' && styles.tabTextActive]}>Personal</Text>
+        </Pressable>
+        <Pressable onPress={() => setTab('shared')} style={[styles.tab, tab === 'shared' && styles.tabActive]}>
+          <Text style={[styles.tabText, tab === 'shared' && styles.tabTextActive]}>Shared</Text>
+        </Pressable>
       </View>
-    </KeyboardAvoidingView>
+
+      {/* Composer */}
+      <View style={styles.composer}>
+        <TextInput
+          style={styles.input}
+          placeholder={tab === 'personal' ? 'Add a personal task…' : 'Add a shared task…'}
+          value={input}
+          onChangeText={setInput}
+        />
+        <TextInput
+          style={styles.points}
+          keyboardType="number-pad"
+          value={points}
+          onChangeText={setPoints}
+        />
+        <Pressable onPress={onAdd} style={({ pressed }) => [styles.addBtn, pressed && { opacity: 0.7 }]}>
+          <Text style={styles.addBtnText}>{loading ? 'Adding…' : 'Add task'}</Text>
+        </Pressable>
+      </View>
+
+      {/* List or empty state */}
+      <View style={{ flex: 1 }}>
+        {tasks.length === 0 ? (
+          <View style={styles.emptyWrap}>
+            <Text style={styles.emptyText}>
+              {loading ? 'Loading tasks…' : 'No tasks yet — add your first one!'}
+            </Text>
+          </View>
+        ) : (
+          tasks.map((t) => (
+            <View key={t.id} style={styles.item}>
+              <Text style={styles.itemText}>{t.text}</Text>
+              <Text style={styles.itemPts}>+{t.points}</Text>
+            </View>
+          ))
+        )}
+      </View>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 16 },
-  tabs: {
-    flexDirection: 'row',
-    gap: 10,
-    backgroundColor: '#eee',
-    borderRadius: 12,
-    padding: 4,
-    marginBottom: 12,
-  },
-  tab: {
-    flex: 1,
-    paddingVertical: 10,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  tabActive: { backgroundColor: '#5B5BFF' },
-  tabText: { fontWeight: '700', color: '#333' },
+  container: { flex: 1, paddingTop: 8 },
+  tabs: { flexDirection: 'row', paddingHorizontal: 16, gap: 12, marginBottom: 12 },
+  tab: { flex: 1, height: 44, borderRadius: 12, backgroundColor: '#eee', alignItems: 'center', justifyContent: 'center' },
+  tabActive: { backgroundColor: '#6A5AE0' },
+  tabText: { fontWeight: '700', color: '#222' },
   tabTextActive: { color: '#fff' },
 
-  composer: { backgroundColor: '#f7f7fb', borderRadius: 12, padding: 12, marginBottom: 12 },
-  input: {
-    borderWidth: 1, borderColor: '#ddd', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10,
-    backgroundColor: '#fff',
-  },
-  row: { flexDirection: 'row', gap: 10, marginTop: 10 },
-  pointsInput: {
-    width: 80, borderWidth: 1, borderColor: '#ddd', borderRadius: 8, paddingHorizontal: 10, backgroundColor: '#fff',
-  },
-  addBtn: {
-    flex: 1, backgroundColor: '#7A6CFF', borderRadius: 10, alignItems: 'center', justifyContent: 'center',
-  },
-  addBtnText: { color: '#fff', fontWeight: '700' },
+  composer: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, marginBottom: 10 },
+  input: { flex: 1, height: 44, paddingHorizontal: 12, borderRadius: 10, backgroundColor: '#fff', borderWidth: 1, borderColor: '#e3e3e7' },
+  points: { width: 64, height: 44, textAlign: 'center', borderRadius: 10, backgroundColor: '#fff', borderWidth: 1, borderColor: '#e3e3e7' },
+  addBtn: { height: 44, paddingHorizontal: 14, borderRadius: 10, backgroundColor: '#6A5AE0', alignItems: 'center', justifyContent: 'center' },
+  addBtnText: { color: '#fff', fontWeight: '800' },
 
-  taskItem: {
-    backgroundColor: '#fff', borderRadius: 12, padding: 12, marginBottom: 10,
-    borderWidth: 1, borderColor: '#eee',
-  },
-  taskTitle: { fontSize: 16, fontWeight: '600' },
-  taskMeta: { marginTop: 6, color: '#888' },
-  actionBtn: {
-    backgroundColor: '#5B5BFF', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8,
-  },
-  deleteBtn: { backgroundColor: '#E44' },
-  actionText: { color: '#fff', fontWeight: '700' },
+  emptyWrap: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  emptyText: { color: '#777' },
 
-  empty: { textAlign: 'center', color: '#777', marginTop: 32 },
+  item: { marginHorizontal: 16, marginBottom: 10, backgroundColor: '#fff', borderRadius: 12, padding: 12, borderWidth: 1, borderColor: '#eee', flexDirection: 'row', justifyContent: 'space-between' },
+  itemText: { color: '#222', fontWeight: '600', flexShrink: 1, paddingRight: 8 },
+  itemPts: { color: '#6A5AE0', fontWeight: '800' },
 });

@@ -5,7 +5,6 @@ import {
     deleteDoc,
     doc,
     getDocs,
-    onSnapshot,
     orderBy,
     query,
     serverTimestamp,
@@ -15,107 +14,102 @@ import {
 } from 'firebase/firestore';
 import { db } from '../firebase/firebaseConfig';
 
-export type NoteKind = 'private' | 'shared';
+/** Categories specifically for Love Notes */
+export type NoteKind =
+  | 'loveNote'
+  | 'favoriteFood'
+  | 'habit'
+  | 'place'
+  | 'appreciation'
+  | 'insideJoke'
+  | 'gratitude'
+  | 'memorySnippet';
 
-export type Note = {
-  id: string;
-  ownerId: string;
-  pairId?: string | null;
+export interface NoteCreate {
   kind: NoteKind;
   text: string;
-  templateKey?: string | null;
-  createdAt: Timestamp | null;
-  updatedAt: Timestamp | null;
-};
+  // optional helpers
+  context?: string | null; // e.g., “morning”, “after work”
+  templateId?: string | null;
+}
+
+export interface Note extends NoteCreate {
+  id: string;
+  ownerId: string;
+  createdAt: Timestamp | Date | null;
+  updatedAt?: Timestamp | Date | null;
+  context: string | null;
+  templateId: string | null;
+}
 
 const coll = collection(db, 'notes');
 
-/** Create a single note (private or shared). */
-export async function addNote(params: {
-  ownerId: string;
-  pairId?: string | null;
-  kind: NoteKind;
-  text: string;
-  templateKey?: string | null;
-}) {
-  const { ownerId, pairId = null, kind, text, templateKey = null } = params;
-  return addDoc(coll, {
+export async function create(ownerId: string, data: NoteCreate): Promise<string> {
+  const payload = {
     ownerId,
-    pairId,
-    kind,
-    text,
-    templateKey,
+    kind: data.kind,
+    text: data.text,
+    context: (data.context ?? null) as string | null,
+    templateId: (data.templateId ?? null) as string | null,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
-  });
+  };
+  const ref = await addDoc(coll, payload);
+  return ref.id;
 }
 
-/** Update text or templateKey. */
-export async function updateNote(id: string, data: Partial<Pick<Note, 'text' | 'templateKey'>>) {
+export async function update(
+  id: string,
+  data: Partial<Pick<Note, 'text' | 'context' | 'templateId' | 'kind'>>
+): Promise<void> {
   await updateDoc(doc(db, 'notes', id), {
     ...data,
     updatedAt: serverTimestamp(),
   });
 }
 
-export async function deleteNote(id: string) {
+export async function remove(id: string): Promise<void> {
   await deleteDoc(doc(db, 'notes', id));
 }
 
-/** Get a one-off list for owner (private) + pair (shared) merged, newest first. */
-export async function listNotes(ownerId: string, pairId?: string | null) {
-  const parts: Note[] = [];
-
-  // private
-  const q1 = query(coll, where('ownerId', '==', ownerId), where('kind', '==', 'private'), orderBy('createdAt', 'desc'));
-  const s1 = await getDocs(q1);
-  s1.forEach(d => parts.push({ id: d.id, ...(d.data() as any) }));
-
-  // shared (if any)
-  if (pairId) {
-    const q2 = query(coll, where('pairId', '==', pairId), where('kind', '==', 'shared'), orderBy('createdAt', 'desc'));
-    const s2 = await getDocs(q2);
-    s2.forEach(d => parts.push({ id: d.id, ...(d.data() as any) }));
-  }
-
-  // sort by createdAt desc (in case serverTimestamp pending)
-  return parts.sort((a, b) => {
-    const ta = (a.createdAt?.toMillis?.() ?? 0);
-    const tb = (b.createdAt?.toMillis?.() ?? 0);
-    return tb - ta;
+export async function listByOwner(ownerId: string): Promise<Note[]> {
+  const q = query(coll, where('ownerId', '==', ownerId), orderBy('createdAt', 'desc'));
+  const snap = await getDocs(q);
+  return snap.docs.map(d => {
+    const raw = d.data() as any;
+    return {
+      id: d.id,
+      ownerId: raw.ownerId as string,
+      kind: raw.kind as NoteKind,
+      text: raw.text as string,
+      context: (raw.context ?? null) as string | null,
+      templateId: (raw.templateId ?? null) as string | null,
+      createdAt: (raw.createdAt ?? null) as Timestamp | Date | null,
+      updatedAt: (raw.updatedAt ?? null) as Timestamp | Date | null,
+    } as Note;
   });
 }
 
-/** Live listener for private + shared. */
-export function listenNotes(ownerId: string, pairId: string | null, cb: (notes: Note[]) => void) {
-  const unsubs: Array<() => void> = [];
-  let priv: Note[] = [];
-  let shared: Note[] = [];
-
-  const push = () => {
-    const merged = [...priv, ...shared].sort((a, b) => {
-      const ta = a.createdAt?.toMillis?.() ?? 0;
-      const tb = b.createdAt?.toMillis?.() ?? 0;
-      return tb - ta;
-    });
-    cb(merged);
-  };
-
-  // private
-  const q1 = query(coll, where('ownerId', '==', ownerId), where('kind', '==', 'private'), orderBy('createdAt', 'desc'));
-  unsubs.push(onSnapshot(q1, snap => {
-    priv = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
-    push();
-  }));
-
-  // shared
-  if (pairId) {
-    const q2 = query(coll, where('pairId', '==', pairId), where('kind', '==', 'shared'), orderBy('createdAt', 'desc'));
-    unsubs.push(onSnapshot(q2, snap => {
-      shared = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
-      push();
-    }));
-  }
-
-  return () => unsubs.forEach(u => u());
+/** Used by LoveNotesScreen chips like 'favoriteFood' | 'place' | 'habit' */
+export async function listByKind(ownerId: string, kind: NoteKind): Promise<Note[]> {
+  const q = query(
+    coll,
+    where('ownerId', '==', ownerId),
+    where('kind', '==', kind),
+    orderBy('createdAt', 'desc')
+  );
+  const snap = await getDocs(q);
+  return snap.docs.map(d => {
+    const raw = d.data() as any;
+    return {
+      id: d.id,
+      ownerId: raw.ownerId as string,
+      kind: raw.kind as NoteKind,
+      text: raw.text as string,
+      context: (raw.context ?? null) as string | null,
+      templateId: (raw.templateId ?? null) as string | null,
+      createdAt: (raw.createdAt ?? null) as Timestamp | Date | null,
+      updatedAt: (raw.updatedAt ?? null) as Timestamp | Date | null,
+    } as Note;
+  });
 }
