@@ -1,7 +1,6 @@
-// hooks/useAuthListener.ts
-import { User } from 'firebase/auth';
+import { onAuthStateChanged, User } from 'firebase/auth';
 import { useEffect, useState } from 'react';
-import { auth, onAuthStateChanged } from '../firebaseConfig';
+import { auth } from '../firebaseConfig';
 
 export default function useAuthListener() {
   const [user, setUser] = useState<User | null>(auth.currentUser);
