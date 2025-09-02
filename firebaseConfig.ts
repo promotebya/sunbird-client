@@ -1,9 +1,12 @@
-// firebaseConfig.ts
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { FirebaseApp, getApps, initializeApp } from 'firebase/app';
-import { getAuth, initializeAuth } from 'firebase/auth';
-import { getReactNativePersistence } from 'firebase/auth/react-native';
-import { getFirestore } from 'firebase/firestore';
+// firebaseConfig.ts (root)
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { getApps, initializeApp } from "firebase/app";
+import {
+    getAuth,
+    getReactNativePersistence,
+    initializeAuth,
+} from "firebase/auth";
+import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
   apiKey: "AIzaSyA9GMS43chgVSHXCH7i0A8FgACapq7uC38",
@@ -12,20 +15,22 @@ const firebaseConfig = {
   storageBucket: "lovepointsapp-23880.firebasestorage.app",
   messagingSenderId: "9974481581",
   appId: "1:9974481581:web:870b7f9ab8f50cdebdfc24",
-  measurementId: "G-2PCYJEGDT5"
+  measurementId: "G-2PCYJEGDT5",
 };
 
+const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
 
-let app: FirebaseApp;
-if (!getApps().length) {
-  app = initializeApp(firebaseConfig);
-  // RN persistence (must be done BEFORE first getAuth())
-  initializeAuth(app, {
+// RN/Hermes-friendly auth persistence, initialized exactly once
+let auth = undefined as unknown as ReturnType<typeof getAuth>;
+try {
+  auth = getAuth(app);
+} catch {
+  auth = initializeAuth(app, {
     persistence: getReactNativePersistence(AsyncStorage),
   });
-} else {
-  app = getApps()[0]!;
 }
 
-export const db = getFirestore(app);
-export const auth = getAuth(app);
+const db = getFirestore(app);
+
+export { app, auth, db };
+

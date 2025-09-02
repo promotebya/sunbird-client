@@ -1,8 +1,7 @@
 // screens/PointsScreen.tsx
-import { onAuthStateChanged } from 'firebase/auth';
-import React, { useEffect, useMemo, useState } from 'react';
+import { auth } from "@/firebaseConfig";
+import { useEffect, useMemo, useState } from 'react';
 import { FlatList, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { auth } from '../firebase/firebaseConfig';
 import { getPointsTotal, listenPoints, Point } from '../utils/points';
 
 type Tab = 'personal' | 'shared';

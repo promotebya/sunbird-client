@@ -1,40 +1,61 @@
-// utils/tasks.ts
+import { db } from "@/firebaseConfig";
 import {
+    addDoc,
+    collection,
+    deleteDoc,
     doc,
+    getDocs,
+    orderBy,
+    query,
     serverTimestamp,
     updateDoc,
-} from 'firebase/firestore';
-import { db } from '../firebase/firebaseConfig';
-import { addPoints } from './points';
+    where,
+} from "firebase/firestore";
 
 export type Task = {
-  id: string;
+  id?: string;
   ownerId: string;
+  pairId?: string | null; // set if shared
   title: string;
-  points: number;
-  pairId?: string | null;
+  done: boolean;
   createdAt?: any;
-  completed?: boolean;
-  completedAt?: any;
-  completedBy?: string;
+  updatedAt?: any;
 };
 
-/**
- * Marks a task as completed and awards points to the actor.
- * For shared tasks, whoever taps “Complete” gets the points.
- */
-export async function completeTask(task: Task, actorUid: string) {
-  const taskRef = doc(db, 'tasks', task.id);
+const col = collection(db, "tasks");
 
-  await updateDoc(taskRef, {
-    completed: true,
-    completedAt: serverTimestamp(),
-    completedBy: actorUid,
-  });
+export async function listPersonalTasks(ownerId: string) {
+  const q = query(
+    col,
+    where("ownerId", "==", ownerId),
+    where("pairId", "==", null),
+    orderBy("createdAt", "desc")
+  );
+  const snap = await getDocs(q);
+  return snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Task[];
+}
 
-  await addPoints(actorUid, task.points, {
-    source: 'task',
-    taskId: task.id,
-    pairId: task.pairId ?? null,
-  });
+export async function listSharedTasks(pairId: string) {
+  const q = query(col, where("pairId", "==", pairId), orderBy("createdAt", "desc"));
+  const snap = await getDocs(q);
+  return snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Task[];
+}
+
+export async function addTask(input: Omit<Task, "id" | "done" | "createdAt" | "updatedAt">) {
+  const payload = {
+    ...input,
+    done: false,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+  const res = await addDoc(col, payload as any);
+  return res.id;
+}
+
+export async function toggleTask(id: string, done: boolean) {
+  await updateDoc(doc(db, "tasks", id), { done, updatedAt: serverTimestamp() });
+}
+
+export async function deleteTask(id: string) {
+  await deleteDoc(doc(db, "tasks", id));
 }

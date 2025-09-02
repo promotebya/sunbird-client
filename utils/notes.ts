@@ -1,4 +1,4 @@
-// utils/notes.ts
+import { db } from "@/firebaseConfig";
 import {
     addDoc,
     collection,
@@ -8,108 +8,43 @@ import {
     orderBy,
     query,
     serverTimestamp,
-    Timestamp,
     updateDoc,
     where,
-} from 'firebase/firestore';
-import { db } from '../firebase/firebaseConfig';
+} from "firebase/firestore";
 
-/** Categories specifically for Love Notes */
-export type NoteKind =
-  | 'loveNote'
-  | 'favoriteFood'
-  | 'habit'
-  | 'place'
-  | 'appreciation'
-  | 'insideJoke'
-  | 'gratitude'
-  | 'memorySnippet';
-
-export interface NoteCreate {
-  kind: NoteKind;
-  text: string;
-  // optional helpers
-  context?: string | null; // e.g., “morning”, “after work”
-  templateId?: string | null;
-}
-
-export interface Note extends NoteCreate {
-  id: string;
+export type LoveNote = {
+  id?: string;
   ownerId: string;
-  createdAt: Timestamp | Date | null;
-  updatedAt?: Timestamp | Date | null;
-  context: string | null;
-  templateId: string | null;
-}
+  pairId?: string | null;
+  text: string;
+  createdAt?: any;
+  updatedAt?: any;
+};
 
-const coll = collection(db, 'notes');
+const col = collection(db, "notes");
 
-export async function create(ownerId: string, data: NoteCreate): Promise<string> {
-  const payload = {
-    ownerId,
-    kind: data.kind,
-    text: data.text,
-    context: (data.context ?? null) as string | null,
-    templateId: (data.templateId ?? null) as string | null,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  };
-  const ref = await addDoc(coll, payload);
-  return ref.id;
-}
-
-export async function update(
-  id: string,
-  data: Partial<Pick<Note, 'text' | 'context' | 'templateId' | 'kind'>>
-): Promise<void> {
-  await updateDoc(doc(db, 'notes', id), {
-    ...data,
-    updatedAt: serverTimestamp(),
-  });
-}
-
-export async function remove(id: string): Promise<void> {
-  await deleteDoc(doc(db, 'notes', id));
-}
-
-export async function listByOwner(ownerId: string): Promise<Note[]> {
-  const q = query(coll, where('ownerId', '==', ownerId), orderBy('createdAt', 'desc'));
+export async function listNotesByOwner(ownerId: string) {
+  const q = query(col, where("ownerId", "==", ownerId), orderBy("createdAt", "desc"));
   const snap = await getDocs(q);
-  return snap.docs.map(d => {
-    const raw = d.data() as any;
-    return {
-      id: d.id,
-      ownerId: raw.ownerId as string,
-      kind: raw.kind as NoteKind,
-      text: raw.text as string,
-      context: (raw.context ?? null) as string | null,
-      templateId: (raw.templateId ?? null) as string | null,
-      createdAt: (raw.createdAt ?? null) as Timestamp | Date | null,
-      updatedAt: (raw.updatedAt ?? null) as Timestamp | Date | null,
-    } as Note;
-  });
+  return snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as LoveNote[];
 }
 
-/** Used by LoveNotesScreen chips like 'favoriteFood' | 'place' | 'habit' */
-export async function listByKind(ownerId: string, kind: NoteKind): Promise<Note[]> {
-  const q = query(
-    coll,
-    where('ownerId', '==', ownerId),
-    where('kind', '==', kind),
-    orderBy('createdAt', 'desc')
-  );
+export async function listNotesByPair(pairId: string) {
+  const q = query(col, where("pairId", "==", pairId), orderBy("createdAt", "desc"));
   const snap = await getDocs(q);
-  return snap.docs.map(d => {
-    const raw = d.data() as any;
-    return {
-      id: d.id,
-      ownerId: raw.ownerId as string,
-      kind: raw.kind as NoteKind,
-      text: raw.text as string,
-      context: (raw.context ?? null) as string | null,
-      templateId: (raw.templateId ?? null) as string | null,
-      createdAt: (raw.createdAt ?? null) as Timestamp | Date | null,
-      updatedAt: (raw.updatedAt ?? null) as Timestamp | Date | null,
-    } as Note;
-  });
+  return snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as LoveNote[];
+}
+
+export async function addNote(input: Omit<LoveNote, "id" | "createdAt" | "updatedAt">) {
+  const payload = { ...input, createdAt: serverTimestamp(), updatedAt: serverTimestamp() };
+  const res = await addDoc(col, payload as any);
+  return res.id;
+}
+
+export async function updateNote(id: string, patch: Partial<LoveNote>) {
+  await updateDoc(doc(db, "notes", id), { ...patch, updatedAt: serverTimestamp() } as any);
+}
+
+export async function deleteNote(id: string) {
+  await deleteDoc(doc(db, "notes", id));
 }
