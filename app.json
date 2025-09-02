@@ -1,45 +1,41 @@
 {
   "expo": {
     "name": "LovePointsApp",
-    "slug": "LovePointsApp",
+    "slug": "lovepointsapp",
+    "scheme": "lovepointsapp",
     "version": "1.0.0",
     "orientation": "portrait",
-    "scheme": "lovepoints",
-    "userInterfaceStyle": "automatic",
-
-    "icon": "./assets/icon.png",
-
+    "icon": "assets/icon.png",
     "splash": {
-      "image": "./assets/splash.png",
+      "image": "assets/splash.png",
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
-
     "assetBundlePatterns": ["**/*"],
-
     "ios": {
-      "bundleIdentifier": "com.promotebya.lovepoints",
-      "supportsTablet": true,
-      "infoPlist": {
-        "UIBackgroundModes": ["remote-notification"]
+      "bundleIdentifier": "com.promotebya.lovepointsapp",
+      "supportsTablet": false
+    },
+    "android": {
+      "package": "com.promotebya.lovepointsapp",
+      "adaptiveIcon": {
+        "foregroundImage": "assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
       }
     },
-
-    "android": {
-      "package": "com.promotebya.lovepoints",
-      "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon-foreground.png",
-        "backgroundImage": "./assets/adaptive-icon-background.png"
-      },
-      "permissions": []
+    "web": {
+      "bundler": "metro",
+      "favicon": "assets/favicon.png"
     },
-
-    "notification": {
-      "icon": "./assets/notification-icon.png",
-      "color": "#E91E63",
-      "iosDisplayInForeground": true
-    },
-
-    "plugins": ["expo-notifications"]
+    "plugins": [
+      [
+        "expo-notifications",
+        {
+          "icon": "assets/notification-icon.png",
+          "color": "#ffffff"
+        }
+      ]
+    ],
+    "jsEngine": "hermes"
   }
 }
