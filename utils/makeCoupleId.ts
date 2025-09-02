@@ -1,4 +1,5 @@
-// utils/makeCoupleId.ts
 export function makeCoupleId(a: string, b: string) {
-  return a < b ? `${a}_${b}` : `${b}_${a}`;
+  if (!a || !b) return '';
+  return [a, b].sort().join('_');
 }
+export default makeCoupleId;
