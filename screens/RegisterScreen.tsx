@@ -1,98 +1,57 @@
-// screens/RegisterScreen.tsx
-import { useNavigation } from '@react-navigation/native';
-import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { createUserWithEmailAndPassword } from 'firebase/auth';
-import { doc, getFirestore, serverTimestamp, setDoc } from 'firebase/firestore';
-import React, { useState } from 'react';
-import { Alert, Button, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
-import { auth } from '../firebase/firebaseConfig';
-import type { AuthStackParamList } from '../navigation/AuthNavigator';
-
-type Nav = NativeStackNavigationProp<AuthStackParamList, 'Register'>;
+import { auth } from "@/firebaseConfig";
+import { ensureUser } from "@/utils/user";
+import { createUserWithEmailAndPassword, updateProfile } from "firebase/auth";
+import { useState } from "react";
+import { Alert, Button, StyleSheet, Text, TextInput, View } from "react-native";
 
 export default function RegisterScreen() {
-  const navigation = useNavigation<Nav>();
-  const [name, setName] = useState('');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [submitting, setSubmitting] = useState(false);
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [pass, setPass] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  const handleRegister = async () => {
-    if (!email || !password || !name.trim()) {
-      Alert.alert('Missing fields', 'Please enter name, email and password.');
-      return;
-    }
-    setSubmitting(true);
+  const onRegister = async () => {
     try {
-      const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
-      const user = cred.user;
-
-      // Create initial user doc with name
-      const db = getFirestore();
-      await setDoc(
-        doc(db, 'users', user.uid),
-        {
-          email: user.email ?? email.trim(),
-          name: name.trim(),
-          createdAt: serverTimestamp(),
-          lastLogin: serverTimestamp(),
-        },
-        { merge: true }
-      );
-
-      console.log('User registered:', user.email);
-      // Navigation handled by auth listener
-      Alert.alert('Success', 'Account created!');
+      setLoading(true);
+      const res = await createUserWithEmailAndPassword(auth, email.trim(), pass);
+      if (name.trim()) {
+        await updateProfile(res.user, { displayName: name.trim() });
+      }
+      await ensureUser({ uid: res.user.uid, email: res.user.email, displayName: name.trim() });
+      Alert.alert("Register", "Account created.");
     } catch (e: any) {
-      console.error('Registration error:', e?.message);
-      Alert.alert('Registration failed', e?.message ?? 'Unknown error');
+      Alert.alert("Register failed", e?.message ?? String(e));
     } finally {
-      setSubmitting(false);
+      setLoading(false);
     }
   };
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Register</Text>
-
+      <Text style={styles.h1}>Create account</Text>
+      <TextInput placeholder="Name" value={name} onChangeText={setName} style={styles.input} />
       <TextInput
-        style={styles.input}
-        placeholder="Your name"
-        autoCapitalize="words"
-        value={name}
-        onChangeText={setName}
-      />
-
-      <TextInput
-        style={styles.input}
         placeholder="Email"
         autoCapitalize="none"
         keyboardType="email-address"
         value={email}
         onChangeText={setEmail}
-      />
-
-      <TextInput
         style={styles.input}
-        placeholder="Password"
-        autoCapitalize="none"
-        secureTextEntry
-        value={password}
-        onChangeText={setPassword}
       />
-
-      <Button title={submitting ? 'Please wait…' : 'Create account'} onPress={handleRegister} disabled={submitting} />
-
-      <TouchableOpacity onPress={() => navigation.navigate('Login')}>
-        <Text style={styles.link}>Already have an account? Login here</Text>
-      </TouchableOpacity>
+      <TextInput
+        placeholder="Password"
+        secureTextEntry
+        value={pass}
+        onChangeText={setPass}
+        style={styles.input}
+      />
+      <Button title={loading ? "Please wait…" : "Register"} onPress={onRegister} disabled={loading} />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 24, justifyContent: 'center', backgroundColor: '#fff' },
-  title: { fontSize: 32, fontWeight: 'bold', alignSelf: 'center', marginBottom: 32 },
-  input: { borderWidth: 1, borderColor: '#ccc', padding: 14, borderRadius: 8, marginBottom: 16 },
-  link: { marginTop: 16, color: 'blue', textAlign: 'center' },
+  container: { flex: 1, padding: 20, justifyContent: "center", gap: 12 },
+  h1: { fontSize: 24, fontWeight: "600", marginBottom: 12 },
+  input: { borderWidth: 1, borderColor: "#ddd", borderRadius: 8, padding: 12 },
 });

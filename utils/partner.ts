@@ -3,14 +3,10 @@ import { userDocRef } from "./user";
 
 export async function getPartnerUid(uid: string) {
   const snap = await getDoc(userDocRef(uid));
-  if (!snap.exists()) return null;
-  const data = snap.data();
-  return data.partnerUid ?? null;
+  return snap.exists() ? (snap.data().partnerUid ?? null) : null;
 }
 
 export async function getPairId(uid: string) {
   const snap = await getDoc(userDocRef(uid));
-  if (!snap.exists()) return null;
-  const data = snap.data();
-  return (data.pairId as string | null) ?? null;
+  return snap.exists() ? (snap.data().pairId ?? null) : null;
 }

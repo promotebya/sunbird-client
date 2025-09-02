@@ -1,100 +1,40 @@
-import { useNavigation } from '@react-navigation/native';
-import React from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
-import useAuthListener from '../hooks/useAuthListener';
-import useColorScheme from '../hooks/useColorScheme';
-import useNotificationsSetup from '../hooks/useNotificationsSetup';
+import { auth } from "@/firebaseConfig";
+import useAuthListener from "@/hooks/useAuthListener";
+import { getPairId } from "@/utils/partner";
+import { getPointsTotal } from "@/utils/points";
+import { signOut } from "firebase/auth";
+import { useEffect, useState } from "react";
+import { Button, StyleSheet, Text, View } from "react-native";
 
 export default function HomeScreen() {
-  const nav = useNavigation<any>();
-  const colorScheme = useColorScheme();
-  const isDark = colorScheme === 'dark';
   const { user } = useAuthListener();
+  const [total, setTotal] = useState<number>(0);
 
-  // ensure permissions + Android channel upfront
-  useNotificationsSetup();
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      if (!user) return;
+      const pairId = await getPairId(user.uid);
+      const sum = await getPointsTotal(pairId ? { pairId } : { uid: user.uid });
+      if (!cancelled) setTotal(sum);
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
 
   return (
-    <View style={[styles.container, isDark && { backgroundColor: '#0b0b0d' }]}>
-      <Text style={[styles.title, isDark && { color: '#fff' }]}>
-        Hey {user?.email?.split('@')[0] ?? 'there'} 👋
-      </Text>
-      <Text style={[styles.subtitle, isDark && { color: '#c7c7cc' }]}>
-        Tiny actions. Big love.
-      </Text>
-
-      <View style={styles.grid}>
-        <Shortcut
-          title="Tasks"
-          note="Personal & shared"
-          onPress={() => nav.navigate('Tasks')}
-          color="#5B58FF"
-        />
-        <Shortcut
-          title="Points"
-          note="Earn & celebrate"
-          onPress={() => nav.navigate('Points')}
-          color="#10B981"
-        />
-        <Shortcut
-          title="Memories"
-          note="Your little vault"
-          onPress={() => nav.navigate('Memories')}
-          color="#F59E0B"
-        />
-        <Shortcut
-          title="Reminders"
-          note="Nudges & routines"
-          onPress={() => nav.navigate('Reminders')}
-          color="#EC4899"
-        />
-      </View>
+    <View style={styles.container}>
+      <Text style={styles.h1}>Hi {user?.displayName || "there"} 👋</Text>
+      <Text style={styles.p}>Your total points: {total}</Text>
+      <Button title="Sign out" onPress={() => signOut(auth)} />
     </View>
   );
 }
 
-function Shortcut({
-  title,
-  note,
-  onPress,
-  color,
-}: {
-  title: string;
-  note: string;
-  onPress: () => void;
-  color: string;
-}) {
-  return (
-    <Pressable onPress={onPress} style={({ pressed }) => [styles.card, pressed && { opacity: 0.9 }]}>
-      <View style={[styles.badge, { backgroundColor: color }]} />
-      <Text style={styles.cardTitle}>{title}</Text>
-      <Text style={styles.cardNote}>{note}</Text>
-    </Pressable>
-  );
-}
-
 const styles = StyleSheet.create({
-  container: { flex: 1, paddingHorizontal: 16, paddingTop: 22, backgroundColor: '#fbfbff' },
-  title: { fontSize: 28, fontWeight: '800', color: '#121212' },
-  subtitle: { marginTop: 4, color: '#6b7280' },
-  grid: {
-    marginTop: 18,
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 12,
-  },
-  card: {
-    backgroundColor: '#fff',
-    width: '47%',
-    borderRadius: 16,
-    padding: 14,
-    shadowColor: '#000',
-    shadowOpacity: 0.06,
-    shadowOffset: { width: 0, height: 6 },
-    shadowRadius: 12,
-    elevation: 2,
-  },
-  badge: { width: 24, height: 24, borderRadius: 999, marginBottom: 8 },
-  cardTitle: { fontSize: 18, fontWeight: '800', color: '#111827' },
-  cardNote: { marginTop: 4, color: '#6b7280' },
+  container: { flex: 1, padding: 20, gap: 12 },
+  h1: { fontSize: 24, fontWeight: "600", marginTop: 8 },
+  p: { fontSize: 16 },
 });

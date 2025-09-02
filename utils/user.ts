@@ -13,7 +13,7 @@ export type AppUser = {
   displayName?: string | null;
   photoURL?: string | null;
   partnerUid?: string | null;
-  pairId?: string | null; // optional shared id for a couple
+  pairId?: string | null;
   createdAt?: any;
   updatedAt?: any;
   expoPushToken?: string | null;
@@ -33,7 +33,6 @@ export async function readUser(uid: string) {
   return snap.exists() ? snap.data() : null;
 }
 
-// Call after sign-in to ensure the user doc exists
 export async function ensureUser(u: {
   uid: string; email?: string | null; displayName?: string | null; photoURL?: string | null;
 }) {

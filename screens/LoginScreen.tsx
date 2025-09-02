@@ -1,83 +1,57 @@
-// screens/LoginScreen.tsx
-import { useNavigation } from '@react-navigation/native';
-import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { signInWithEmailAndPassword } from 'firebase/auth';
-import { doc, getFirestore, serverTimestamp, setDoc } from 'firebase/firestore';
-import React, { useState } from 'react';
-import { Alert, Button, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
-import { auth } from '../firebase/firebaseConfig';
-import type { AuthStackParamList } from '../navigation/AuthNavigator';
-
-type Nav = NativeStackNavigationProp<AuthStackParamList, 'Login'>;
+import { auth } from "@/firebaseConfig";
+import { ensureUser } from "@/utils/user";
+import { signInWithEmailAndPassword } from "firebase/auth";
+import { useState } from "react";
+import { Alert, Button, StyleSheet, Text, TextInput, View } from "react-native";
 
 export default function LoginScreen() {
-  const navigation = useNavigation<Nav>();
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [submitting, setSubmitting] = useState(false);
+  const [email, setEmail] = useState("");
+  const [pass, setPass] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  const handleLogin = async () => {
-    if (!email || !password) {
-      Alert.alert('Missing fields', 'Please enter email and password.');
-      return;
-    }
-    setSubmitting(true);
+  const onLogin = async () => {
     try {
-      const cred = await signInWithEmailAndPassword(auth, email.trim(), password);
-      const user = cred.user;
-
-      // Update lastLogin in Firestore
-      const db = getFirestore();
-      await setDoc(
-        doc(db, 'users', user.uid),
-        { email: user.email ?? email.trim(), lastLogin: serverTimestamp() },
-        { merge: true }
-      );
-
-      console.log('Login successful:', user.email);
-      // Navigation handled by useAuthListener (auth state change)
+      setLoading(true);
+      const res = await signInWithEmailAndPassword(auth, email.trim(), pass);
+      await ensureUser(res.user);
+      Alert.alert("Login", "Login successful.");
     } catch (e: any) {
-      console.error('Login error:', e?.message);
-      Alert.alert('Login failed', e?.message ?? 'Unknown error');
+      Alert.alert("Login failed", e?.message ?? String(e));
     } finally {
-      setSubmitting(false);
+      setLoading(false);
     }
   };
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Login</Text>
-
+      <Text style={styles.h1}>Welcome back</Text>
       <TextInput
-        style={styles.input}
         placeholder="Email"
         autoCapitalize="none"
         keyboardType="email-address"
         value={email}
         onChangeText={setEmail}
-      />
-
-      <TextInput
         style={styles.input}
-        placeholder="Password"
-        autoCapitalize="none"
-        secureTextEntry
-        value={password}
-        onChangeText={setPassword}
       />
-
-      <Button title={submitting ? 'Please wait…' : 'Login'} onPress={handleLogin} disabled={submitting} />
-
-      <TouchableOpacity onPress={() => navigation.navigate('Register')}>
-        <Text style={styles.link}>Don't have an account? Register here</Text>
-      </TouchableOpacity>
+      <TextInput
+        placeholder="Password"
+        secureTextEntry
+        value={pass}
+        onChangeText={setPass}
+        style={styles.input}
+      />
+      <Button title={loading ? "Please wait…" : "Login"} onPress={onLogin} disabled={loading} />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 24, justifyContent: 'center', backgroundColor: '#fff' },
-  title: { fontSize: 32, fontWeight: 'bold', alignSelf: 'center', marginBottom: 32 },
-  input: { borderWidth: 1, borderColor: '#ccc', padding: 14, borderRadius: 8, marginBottom: 16 },
-  link: { marginTop: 16, color: 'blue', textAlign: 'center' },
+  container: { flex: 1, padding: 20, justifyContent: "center", gap: 12 },
+  h1: { fontSize: 24, fontWeight: "600", marginBottom: 12 },
+  input: {
+    borderWidth: 1,
+    borderColor: "#ddd",
+    borderRadius: 8,
+    padding: 12,
+  },
 });

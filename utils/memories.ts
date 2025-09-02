@@ -1,52 +1,64 @@
 import { db } from "@/firebaseConfig";
 import {
-  addDoc,
-  collection,
-  deleteDoc,
-  doc,
-  getDocs,
-  orderBy,
-  query,
-  serverTimestamp,
-  updateDoc,
-  where,
+  addDoc, collection, deleteDoc, doc, getDocs, orderBy, query, serverTimestamp, updateDoc, where,
 } from "firebase/firestore";
+
+export enum MemoryKind {
+  Photo = "photo",
+  Text = "text",
+  Milestone = "milestone",
+}
 
 export type Memory = {
   id?: string;
   ownerId: string;
   pairId?: string | null;
-  kind?: "photo" | "text" | "milestone";
+  kind?: MemoryKind | "photo" | "text" | "milestone";
   title: string;
   note?: string;
+  // The next two are to satisfy old UI typings if they’re referenced:
+  notes?: string;
+  label?: string;
+  value?: string | number;
   createdAt?: any;
   updatedAt?: any;
 };
 
 const col = collection(db, "memories");
 
-export async function listMemoriesByOwner(ownerId: string) {
+export async function listByOwner(ownerId: string) {
   const q = query(col, where("ownerId", "==", ownerId), orderBy("createdAt", "desc"));
   const snap = await getDocs(q);
   return snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Memory[];
 }
 
-export async function listMemoriesByPair(pairId: string) {
+export async function listByPair(pairId: string) {
   const q = query(col, where("pairId", "==", pairId), orderBy("createdAt", "desc"));
   const snap = await getDocs(q);
   return snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Memory[];
 }
 
-export async function addMemory(input: Omit<Memory, "id" | "createdAt" | "updatedAt">) {
+export async function listByKind(ownerId: string, kind: MemoryKind | string) {
+  const q = query(
+    col,
+    where("ownerId", "==", ownerId),
+    where("kind", "==", kind),
+    orderBy("createdAt", "desc")
+  );
+  const snap = await getDocs(q);
+  return snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Memory[];
+}
+
+export async function create(input: Omit<Memory, "id" | "createdAt" | "updatedAt">) {
   const payload = { ...input, createdAt: serverTimestamp(), updatedAt: serverTimestamp() };
   const res = await addDoc(col, payload as any);
   return res.id;
 }
 
-export async function updateMemory(id: string, patch: Partial<Memory>) {
+export async function update(id: string, patch: Partial<Memory>) {
   await updateDoc(doc(db, "memories", id), { ...patch, updatedAt: serverTimestamp() } as any);
 }
 
-export async function deleteMemory(id: string) {
+export async function remove(id: string) {
   await deleteDoc(doc(db, "memories", id));
 }

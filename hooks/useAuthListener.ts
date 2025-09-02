@@ -2,7 +2,7 @@ import { auth } from "@/firebaseConfig";
 import { onAuthStateChanged, User } from "firebase/auth";
 import { useEffect, useState } from "react";
 
-export function useAuthListener() {
+function useAuthListener() {
   const [user, setUser] = useState<User | null>(null);
   const [initializing, setInitializing] = useState(true);
 
@@ -16,3 +16,7 @@ export function useAuthListener() {
 
   return { user, initializing };
 }
+
+export default useAuthListener;
+export { useAuthListener };
+
