@@ -1,24 +1,36 @@
-// App.tsx
-import { DarkTheme, DefaultTheme, NavigationContainer } from '@react-navigation/native';
-import React from 'react';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
+import "react-native-gesture-handler";
+import "react-native-reanimated";
 
-import useAuthListener from './hooks/useAuthListener';
-import useColorScheme from './hooks/useColorScheme';
+import { DefaultTheme, NavigationContainer } from "@react-navigation/native";
+import { StatusBar } from "expo-status-bar";
+import { SafeAreaProvider } from "react-native-safe-area-context";
 
-// Navigators (no NavigationContainer inside these files)
-import AppNavigator from './navigation/AppNavigator';
-import AuthNavigator from './navigation/AuthNavigator';
+import useAuthListener from "./hooks/useAuthListener";
+import AppNavigator from "./navigation/AppNavigator";
+import AuthNavigator from "./navigation/AuthNavigator";
+
+// Light romantic theme that matches tokens (no logic change)
+const navTheme = {
+  ...DefaultTheme,
+  colors: {
+    ...DefaultTheme.colors,
+    background: "#F8F9FB",
+    card: "#FFFFFF",
+    text: "#12131A",
+    border: "#ECECF1",
+    primary: "#FF2E74",
+  },
+};
 
 export default function App() {
   const { user } = useAuthListener();
-  const colorScheme = useColorScheme();
 
   return (
     <SafeAreaProvider>
-      <NavigationContainer theme={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+      <NavigationContainer theme={navTheme}>
         {user ? <AppNavigator /> : <AuthNavigator />}
       </NavigationContainer>
+      <StatusBar style="dark" />
     </SafeAreaProvider>
   );
 }

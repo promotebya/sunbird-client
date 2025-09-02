@@ -1,57 +1,93 @@
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { signOut } from "firebase/auth";
-import { useEffect, useState } from "react";
-import { Text, View } from "react-native";
+import { useEffect, useRef, useState } from "react";
+import { Animated, Text, View } from "react-native";
+
 import Button from "../components/Button";
 import Card from "../components/Card";
+import ConfettiTiny from "../components/ConfettiTiny";
+import PressableScale from "../components/PressableScale";
 import { shared } from "../components/sharedStyles";
-import { colors, s, type } from "../components/tokens";
+import { colors, spacing, type } from "../components/tokens";
 import { auth } from "../firebaseConfig";
 import useAuthListener from "../hooks/useAuthListener";
+
 import { getPairId } from "../utils/partner";
-import { getPointsTotal } from "../utils/points";
+import * as pointsApi from "../utils/points";
 
 export default function HomeScreen() {
   const { user } = useAuthListener();
   const [total, setTotal] = useState<number>(0);
+  const [seed, setSeed] = useState(0);
+  const scale = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
-    let cancelled = false;
-    const run = async () => {
+    let unsub: undefined | (() => void);
+    (async () => {
       if (!user) return;
-      const pairId = await getPairId(user.uid);
-      const sum = await getPointsTotal(pairId ? { pairId } : { uid: user.uid });
-      if (!cancelled) setTotal(sum);
+      const pairId = await getPairId(user.uid).catch(() => null);
+
+      // Prefer a real listener if your utils expose one
+      const api: any = pointsApi as any;
+      if (api.listenTotal) {
+        unsub = api.listenTotal({ ownerId: user.uid, pairId }, (t: number) => {
+          setTotal((prev) => {
+            if (t > prev) {
+              burst();
+            }
+            return t ?? 0;
+          });
+        });
+      } else if (api.getTotal) {
+        const t = await api.getTotal({ ownerId: user.uid, pairId }).catch(() => 0);
+        setTotal(t ?? 0);
+      }
+    })();
+
+    return () => {
+      if (unsub) unsub();
     };
-    run();
-    return () => { cancelled = true; };
-  }, [user]);
+
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.uid]);
+
+  const burst = () => {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    setSeed(Math.random());
+    Animated.sequence([
+      Animated.timing(scale, { toValue: 1.08, duration: 120, useNativeDriver: true }),
+      Animated.timing(scale, { toValue: 1, duration: 160, useNativeDriver: true }),
+    ]).start();
+  };
+
+  const onSignOut = () => signOut(auth);
 
   return (
     <View style={shared.screen}>
-      <Text style={shared.title}>Hi {user?.displayName || "there"} 👋</Text>
+      <Text style={shared.title}>Hi there 👋</Text>
 
-      <Card>
-        <View style={shared.spaceBetween}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-            <Ionicons name="trophy" size={24} color={colors.primary} />
-            <Text style={type.h2}>Total Points</Text>
-          </View>
-          <Text style={{ ...type.title, color: colors.primary }}>{total}</Text>
-        </View>
+      <Card style={{ flexDirection: "row", alignItems: "center", height: 72 }}>
+        <Ionicons name="trophy" size={24} color={colors.primary} style={{ marginRight: spacing.md }} />
+        <Text style={{ ...type.h2, flex: 1 }}>Total Points</Text>
+        <PressableScale>
+          <Animated.Text
+            style={{ transform: [{ scale }], fontSize: 28, fontWeight: "800", color: colors.primary }}
+          >
+            {total}
+          </Animated.Text>
+        </PressableScale>
       </Card>
 
-      <View style={{ height: s.lg }} />
-
       <Button
-        variant="link"
         title="Sign out"
-        onPress={async () => { await signOut(auth); Haptics.selectionAsync(); }}
-        leftIcon="log-out-outline"
-        textStyle={{ color: '#2563EB' }}
-        style={{ alignSelf: 'flex-start', paddingHorizontal: 0 }}
+        variant="link"
+        onPress={onSignOut}
+        style={{ alignSelf: "flex-start", marginTop: spacing.sm }}
       />
+
+      {/* Tiny confetti when points increase */}
+      <ConfettiTiny seed={seed} />
     </View>
   );
 }

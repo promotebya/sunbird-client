@@ -1,32 +1,50 @@
-import { useEffect } from 'react';
-import { Animated, Text } from 'react-native';
-import { colors, r, s } from './tokens';
+import { useEffect, useRef } from "react";
+import { Animated, Text } from "react-native";
+import { colors, radius, spacing } from "./tokens";
 
-export type ToastVariant = 'default' | 'success' | 'danger';
+type Props = { visible: boolean; message: string; variant?: "success" | "danger"; onHide?: () => void; };
 
-export default function Toast({
-  visible, message, variant = 'default', onHide, duration = 1600,
-}: { visible: boolean; message: string; variant?: ToastVariant; onHide?: () => void; duration?: number; }) {
-  const opacity = new Animated.Value(0);
+export default function Toast({ visible, message, variant, onHide }: Props) {
+  const y = useRef(new Animated.Value(80)).current;
+  const opacity = useRef(new Animated.Value(0)).current;
+
   useEffect(() => {
-    if (!visible) return;
-    Animated.sequence([
-      Animated.timing(opacity, { toValue: 1, duration: 150, useNativeDriver: true }),
-      Animated.timing(opacity, { toValue: 1, duration, useNativeDriver: true }),
-      Animated.timing(opacity, { toValue: 0, duration: 250, useNativeDriver: true }),
-    ]).start(() => onHide?.());
+    if (visible) {
+      Animated.parallel([
+        Animated.timing(y, { toValue: 0, duration: 200, useNativeDriver: true }),
+        Animated.timing(opacity, { toValue: 1, duration: 200, useNativeDriver: true }),
+      ]).start(() => {
+        const t = setTimeout(() => {
+          Animated.parallel([
+            Animated.timing(y, { toValue: 80, duration: 200, useNativeDriver: true }),
+            Animated.timing(opacity, { toValue: 0, duration: 200, useNativeDriver: true }),
+          ]).start(onHide);
+        }, 1600);
+        return () => clearTimeout(t);
+      });
+    }
   }, [visible]);
 
-  const bg = variant === 'success' ? colors.success
-    : variant === 'danger' ? colors.danger
-    : '#111827';
+  if (!visible) return null;
+  const bg =
+    variant === "success" ? colors.success : variant === "danger" ? colors.danger : colors.primary;
 
-  return visible ? (
-    <Animated.View style={{
-      position: 'absolute', left: s.lg, right: s.lg, bottom: s.xl,
-      backgroundColor: bg, borderRadius: r.lg, padding: s.lg, opacity,
-    }}>
-      <Text style={{ color: '#fff', fontWeight: '700', textAlign: 'center' }}>{message}</Text>
+  return (
+    <Animated.View
+      style={{
+        position: "absolute",
+        left: spacing.lg,
+        right: spacing.lg,
+        bottom: spacing.xxl,
+        borderRadius: radius.md,
+        paddingVertical: spacing.md,
+        paddingHorizontal: spacing.lg,
+        backgroundColor: bg,
+        transform: [{ translateY: y }],
+        opacity,
+      }}
+    >
+      <Text style={{ color: "#fff", textAlign: "center", fontWeight: "700" }}>{message}</Text>
     </Animated.View>
-  ) : null;
+  );
 }

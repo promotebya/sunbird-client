@@ -1,44 +1,59 @@
-import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { useEffect, useState } from "react";
-import { FlatList, Text, View } from "react-native";
+import { FlatList, LayoutAnimation, Text, View } from "react-native";
 import Button from "../components/Button";
 import Card from "../components/Card";
 import Input from "../components/Input";
 import Toast from "../components/Toast";
 import { shared } from "../components/sharedStyles";
-import { colors, s, type } from "../components/tokens";
+import { spacing, type } from "../components/tokens";
 import useAuthListener from "../hooks/useAuthListener";
 import { getPairId } from "../utils/partner";
-import { PointEvent, add as addPoint, listenPoints } from "../utils/points";
+import * as pointsApi from "../utils/points";
+
+type RecentItem = { id?: string; amount: number; reason?: string; createdAt?: any };
 
 export default function PointsScreen() {
   const { user } = useAuthListener();
-  const [events, setEvents] = useState<PointEvent[]>([]);
-  const [delta, setDelta] = useState<string>("1");
-  const [reason, setReason] = useState<string>("");
-  const [toast, setToast] = useState<{visible:boolean; msg:string; variant?:'success'|'danger'}>({visible:false,msg:''});
+  const [amount, setAmount] = useState("1");
+  const [reason, setReason] = useState("");
+  const [recent, setRecent] = useState<RecentItem[]>([]);
+  const [toast, setToast] = useState<{ visible: boolean; msg: string; variant?: "success" | "danger" }>({ visible: false, msg: "" });
 
   useEffect(() => {
-    let unsub: (() => void) | undefined;
-    const run = async () => {
+    (async () => {
       if (!user) return;
-      const pairId = await getPairId(user.uid);
-      unsub = listenPoints(pairId ? { pairId } : { uid: user.uid }, (evts) => setEvents(evts));
-    };
-    run();
-    return () => { if (unsub) unsub(); };
-  }, [user]);
+      const pairId = await getPairId(user.uid).catch(() => null);
+      const api: any = pointsApi as any;
+
+      if (api.listenRecent) {
+        return api.listenRecent({ ownerId: user.uid, pairId, limit: 5 }, setRecent);
+      }
+      if (api.listRecent) {
+        const list = await api.listRecent({ ownerId: user.uid, pairId, limit: 5 }).catch(() => []);
+        setRecent(list ?? []);
+      }
+    })();
+  }, [user?.uid]);
 
   const onAdd = async () => {
-    if (!user) return;
-    const val = Number(delta);
-    if (Number.isNaN(val)) { setToast({visible:true,msg:'Delta must be a number',variant:'danger'}); return; }
-    const pairId = await getPairId(user.uid);
-    await addPoint({ uid: user.uid, pairId: pairId ?? null, delta: val, reason: reason || undefined });
-    setReason("");
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    setToast({visible:true,msg:'Points added!',variant:'success'});
+    const n = Number(amount);
+    if (!user || !n || Number.isNaN(n)) {
+      setToast({ visible: true, msg: "Couldn't add points. Try again.", variant: "danger" });
+      return;
+    }
+    try {
+      const pairId = await getPairId(user.uid).catch(() => null);
+      const api: any = pointsApi as any;
+      const fn = api.add || api.create || api.addPoints; // tolerate different util names
+      await fn({ ownerId: user.uid, pairId, amount: n, reason: reason.trim() || undefined });
+      setAmount("1"); setReason("");
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      setToast({ visible: true, msg: `+${n} point${n > 1 ? "s" : ""} added 🎉`, variant: "success" });
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    } catch {
+      setToast({ visible: true, msg: "Couldn't add points. Try again.", variant: "danger" });
+    }
   };
 
   return (
@@ -46,33 +61,35 @@ export default function PointsScreen() {
       <Text style={shared.title}>Points</Text>
 
       <Card>
-        <View style={[shared.row, { gap: s.sm }]}>
-          <Input style={{ flex: 0.35 }} keyboardType="numeric" value={delta} onChangeText={setDelta} placeholder="Δ" />
-          <Input style={{ flex: 1 }} value={reason} onChangeText={setReason} placeholder="Reason" />
-          <Button title="Add" onPress={onAdd} />
-        </View>
+        <Input
+          placeholder="Points (e.g., 1)"
+          keyboardType="number-pad"
+          value={amount}
+          onChangeText={setAmount}
+          style={{ marginBottom: spacing.sm }}
+        />
+        <Input placeholder="Reason" value={reason} onChangeText={setReason} style={{ marginBottom: spacing.md }} />
+        <Button title="Add" onPress={onAdd} />
       </Card>
 
-      <View style={{ height: s.md }} />
+      {recent.length > 0 && (
+        <>
+          <View style={{ height: spacing.lg }} />
+          <Text style={{ ...type.h2, marginBottom: spacing.sm }}>Recent</Text>
+          <FlatList
+            data={recent}
+            keyExtractor={(i) => i.id ?? Math.random().toString(36)}
+            renderItem={({ item }) => (
+              <View style={[shared.card, { padding: spacing.md, marginBottom: spacing.sm }]}>
+                <Text style={{ fontWeight: "700" }}>+{item.amount} point{item.amount > 1 ? "s" : ""}</Text>
+                {!!item.reason && <Text style={{ ...type.caption, marginTop: 4 }}>{item.reason}</Text>}
+              </View>
+            )}
+          />
+        </>
+      )}
 
-      <FlatList
-        data={events}
-        keyExtractor={(item) => item.id!}
-        ItemSeparatorComponent={() => <View style={{ height: s.sm }} />}
-        renderItem={({ item }) => (
-          <View style={[shared.card, { padding: s.md, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }]}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-              <Ionicons name="trophy-outline" size={20} color={colors.primary} />
-              <Text style={{ fontWeight: '700' }}>
-                {item.delta > 0 ? `+${item.delta}` : item.delta}
-              </Text>
-            </View>
-            <Text style={type.dim} numberOfLines={1}>{item.reason || "—"}</Text>
-          </View>
-        )}
-      />
-
-      <Toast visible={toast.visible} message={toast.msg} variant={toast.variant} onHide={()=>setToast(v=>({...v,visible:false}))} />
+      <Toast visible={toast.visible} message={toast.msg} variant={toast.variant} onHide={() => setToast((v) => ({ ...v, visible: false }))} />
     </View>
   );
 }

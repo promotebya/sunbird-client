@@ -1,47 +1,66 @@
-import { Ionicons } from '@expo/vector-icons';
-import { Text, TextStyle, ViewStyle } from 'react-native';
-import PressableScale from './PressableScale';
-import { colors, r, s } from './tokens';
+import { ActivityIndicator, Pressable, StyleSheet, Text, ViewStyle } from "react-native";
+import { colors, radius, spacing } from "./tokens";
 
-type Variant = 'primary' | 'ghost' | 'danger' | 'link';
 type Props = {
   title: string;
   onPress?: () => void;
+  loading?: boolean;
   disabled?: boolean;
-  variant?: Variant;
-  small?: boolean;
-  leftIcon?: keyof typeof Ionicons.glyphMap;
-  rightIcon?: keyof typeof Ionicons.glyphMap;
   style?: ViewStyle | ViewStyle[];
-  textStyle?: TextStyle | TextStyle[];
+  small?: boolean;
+  variant?: "primary" | "ghost" | "danger" | "link";
 };
 
-export default function Button({
-  title, onPress, disabled, variant = 'primary', small, leftIcon, rightIcon, style, textStyle,
-}: Props) {
-  const height = small ? 36 : 48;
-  const base: ViewStyle = {
-    height, borderRadius: r.md, paddingHorizontal: s.lg,
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-  };
-  const bg = variant === 'primary' ? colors.primary
-    : variant === 'danger' ? colors.danger
-    : variant === 'ghost' ? colors.ghost
-    : 'transparent';
-
-  const labelColor = variant === 'link' ? '#2563EB'
-    : variant === 'ghost' ? colors.text
-    : '#fff';
-
+export default function Button({ title, onPress, loading, disabled, style, small, variant = "primary" }: Props) {
+  const isPrimary = variant === "primary";
+  const isDanger = variant === "danger";
+  const isLink = variant === "link";
   return (
-    <PressableScale
+    <Pressable
       onPress={onPress}
-      disabled={disabled}
-      style={[base, { backgroundColor: bg }, style as any]}
+      disabled={disabled || loading}
+      style={[
+        styles.base,
+        small && styles.small,
+        isPrimary && styles.primary,
+        isDanger && styles.danger,
+        variant === "ghost" && styles.ghost,
+        isLink && styles.linkBtn,
+        style,
+      ]}
     >
-      {leftIcon ? <Ionicons name={leftIcon} size={18} color={labelColor} style={{ marginRight: 8 }} /> : null}
-      <Text style={[{ color: labelColor, fontWeight: '700' }, textStyle]}>{title}</Text>
-      {rightIcon ? <Ionicons name={rightIcon} size={18} color={labelColor} style={{ marginLeft: 8 }} /> : null}
-    </PressableScale>
+      {loading ? (
+        <ActivityIndicator color={isPrimary || isDanger ? "#fff" : colors.textDark} />
+      ) : (
+        <Text style={[
+          styles.txt,
+          (isPrimary || isDanger) && styles.txtLight,
+          isLink && styles.linkTxt
+        ]}>
+          {title}
+        </Text>
+      )}
+    </Pressable>
   );
 }
+
+const styles = StyleSheet.create({
+  base: {
+    height: 54,
+    borderRadius: radius.lg,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.lg,
+  },
+  small: { height: 44, borderRadius: radius.lg, paddingHorizontal: spacing.md },
+  primary: { backgroundColor: colors.primary, borderColor: colors.primary },
+  danger: { backgroundColor: colors.danger, borderColor: colors.danger },
+  ghost: { backgroundColor: "#F1F2F6" },
+  txt: { fontWeight: "700", color: colors.textDark },
+  txtLight: { color: "#fff" },
+  linkBtn: { backgroundColor: "transparent", borderColor: "transparent", height: undefined, paddingVertical: spacing.sm },
+  linkTxt: { color: "#2563EB", fontWeight: "700" },
+});

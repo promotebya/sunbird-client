@@ -1,18 +1,11 @@
-import * as Haptics from 'expo-haptics';
-import { Text } from 'react-native';
-import PressableScale from './PressableScale';
-import { colors, r, s } from './tokens';
+import { Pressable, Text } from "react-native";
+import { shared } from "./sharedStyles";
 
-export default function Chip({ label, selected, onPress }: { label: string; selected?: boolean; onPress?: () => void; }) {
+type Props = { label: string; selected?: boolean; onPress?: () => void };
+export default function Chip({ label, selected, onPress }: Props) {
   return (
-    <PressableScale
-      onPress={() => { Haptics.selectionAsync(); onPress?.(); }}
-      style={{
-        paddingVertical: 6, paddingHorizontal: 12, borderRadius: r.pill,
-        backgroundColor: selected ? colors.primary : colors.ghost, marginRight: s.sm,
-      }}
-    >
-      <Text style={{ color: selected ? '#fff' : colors.text, fontWeight: selected ? '700' : '500' }}>{label}</Text>
-    </PressableScale>
+    <Pressable onPress={onPress} style={[shared.pill, selected && shared.pillSelected]}>
+      <Text style={[selected && shared.pillTextSelected]}>{label}</Text>
+    </Pressable>
   );
 }

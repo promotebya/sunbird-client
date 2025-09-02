@@ -1,32 +1,56 @@
-import { useState } from 'react';
-import { Text, TextInput, TextInputProps, View } from 'react-native';
-import { colors, r, s } from './tokens';
+// components/Input.tsx
+import { forwardRef, useState } from "react";
+import { StyleSheet, TextInput, TextInputProps, ViewStyle } from "react-native";
+import { colors, radius } from "./tokens";
 
-type Props = TextInputProps & { error?: string };
+type Props = Omit<TextInputProps, "placeholderTextColor" | "style"> & {
+  style?: ViewStyle | ViewStyle[];
+};
 
-export default function Input({ error, style, onFocus, onBlur, ...rest }: Props) {
-  const [focused, setFocused] = useState(false);
-  return (
-    <View style={{ width: '100%' }}>
+const Input = forwardRef<TextInput, Props>(
+  ({ value, onChangeText, placeholder, multiline, keyboardType, style, ...rest }, ref) => {
+    const [focused, setFocused] = useState(false);
+
+    return (
       <TextInput
-        {...rest}
-        onFocus={(e) => { setFocused(true); onFocus?.(e); }}
-        onBlur={(e) => { setFocused(false); onBlur?.(e); }}
+        ref={ref}
+        value={value}
+        onChangeText={onChangeText}
+        placeholder={placeholder}
+        placeholderTextColor={colors.placeholder}
+        multiline={multiline}
+        keyboardType={keyboardType}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
         style={[
-          {
-            backgroundColor: colors.bg,
-            borderWidth: 1,
-            borderColor: focused ? colors.primary : colors.border,
-            borderRadius: r.md,
-            paddingHorizontal: s.lg,
-            paddingVertical: 12,
-            color: colors.text,
-          },
-          style as any,
+          styles.base,
+          focused && styles.focused,
+          multiline && { height: 100, textAlignVertical: "top" },
+          style,
         ]}
-        placeholderTextColor={colors.textDim}
+        {...rest}
       />
-      {!!error && <Text style={{ color: colors.danger, fontSize: 12, marginTop: 6 }}>{error}</Text>}
-    </View>
-  );
-}
+    );
+  }
+);
+
+Input.displayName = "Input";
+export default Input;
+
+const styles = StyleSheet.create({
+  base: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.sm,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderWidth: 1,
+    borderColor: colors.border,
+    shadowColor: "#000",
+    shadowOpacity: 0.04,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
+    color: colors.textDark,
+  },
+  focused: { borderColor: colors.primary },
+});

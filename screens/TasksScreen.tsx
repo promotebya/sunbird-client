@@ -1,19 +1,36 @@
 import * as Haptics from "expo-haptics";
 import { useEffect, useState } from "react";
-import { FlatList, Text, View } from "react-native";
+import {
+  ActionSheetIOS,
+  Alert,
+  FlatList,
+  LayoutAnimation,
+  Platform,
+  Text,
+  View,
+} from "react-native";
 import useAuthListener from "../hooks/useAuthListener";
 import { getPairId } from "../utils/partner";
-import { Task, create as createTask, listPersonal, listShared, remove, setDone } from "../utils/tasks";
+import {
+  Task,
+  create as createTask,
+  listPersonal,
+  listShared,
+  remove,
+  setDone,
+} from "../utils/tasks";
 
 import Button from "../components/Button";
+import Card from "../components/Card";
 import EmptyState from "../components/EmptyState";
 import Input from "../components/Input";
 import PressableScale from "../components/PressableScale";
-import Toast from "../components/Toast";
-import Chip from "../components/ui/Chip"; // ← your existing Chip
-
+import SegmentedControl from "../components/SegmentedControl";
 import { shared } from "../components/sharedStyles";
-import { colors, s } from "../components/tokens";
+import Toast from "../components/Toast";
+import { colors, spacing } from "../components/tokens";
+
+import * as pointsApi from "../utils/points";
 
 type Tab = "Personal" | "Shared";
 
@@ -22,20 +39,24 @@ export default function TasksScreen() {
   const [tab, setTab] = useState<Tab>("Personal");
   const [title, setTitle] = useState("");
   const [items, setItems] = useState<Task[]>([]);
-  const [toast, setToast] = useState<{ visible: boolean; msg: string; variant?: "success" | "danger" }>({
-    visible: false,
-    msg: "",
-  });
+  const [toast, setToast] = useState<{
+    visible: boolean;
+    msg: string;
+    variant?: "success" | "danger";
+  }>({ visible: false, msg: "" });
 
   const refresh = async () => {
     if (!user) return;
+    let data: Task[] = [];
     if (tab === "Shared") {
       const pairId = await getPairId(user.uid);
-      if (!pairId) return setItems([]);
-      setItems(await listShared(pairId));
+      data = pairId ? await listShared(pairId) : [];
     } else {
-      setItems(await listPersonal(user.uid));
+      data = await listPersonal(user.uid);
     }
+    // list enter animation
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setItems(data);
   };
 
   useEffect(() => {
@@ -44,49 +65,98 @@ export default function TasksScreen() {
 
   const onAdd = async () => {
     if (!user || !title.trim()) {
-      setToast({ visible: true, msg: "Enter a task title", variant: "danger" });
+      setToast({ visible: true, msg: "Oops — please fill this first.", variant: "danger" });
       return;
     }
     const pairId = tab === "Shared" ? await getPairId(user.uid) : null;
     await createTask({ title: title.trim(), ownerId: user.uid, pairId: pairId ?? null });
     setTitle("");
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    setToast({ visible: true, msg: "Task added!", variant: "success" });
+    setToast({ visible: true, msg: "Nice! Added to your list.", variant: "success" });
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     refresh();
   };
 
-  const onToggle = async (id?: string, done?: boolean) => {
-    if (!id || typeof done === "undefined") return;
-    await setDone(id, !done);
+  const onToggle = async (id?: string, done?: boolean, label?: string) => {
+    if (!user || !id || typeof done === "undefined") return;
+    const newVal = !done;
+    await setDone(id, newVal);
     Haptics.selectionAsync();
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+
+    if (newVal === true) {
+      try {
+        const pairId = tab === "Shared" ? await getPairId(user.uid).catch(() => null) : null;
+        const api: any = pointsApi as any;
+        const addPoints = api.add || api.create || api.addPoints;
+        await addPoints({
+          ownerId: user.uid,
+          pairId: pairId ?? null,
+          amount: 1,
+          reason: label ? `Completed: ${label}` : "Task completed",
+        });
+        setToast({ visible: true, msg: "+1 point added 🎉", variant: "success" });
+      } catch {
+        // ignore
+      }
+    }
+
     refresh();
   };
 
-  const onDelete = async (id?: string) => {
+  const onDelete = (id?: string) => {
     if (!id) return;
-    await remove(id);
-    refresh();
+    Haptics.selectionAsync();
+    if (Platform.OS === "ios") {
+      ActionSheetIOS.showActionSheetWithOptions(
+        { options: ["Cancel", "Delete"], destructiveButtonIndex: 1, cancelButtonIndex: 0 },
+        async (i) => {
+          if (i === 1) {
+            await remove(id);
+            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+            refresh();
+          }
+        }
+      );
+    } else {
+      Alert.alert("Delete task?", "", [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            await remove(id);
+            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+            refresh();
+          },
+        },
+      ]);
+    }
   };
 
   return (
     <View style={shared.screen}>
       <Text style={shared.title}>Tasks</Text>
 
-      <View style={[shared.row, { marginBottom: s.md }]}>
-        <Chip label="Personal" selected={tab === "Personal"} onPress={() => setTab("Personal")} />
-        <Chip label="Shared" selected={tab === "Shared"} onPress={() => setTab("Shared")} />
-      </View>
+      <SegmentedControl
+        items={[
+          { label: "Personal", value: "Personal" },
+          { label: "Shared", value: "Shared" },
+        ]}
+        value={tab}
+        onChange={(v) => setTab(v as Tab)}
+      />
 
-      <View style={[shared.row, { gap: s.sm, marginBottom: s.md }]}>
+      <Card style={{ flexDirection: "row", gap: 12 }}>
         <Input style={{ flex: 1 }} value={title} onChangeText={setTitle} placeholder="New task…" />
         <Button title="Add" small onPress={onAdd} />
-      </View>
+      </Card>
 
       {items.length === 0 ? (
         <EmptyState
           emoji="📝"
           title="No tasks yet"
-          tip="Try adding ‘Plan a surprise’ 😉"
+          hint="Try adding ‘Plan a surprise’ 😉"
           cta="Add a task"
           onPress={onAdd}
         />
@@ -94,13 +164,21 @@ export default function TasksScreen() {
         <FlatList
           data={items}
           keyExtractor={(t) => t.id!}
-          ItemSeparatorComponent={() => <View style={{ height: s.sm }} />}
+          ItemSeparatorComponent={() => <View style={{ height: spacing.sm }} />}
           renderItem={({ item }) => (
-            <PressableScale onPress={() => onToggle(item.id, item.done)} onLongPress={() => onDelete(item.id)}>
+            <PressableScale
+              onPress={() => onToggle(item.id, item.done, item.title)}
+              onLongPress={() => onDelete(item.id)}
+            >
               <View
                 style={[
                   shared.card,
-                  { padding: s.md, flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+                  {
+                    padding: spacing.md,
+                    flexDirection: "row",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                  },
                 ]}
               >
                 <Text
