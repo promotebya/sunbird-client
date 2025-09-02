@@ -1,12 +1,21 @@
-import { db } from "@/firebaseConfig";
 import {
-    addDoc, collection, deleteDoc, doc, getDocs, orderBy, query, serverTimestamp, updateDoc, where,
+    addDoc,
+    collection,
+    deleteDoc,
+    doc,
+    getDocs,
+    orderBy,
+    query,
+    serverTimestamp,
+    updateDoc,
+    where,
 } from "firebase/firestore";
+import { db } from "../firebaseConfig";
 
 export type Task = {
   id?: string;
   ownerId: string;
-  pairId?: string | null;
+  pairId?: string | null; // set for shared tasks
   title: string;
   done: boolean;
   createdAt?: any;
@@ -33,7 +42,12 @@ export async function listShared(pairId: string) {
 }
 
 export async function create(input: Omit<Task, "id" | "done" | "createdAt" | "updatedAt">) {
-  const payload = { ...input, done: false, createdAt: serverTimestamp(), updatedAt: serverTimestamp() };
+  const payload = {
+    ...input,
+    done: false,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
   const res = await addDoc(col, payload as any);
   return res.id;
 }

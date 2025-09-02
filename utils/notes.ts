@@ -1,14 +1,23 @@
-import { db } from "@/firebaseConfig";
 import {
-    addDoc, collection, deleteDoc, doc, getDocs, orderBy, query, serverTimestamp, updateDoc, where,
+    addDoc,
+    collection,
+    deleteDoc,
+    doc,
+    getDocs,
+    orderBy,
+    query,
+    serverTimestamp,
+    updateDoc,
+    where,
 } from "firebase/firestore";
+import { db } from "../firebaseConfig";
 
 export type Note = {
   id?: string;
   ownerId: string;
   pairId?: string | null;
   text: string;
-  kind?: string; // keep optional for compatibility if your UI filters by kind
+  kind?: string; // optional filter field if you use categories
   createdAt?: any;
   updatedAt?: any;
 };

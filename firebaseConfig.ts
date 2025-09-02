@@ -1,11 +1,8 @@
 // firebaseConfig.ts
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { getApps, initializeApp } from "firebase/app";
-import {
-    getAuth,
-    getReactNativePersistence,
-    initializeAuth,
-} from "firebase/auth";
+import { getAuth, initializeAuth } from "firebase/auth";
+import { getReactNativePersistence } from "firebase/auth/react-native"; // <-- RN subpath
 import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
@@ -20,7 +17,7 @@ const firebaseConfig = {
 
 const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
 
-// RN/Hermes-friendly auth persistence, initialize exactly once
+// Initialize RN-friendly Auth with AsyncStorage persistence exactly once
 let auth = undefined as unknown as ReturnType<typeof getAuth>;
 try {
   auth = getAuth(app);

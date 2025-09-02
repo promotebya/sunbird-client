@@ -13,8 +13,8 @@ export default function RemindersScreen() {
       handleNotification: async () => ({
         shouldShowAlert: true,
         shouldPlaySound: true,
-        shouldSetBadge: false
-      })
+        shouldSetBadge: false,
+      }),
     });
   }, []);
 
@@ -25,9 +25,10 @@ export default function RemindersScreen() {
       content: {
         title: "Reminder",
         body: text || "It's time!",
-        data: { by: user?.uid ?? "anonymous" }
+        data: { by: user?.uid ?? "anonymous" },
       },
-      trigger: { type: "timeInterval", seconds: sec }
+      // Expo SDK 53 typing: simple "time interval" trigger = { seconds, repeats? }
+      trigger: { seconds: sec }, // <-- remove "type: 'timeInterval'"
     });
     setText("");
   };
@@ -35,8 +36,19 @@ export default function RemindersScreen() {
   return (
     <View style={styles.container}>
       <Text style={styles.h1}>Reminders</Text>
-      <TextInput style={styles.input} placeholder="What should I remind you about?" value={text} onChangeText={setText} />
-      <TextInput style={styles.input} placeholder="In how many seconds?" keyboardType="numeric" value={seconds} onChangeText={setSeconds} />
+      <TextInput
+        style={styles.input}
+        placeholder="What should I remind you about?"
+        value={text}
+        onChangeText={setText}
+      />
+      <TextInput
+        style={styles.input}
+        placeholder="In how many seconds?"
+        keyboardType="numeric"
+        value={seconds}
+        onChangeText={setSeconds}
+      />
       <Button title="Schedule" onPress={schedule} />
       <Text style={{ marginTop: 12, opacity: 0.8 }}>
         Using Expo local notifications. Push tokens can be added later for partner notes.
@@ -48,5 +60,5 @@ export default function RemindersScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 16, gap: 10 },
   h1: { fontSize: 22, fontWeight: "600" },
-  input: { borderWidth: 1, borderColor: "#ddd", borderRadius: 8, padding: 10 }
+  input: { borderWidth: 1, borderColor: "#ddd", borderRadius: 8, padding: 10 },
 });

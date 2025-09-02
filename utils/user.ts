@@ -1,4 +1,3 @@
-import { db } from "@/firebaseConfig";
 import {
     doc,
     FirestoreDataConverter,
@@ -6,6 +5,7 @@ import {
     serverTimestamp,
     setDoc,
 } from "firebase/firestore";
+import { db } from "../firebaseConfig";
 
 export type AppUser = {
   uid: string;
@@ -33,8 +33,12 @@ export async function readUser(uid: string) {
   return snap.exists() ? snap.data() : null;
 }
 
+/** Ensure a user document exists after auth. Returns the user doc. */
 export async function ensureUser(u: {
-  uid: string; email?: string | null; displayName?: string | null; photoURL?: string | null;
+  uid: string;
+  email?: string | null;
+  displayName?: string | null;
+  photoURL?: string | null;
 }) {
   const ref = userDocRef(u.uid);
   const snap = await getDoc(ref);

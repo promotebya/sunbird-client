@@ -1,13 +1,20 @@
-import { db } from "@/firebaseConfig";
 import {
-    addDoc, collection, getDocs, onSnapshot, orderBy, query, serverTimestamp, where,
+    addDoc,
+    collection,
+    getDocs,
+    onSnapshot,
+    orderBy,
+    query,
+    serverTimestamp,
+    where,
 } from "firebase/firestore";
+import { db } from "../firebaseConfig";
 
 export type PointEvent = {
   id?: string;
   uid: string;
   pairId?: string | null;
-  delta: number;
+  delta: number; // positive/negative
   reason?: string;
   createdAt?: any;
 };
@@ -32,27 +39,28 @@ export async function add(input: Omit<PointEvent, "id" | "createdAt">) {
   return res.id;
 }
 
-// === Adapters expected by your screens ===
+/** Sum of points for a user or a pair. */
 export async function getPointsTotal(opts: { uid?: string; pairId?: string }) {
-  let q;
-  if (opts.pairId) q = query(col, where("pairId", "==", opts.pairId));
-  else if (opts.uid) q = query(col, where("uid", "==", opts.uid));
+  let qRef;
+  if (opts.pairId) qRef = query(col, where("pairId", "==", opts.pairId));
+  else if (opts.uid) qRef = query(col, where("uid", "==", opts.uid));
   else return 0;
 
-  const snap = await getDocs(q);
+  const snap = await getDocs(qRef);
   return snap.docs.reduce((sum, d) => sum + (d.data().delta || 0), 0);
 }
 
+/** Live updates for points list (newest first). Returns unsubscribe. */
 export function listenPoints(
   opts: { uid?: string; pairId?: string },
   handler: (events: PointEvent[]) => void
 ) {
-  let q;
-  if (opts.pairId) q = query(col, where("pairId", "==", opts.pairId), orderBy("createdAt", "desc"));
-  else if (opts.uid) q = query(col, where("uid", "==", opts.uid), orderBy("createdAt", "desc"));
+  let qRef;
+  if (opts.pairId) qRef = query(col, where("pairId", "==", opts.pairId), orderBy("createdAt", "desc"));
+  else if (opts.uid) qRef = query(col, where("uid", "==", opts.uid), orderBy("createdAt", "desc"));
   else throw new Error("listenPoints requires uid or pairId");
 
-  return onSnapshot(q, (snap) => {
+  return onSnapshot(qRef, (snap) => {
     handler(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as PointEvent[]);
   });
 }

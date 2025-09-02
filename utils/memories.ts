@@ -1,7 +1,16 @@
-import { db } from "@/firebaseConfig";
 import {
-  addDoc, collection, deleteDoc, doc, getDocs, orderBy, query, serverTimestamp, updateDoc, where,
+  addDoc,
+  collection,
+  deleteDoc,
+  doc,
+  getDocs,
+  orderBy,
+  query,
+  serverTimestamp,
+  updateDoc,
+  where,
 } from "firebase/firestore";
+import { db } from "../firebaseConfig";
 
 export enum MemoryKind {
   Photo = "photo",
@@ -16,8 +25,7 @@ export type Memory = {
   kind?: MemoryKind | "photo" | "text" | "milestone";
   title: string;
   note?: string;
-  // The next two are to satisfy old UI typings if they’re referenced:
-  notes?: string;
+  // loose fields some UIs referenced previously:
   label?: string;
   value?: string | number;
   createdAt?: any;
