@@ -1,30 +1,18 @@
-import React from 'react';
-import { Pressable, StyleSheet, Text, ViewStyle } from 'react-native';
+import * as Haptics from 'expo-haptics';
+import { Text } from 'react-native';
+import PressableScale from './PressableScale';
+import { colors, r, s } from './tokens';
 
-type Props = {
-  label: string;
-  onPress: () => void;
-  style?: ViewStyle;
-};
-
-export default function Chip({ label, onPress, style }: Props) {
+export default function Chip({ label, selected, onPress }: { label: string; selected?: boolean; onPress?: () => void; }) {
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [styles.chip, style, pressed && { opacity: 0.8 }]}>
-      <Text style={styles.text}>{label}</Text>
-    </Pressable>
+    <PressableScale
+      onPress={() => { Haptics.selectionAsync(); onPress?.(); }}
+      style={{
+        paddingVertical: 6, paddingHorizontal: 12, borderRadius: r.pill,
+        backgroundColor: selected ? colors.primary : colors.ghost, marginRight: s.sm,
+      }}
+    >
+      <Text style={{ color: selected ? '#fff' : colors.text, fontWeight: selected ? '700' : '500' }}>{label}</Text>
+    </PressableScale>
   );
 }
-
-const styles = StyleSheet.create({
-  chip: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    backgroundColor: '#FDECF2',
-    borderColor: '#F7B7CC',
-    borderWidth: 1,
-    borderRadius: 20,
-    marginRight: 8,
-    marginBottom: 8,
-  },
-  text: { color: '#B84772', fontWeight: '700' },
-});

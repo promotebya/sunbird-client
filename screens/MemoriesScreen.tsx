@@ -1,8 +1,20 @@
+import * as Haptics from "expo-haptics";
 import { useEffect, useMemo, useState } from "react";
-import { Button, FlatList, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { ActionSheetIOS, Alert, FlatList, Platform, Text, View } from "react-native";
 import useAuthListener from "../hooks/useAuthListener";
 import { Memory, MemoryKind, create, listByOwner, listByPair, remove } from "../utils/memories";
 import { getPairId } from "../utils/partner";
+
+import Button from "../components/Button";
+import Card from "../components/Card";
+import ConfettiTiny from "../components/ConfettiTiny";
+import Input from "../components/Input";
+import PressableScale from "../components/PressableScale";
+import Toast from "../components/Toast";
+import Chip from "../components/ui/Chip"; // ← use your existing Chip
+
+import { shared } from "../components/sharedStyles";
+import { colors, r, s, type } from "../components/tokens";
 
 export default function MemoriesScreen() {
   const { user } = useAuthListener();
@@ -11,82 +23,119 @@ export default function MemoriesScreen() {
   const [note, setNote] = useState("");
   const [kind, setKind] = useState<MemoryKind | "photo" | "text" | "milestone">(MemoryKind.Text);
 
+  const [toast, setToast] = useState<{ visible: boolean; msg: string; variant?: "success" | "danger" }>({
+    visible: false,
+    msg: "",
+  });
+  const [seed, setSeed] = useState(0);
+
+  const refresh = async () => {
+    if (!user) return;
+    const pairId = await getPairId(user.uid);
+    const data = pairId ? await listByPair(pairId) : await listByOwner(user.uid);
+    setItems(data);
+  };
+
   useEffect(() => {
-    let cancelled = false;
-    const run = async () => {
-      if (!user) return;
-      const pairId = await getPairId(user.uid);
-      const data = pairId ? await listByPair(pairId) : await listByOwner(user.uid);
-      if (!cancelled) setItems(data);
-    };
-    run();
-    return () => { cancelled = true; };
+    refresh();
   }, [user]);
 
   const onAdd = async () => {
     if (!user) return;
+    if (!title.trim()) {
+      setToast({ visible: true, msg: "Please enter a title", variant: "danger" });
+      return;
+    }
     const pairId = await getPairId(user.uid);
     await create({
       ownerId: user.uid,
       pairId: pairId ?? null,
-      title: title || "Untitled",
-      note: note || undefined,
-      kind
+      title: title.trim(),
+      note: note.trim() || undefined,
+      kind,
     });
-    const data = pairId ? await listByPair(pairId) : await listByOwner(user.uid);
-    setItems(data);
     setTitle("");
     setNote("");
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    setToast({ visible: true, msg: "Memory added!", variant: "success" });
+    setSeed(Math.random());
+    refresh();
   };
 
-  const onDelete = async (id?: string) => {
+  const onLongPressCard = (id?: string) => {
     if (!id) return;
-    await remove(id);
-    if (!user) return;
-    const pairId = await getPairId(user.uid);
-    const data = pairId ? await listByPair(pairId) : await listByOwner(user.uid);
-    setItems(data);
+    Haptics.selectionAsync();
+    if (Platform.OS === "ios") {
+      ActionSheetIOS.showActionSheetWithOptions(
+        { options: ["Cancel", "Delete"], destructiveButtonIndex: 1, cancelButtonIndex: 0 },
+        async (i) => {
+          if (i === 1) {
+            await remove(id);
+            refresh();
+          }
+        }
+      );
+    } else {
+      Alert.alert("Memory", "Delete this memory?", [
+        { text: "Cancel", style: "cancel" },
+        { text: "Delete", style: "destructive", onPress: async () => { await remove(id); refresh(); } },
+      ]);
+    }
   };
 
   const kindLabel = useMemo(() => (typeof kind === "string" ? kind : String(kind)), [kind]);
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.h1}>Memories ({kindLabel})</Text>
-      <View style={styles.row}>
-        <TextInput style={[styles.input, { flex: 1 }]} value={title} onChangeText={setTitle} placeholder="Title" />
+    <View style={shared.screen}>
+      <Text style={shared.title}>Memories ({kindLabel})</Text>
+
+      <View style={[shared.row, { marginBottom: s.md }]}>
+        <Chip label="Photo" selected={kind === MemoryKind.Photo} onPress={() => setKind(MemoryKind.Photo)} />
+        <Chip label="Text" selected={kind === MemoryKind.Text} onPress={() => setKind(MemoryKind.Text)} />
+        <Chip label="Milestone" selected={kind === MemoryKind.Milestone} onPress={() => setKind(MemoryKind.Milestone)} />
       </View>
-      <TextInput style={[styles.input, { minHeight: 44 }]} value={note} onChangeText={setNote} placeholder="Note" multiline />
-      <View style={styles.row}>
-        <Button title="Photo" onPress={() => setKind(MemoryKind.Photo)} />
-        <Button title="Text" onPress={() => setKind(MemoryKind.Text)} />
-        <Button title="Milestone" onPress={() => setKind(MemoryKind.Milestone)} />
+
+      <Card>
+        <Input placeholder="Title" value={title} onChangeText={setTitle} style={{ marginBottom: s.sm }} />
+        <Input placeholder="Note" value={note} onChangeText={setNote} style={{ marginBottom: s.md }} multiline />
         <Button title="Add" onPress={onAdd} />
-      </View>
+      </Card>
+
+      <View style={{ height: s.md }} />
 
       <FlatList
         data={items}
         keyExtractor={(m) => m.id!}
+        ItemSeparatorComponent={() => <View style={{ height: s.sm }} />}
         renderItem={({ item }) => (
-          <Pressable onLongPress={() => onDelete(item.id)} style={styles.card}>
-            <Text style={styles.title}>{item.title}</Text>
-            {!!item.note && <Text style={styles.note}>{item.note}</Text>}
-            {!!item.kind && <Text style={styles.tag}>{String(item.kind)}</Text>}
-          </Pressable>
+          <PressableScale onLongPress={() => onLongPressCard(item.id)}>
+            <View style={[shared.card, { padding: s.md }]}>
+              <View style={shared.spaceBetween}>
+                <Text style={{ fontWeight: "700", fontSize: 16 }}>{item.title}</Text>
+                <View
+                  style={{
+                    backgroundColor: colors.ghost,
+                    borderRadius: r.pill,
+                    paddingHorizontal: 10,
+                    paddingVertical: 4,
+                  }}
+                >
+                  <Text style={{ fontSize: 12 }}>{String(item.kind ?? "text")}</Text>
+                </View>
+              </View>
+              {!!item.note && <Text style={{ ...type.dim, marginTop: 6 }}>{item.note}</Text>}
+            </View>
+          </PressableScale>
         )}
-        ItemSeparatorComponent={() => <View style={{ height: 8 }} />}
+      />
+
+      <ConfettiTiny seed={seed} />
+      <Toast
+        visible={toast.visible}
+        message={toast.msg}
+        variant={toast.variant}
+        onHide={() => setToast((v) => ({ ...v, visible: false }))}
       />
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  container: { flex: 1, padding: 16, gap: 10 },
-  h1: { fontSize: 22, fontWeight: "600" },
-  row: { flexDirection: "row", gap: 8, alignItems: "center" },
-  input: { borderWidth: 1, borderColor: "#ddd", borderRadius: 8, padding: 10 },
-  card: { borderWidth: 1, borderColor: "#eee", borderRadius: 10, padding: 12, backgroundColor: "#fff" },
-  title: { fontWeight: "700", marginBottom: 4 },
-  note: { opacity: 0.9 },
-  tag: { marginTop: 6, fontSize: 12, opacity: 0.7 }
-});

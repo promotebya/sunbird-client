@@ -1,8 +1,19 @@
+import * as Haptics from "expo-haptics";
 import { useEffect, useState } from "react";
-import { Button, FlatList, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { FlatList, Text, View } from "react-native";
 import useAuthListener from "../hooks/useAuthListener";
 import { getPairId } from "../utils/partner";
 import { Task, create as createTask, listPersonal, listShared, remove, setDone } from "../utils/tasks";
+
+import Button from "../components/Button";
+import EmptyState from "../components/EmptyState";
+import Input from "../components/Input";
+import PressableScale from "../components/PressableScale";
+import Toast from "../components/Toast";
+import Chip from "../components/ui/Chip"; // ← use your existing Chip
+
+import { shared } from "../components/sharedStyles";
+import { colors, s } from "../components/tokens";
 
 type Tab = "Personal" | "Shared";
 
@@ -11,6 +22,10 @@ export default function TasksScreen() {
   const [tab, setTab] = useState<Tab>("Personal");
   const [title, setTitle] = useState("");
   const [items, setItems] = useState<Task[]>([]);
+  const [toast, setToast] = useState<{ visible: boolean; msg: string; variant?: "success" | "danger" }>({
+    visible: false,
+    msg: "",
+  });
 
   const refresh = async () => {
     if (!user) return;
@@ -23,19 +38,27 @@ export default function TasksScreen() {
     }
   };
 
-  useEffect(() => { refresh(); }, [user, tab]);
+  useEffect(() => {
+    refresh();
+  }, [user, tab]);
 
   const onAdd = async () => {
-    if (!user || !title.trim()) return;
+    if (!user || !title.trim()) {
+      setToast({ visible: true, msg: "Enter a task title", variant: "danger" });
+      return;
+    }
     const pairId = tab === "Shared" ? await getPairId(user.uid) : null;
     await createTask({ title: title.trim(), ownerId: user.uid, pairId: pairId ?? null });
     setTitle("");
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    setToast({ visible: true, msg: "Task added!", variant: "success" });
     refresh();
   };
 
   const onToggle = async (id?: string, done?: boolean) => {
     if (!id || typeof done === "undefined") return;
     await setDone(id, !done);
+    Haptics.selectionAsync();
     refresh();
   };
 
@@ -46,41 +69,71 @@ export default function TasksScreen() {
   };
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.h1}>Tasks</Text>
+    <View style={shared.screen}>
+      <Text style={shared.title}>Tasks</Text>
 
-      <View style={styles.row}>
-        <Button title="Personal" onPress={() => setTab("Personal")} />
-        <Button title="Shared" onPress={() => setTab("Shared")} />
+      <View style={[shared.row, { marginBottom: s.md }]}>
+        <Chip label="Personal" selected={tab === "Personal"} onPress={() => setTab("Personal")} />
+        <Chip label="Shared" selected={tab === "Shared"} onPress={() => setTab("Shared")} />
       </View>
 
-      <View style={styles.row}>
-        <TextInput style={[styles.input, { flex: 1 }]} value={title} onChangeText={setTitle} placeholder="New task…" />
-        <Button title="Add" onPress={onAdd} />
+      <View style={[shared.row, { gap: s.sm, marginBottom: s.md }]}>
+        <Input style={{ flex: 1 }} value={title} onChangeText={setTitle} placeholder="New task…" />
+        <Button title="Add" small onPress={onAdd} />
       </View>
 
-      <FlatList
-        data={items}
-        keyExtractor={(t) => t.id!}
-        renderItem={({ item }) => (
-          <Pressable onPress={() => onToggle(item.id, item.done)} onLongPress={() => onDelete(item.id)} style={styles.task}>
-            <Text style={[styles.taskTitle, item.done && styles.done]}>{item.title}</Text>
-            <Text style={styles.doneTag}>{item.done ? "✓" : " "}</Text>
-          </Pressable>
-        )}
-        ItemSeparatorComponent={() => <View style={{ height: 8 }} />}
+      {items.length === 0 ? (
+        <EmptyState
+          emoji="📝"
+          title="No tasks yet"
+          tip="Try adding ‘Plan a surprise’ 😉"
+          cta="Add a task"
+          onPress={onAdd}
+        />
+      ) : (
+        <FlatList
+          data={items}
+          keyExtractor={(t) => t.id!}
+          ItemSeparatorComponent={() => <View style={{ height: s.sm }} />}
+          renderItem={({ item }) => (
+            <PressableScale onPress={() => onToggle(item.id, item.done)} onLongPress={() => onDelete(item.id)}>
+              <View
+                style={[
+                  shared.card,
+                  { padding: s.md, flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+                ]}
+              >
+                <Text
+                  style={{
+                    fontSize: 16,
+                    textDecorationLine: item.done ? "line-through" : "none",
+                    opacity: item.done ? 0.6 : 1,
+                  }}
+                >
+                  {item.title}
+                </Text>
+                <View
+                  style={{
+                    width: 26,
+                    height: 26,
+                    borderRadius: 13,
+                    borderWidth: 2,
+                    borderColor: colors.primary,
+                    backgroundColor: item.done ? colors.primary : "transparent",
+                  }}
+                />
+              </View>
+            </PressableScale>
+          )}
+        />
+      )}
+
+      <Toast
+        visible={toast.visible}
+        message={toast.msg}
+        variant={toast.variant}
+        onHide={() => setToast((v) => ({ ...v, visible: false }))}
       />
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  container: { flex: 1, padding: 16, gap: 10 },
-  h1: { fontSize: 22, fontWeight: "600" },
-  row: { flexDirection: "row", gap: 8, alignItems: "center" },
-  input: { borderWidth: 1, borderColor: "#ddd", borderRadius: 8, padding: 10 },
-  task: { flexDirection: "row", justifyContent: "space-between", borderWidth: 1, borderColor: "#eee", borderRadius: 10, padding: 12, backgroundColor: "#fff" },
-  taskTitle: { fontSize: 16 },
-  done: { textDecorationLine: "line-through", opacity: 0.6 },
-  doneTag: { fontWeight: "700" }
-});

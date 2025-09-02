@@ -1,6 +1,12 @@
+import { Ionicons } from "@expo/vector-icons";
+import * as Haptics from "expo-haptics";
 import { signOut } from "firebase/auth";
 import { useEffect, useState } from "react";
-import { Button, StyleSheet, Text, View } from "react-native";
+import { Text, View } from "react-native";
+import Button from "../components/Button";
+import Card from "../components/Card";
+import { shared } from "../components/sharedStyles";
+import { colors, s, type } from "../components/tokens";
 import { auth } from "../firebaseConfig";
 import useAuthListener from "../hooks/useAuthListener";
 import { getPairId } from "../utils/partner";
@@ -23,16 +29,29 @@ export default function HomeScreen() {
   }, [user]);
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.h1}>Hi {user?.displayName || "there"} 👋</Text>
-      <Text style={styles.p}>Your total points: {total}</Text>
-      <Button title="Sign out" onPress={() => signOut(auth)} />
+    <View style={shared.screen}>
+      <Text style={shared.title}>Hi {user?.displayName || "there"} 👋</Text>
+
+      <Card>
+        <View style={shared.spaceBetween}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Ionicons name="trophy" size={24} color={colors.primary} />
+            <Text style={type.h2}>Total Points</Text>
+          </View>
+          <Text style={{ ...type.title, color: colors.primary }}>{total}</Text>
+        </View>
+      </Card>
+
+      <View style={{ height: s.lg }} />
+
+      <Button
+        variant="link"
+        title="Sign out"
+        onPress={async () => { await signOut(auth); Haptics.selectionAsync(); }}
+        leftIcon="log-out-outline"
+        textStyle={{ color: '#2563EB' }}
+        style={{ alignSelf: 'flex-start', paddingHorizontal: 0 }}
+      />
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  container: { flex: 1, padding: 20, gap: 12 },
-  h1: { fontSize: 24, fontWeight: "600", marginTop: 8 },
-  p: { fontSize: 16 }
-});
