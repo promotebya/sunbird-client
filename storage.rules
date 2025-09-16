@@ -1,0 +1,25 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isAuthed() { return request.auth != null; }
+
+    // Read partner pairing info from Firestore
+    function userPairId(uid) {
+      return get(/databases/(default)/documents/users/$(uid)).data.pairId;
+    }
+    function callerPairId() {
+      return isAuthed() ? userPairId(request.auth.uid) : null;
+    }
+
+    // images/{ownerUid}/memories/{memoryId}/{filename}
+    match /images/{ownerUid}/memories/{memoryId}/{filename} {
+      // Owner or anyone in the same pair can read
+      allow read: if isAuthed() &&
+                  (request.auth.uid == ownerUid ||
+                   (userPairId(ownerUid) != null && userPairId(ownerUid) == callerPairId()));
+
+      // Only the owner can write
+      allow write: if isAuthed() && request.auth.uid == ownerUid;
+    }
+  }
+}

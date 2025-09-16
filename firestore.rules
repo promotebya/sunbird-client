@@ -1,0 +1,52 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Utility: authenticated user only
+    function isAuthed() {
+      return request.auth != null;
+    }
+
+    // Utility: a doc is owned by the signed-in user
+    function isOwner() {
+      return isAuthed() && request.auth.uid == resource.data.ownerId;
+    }
+
+    // Utility: write validates ownerId == auth uid
+    function writesOwnData() {
+      return isAuthed() && request.resource.data.ownerId == request.auth.uid;
+    }
+
+    // ----- points -----
+    match /points/{docId} {
+      allow read: if isAuthed() && (
+        resource.data.uid == request.auth.uid ||          // own
+        resource.data.pairId == request.auth.token.pairId // or in same pair (if you store pairId in custom claims)
+      );
+      allow create, update, delete: if writesOwnData();
+    }
+
+    // ----- tasks -----
+    match /tasks/{taskId} {
+      allow read: if isAuthed() && (
+        resource.data.ownerId == request.auth.uid || resource.data.pairId == request.auth.token.pairId
+      );
+      allow create, update, delete: if writesOwnData();
+    }
+
+    // ----- memories -----
+    match /memories/{memoryId} {
+      allow read: if isAuthed() && (
+        resource.data.ownerId == request.auth.uid ||
+        resource.data.pairId == request.auth.token.pairId
+      );
+      allow create, update, delete: if writesOwnData();
+    }
+
+    // ----- notes -----
+    match /notes/{noteId} {
+      allow read: if isOwner();
+      allow create, update, delete: if writesOwnData();
+    }
+  }
+}

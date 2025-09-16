@@ -1,0 +1,69 @@
+{
+  "expo": {
+    "name": "LovePointsApp",
+    "slug": "LovePointsApp",
+    "scheme": "lovepoints",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#F9FAFB"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.yourcompany.lovepoints",
+      "infoPlist": {
+        "NSPhotoLibraryUsageDescription": "We need access to your photos to add memories.",
+        "NSCameraUsageDescription": "We use your camera to capture memory photos and scan QR codes.",
+        "NSMicrophoneUsageDescription": "We use the microphone for video capture.",
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "com.yourcompany.lovepoints",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#FFFFFF"
+      },
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.CAMERA"
+      ]
+    },
+    "notification": {
+      "icon": "./assets/icon.png",
+      "color": "#FF4F8B"
+    },
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow LovePoints to access your photos to add memories.",
+          "cameraPermission": "Allow LovePoints to use the camera for memory photos.",
+          "microphonePermission": "Allow LovePoints to use the microphone for video capture."
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow LovePoints to use the camera to scan QR codes and take photos."
+        }
+      ],
+      "expo-notifications"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "d791c6d2-2f30-4b8e-b5b6-0f52eb421bf3"
+      }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "jsEngine": "hermes"
+  }
+}
