@@ -2,7 +2,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import * as Clipboard from 'expo-clipboard';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   FlatList,
@@ -10,6 +10,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   Pressable,
+  Share,
   StyleSheet,
   View,
 } from 'react-native';
@@ -18,9 +19,9 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import Button from '../components/Button';
 import Card from '../components/Card';
 import Input from '../components/Input';
-import ThemedText from '../components/ThemedText';
 import sharedStyles from '../components/sharedStyles';
-import { tokens } from '../components/tokens';
+import ThemedText from '../components/ThemedText';
+import { useTokens, type ThemeTokens } from '../components/ThemeProvider';
 
 import { addDoc, collection, serverTimestamp } from 'firebase/firestore';
 import { db } from '../firebaseConfig';
@@ -37,11 +38,20 @@ const SUGGESTIONS = [
   'Small note: you’re amazing.',
 ];
 
+function withAlpha(hex: string, alpha: number) {
+  const h = hex.replace('#', '');
+  const full = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
+  const a = Math.round(alpha * 255).toString(16).padStart(2, '0');
+  return `#${full}${a}`;
+}
+
 const LoveNotesScreen: React.FC = () => {
   const nav = useNavigation<any>();
   const insets = useSafeAreaInsets();
-  const { user } = useAuthListener();
+  const t = useTokens();
+  const s = useMemo(() => styles(t), [t]);
 
+  const { user } = useAuthListener();
   const [pairId, setPairId] = useState<string | null>(null);
   const [text, setText] = useState('');
   const inputRef = useRef<any>(null);
@@ -59,8 +69,8 @@ const LoveNotesScreen: React.FC = () => {
       Alert.alert('Link accounts first', 'Open Settings to link with your partner.');
       return;
     }
-    const t = text.trim();
-    if (!t) {
+    const tText = text.trim();
+    if (!tText) {
       Alert.alert('Write something sweet…');
       return;
     }
@@ -68,7 +78,7 @@ const LoveNotesScreen: React.FC = () => {
       await addDoc(collection(db, 'notes'), {
         ownerId: user.uid,
         pairId,
-        text: t,
+        text: tText,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
@@ -79,49 +89,51 @@ const LoveNotesScreen: React.FC = () => {
     }
   }
 
-  /** Suggestions are visible always. Behavior:
-   *  - If linked: set input text and focus it
-   *  - If not linked: copy to clipboard and nudge to link
-   */
-  async function onPickSuggestion(s: string) {
+  async function onPickSuggestion(sug: string) {
     if (pairId) {
-      setText(s);
-      // focus the input so user can hit Send
+      setText(sug);
       requestAnimationFrame(() => inputRef.current?.focus?.());
       return;
     }
-    await Clipboard.setStringAsync(s);
+    await Clipboard.setStringAsync(sug);
     Alert.alert('Copied ✨', 'Note copied to clipboard. Link accounts to send love notes inside the app.');
+  }
+
+  async function shareViaMessages() {
+    try {
+      const msg = text.trim() || 'Thinking of you 💖';
+      await Share.share({ message: msg });
+    } catch {}
   }
 
   const NotLinkedCard = () => (
     <Card>
-      <View style={styles.linkRow}>
-        <View style={styles.linkIcon}>
-          <Ionicons name="link" size={18} color="#fff" />
+      <View style={s.linkRow}>
+        <View style={s.linkIcon}>
+          <Ionicons name="link" size={18} color={t.colors.primary} />
         </View>
         <View style={{ flex: 1, marginLeft: 10 }}>
           <ThemedText variant="title">Share notes together</ThemedText>
-          <ThemedText variant="caption" color={tokens.colors.textDim} style={{ marginTop: 2 }}>
+          <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 2 }}>
             Link with your partner to send and receive love notes.
           </ThemedText>
         </View>
       </View>
-      <Button
-        label="Link now"
-        onPress={() => nav.navigate('Settings')}
-        style={{ marginTop: tokens.spacing.md }}
-      />
+
+      <View style={{ flexDirection: 'row', gap: 12, marginTop: 12 }}>
+        <Button label="Link now" onPress={() => nav.navigate('Settings')} />
+        <Button label="Send via Messages…" variant="outline" onPress={shareViaMessages} />
+      </View>
     </Card>
   );
 
   return (
-    <SafeAreaView style={[sharedStyles.screen, { paddingTop: tokens.spacing.md }]} edges={['top', 'left', 'right']}>
+    <SafeAreaView style={[sharedStyles.screen, { paddingTop: t.spacing.md }]} edges={['top', 'left', 'right']}>
       <KeyboardAvoidingView behavior={Platform.select({ ios: 'padding', android: undefined })} style={{ flex: 1 }}>
         {/* Header */}
-        <View style={styles.header}>
+        <View style={s.header}>
           <ThemedText variant="display">Love notes</ThemedText>
-          <ThemedText variant="subtitle" color={tokens.colors.textDim}>
+          <ThemedText variant="subtitle" color={t.colors.textDim}>
             Drop a little kindness ✨
           </ThemedText>
         </View>
@@ -139,20 +151,23 @@ const LoveNotesScreen: React.FC = () => {
               returnKeyType="send"
               onSubmitEditing={sendNote}
             />
-            <Button label="Send" onPress={sendNote} style={{ marginTop: tokens.spacing.md }} />
+            <View style={{ flexDirection: 'row', gap: 12, marginTop: t.spacing.md }}>
+              <Button label="Send" onPress={sendNote} />
+              <Button label="Send via Messages…" variant="outline" onPress={shareViaMessages} />
+            </View>
           </Card>
         )}
 
-        {/* Suggestions (always visible) */}
-        <Card style={{ marginTop: tokens.spacing.md }}>
+        {/* Suggestions */}
+        <Card style={{ marginTop: t.spacing.md }}>
           <ThemedText variant="title">Need a spark?</ThemedText>
-          <ThemedText variant="caption" color={tokens.colors.textDim} style={{ marginTop: 4 }}>
+          <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 4 }}>
             Tap to {pairId ? 'fill your note' : 'copy to clipboard'}.
           </ThemedText>
-          <View style={styles.suggestWrap}>
-            {SUGGESTIONS.map((s) => (
-              <Pressable key={s} onPress={() => onPickSuggestion(s)} style={styles.suggestChip}>
-                <ThemedText variant="label">{s}</ThemedText>
+          <View style={s.suggestWrap}>
+            {SUGGESTIONS.map((sug) => (
+              <Pressable key={sug} onPress={() => onPickSuggestion(sug)} style={s.suggestChip}>
+                <ThemedText variant="label">{sug}</ThemedText>
               </Pressable>
             ))}
           </View>
@@ -163,38 +178,41 @@ const LoveNotesScreen: React.FC = () => {
           data={[]}
           renderItem={null as any}
           ListHeaderComponent={<View />}
-          contentContainerStyle={{ paddingBottom: insets.bottom + tokens.spacing.xl }}
+          contentContainerStyle={{ paddingBottom: insets.bottom + t.spacing.xl }}
         />
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
 };
 
-const styles = StyleSheet.create({
-  header: { paddingHorizontal: tokens.spacing.md, paddingTop: tokens.spacing.md, paddingBottom: tokens.spacing.s },
+const styles = (t: ThemeTokens) =>
+  StyleSheet.create({
+    header: { paddingHorizontal: t.spacing.md, paddingTop: t.spacing.md, paddingBottom: t.spacing.s },
 
-  linkRow: { flexDirection: 'row', alignItems: 'center' },
-  linkIcon: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    backgroundColor: tokens.colors.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
+    linkRow: { flexDirection: 'row', alignItems: 'center' },
+    linkIcon: {
+      width: 36,
+      height: 36,
+      borderRadius: 10,
+      backgroundColor: withAlpha(t.colors.primary, 0.08), // ← theme-aware tint (matches Home)
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
 
-  suggestWrap: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: tokens.spacing.s as number,
-    marginTop: tokens.spacing.md,
-  },
-  suggestChip: {
-    paddingHorizontal: tokens.spacing.md,
-    paddingVertical: 10,
-    borderRadius: 999,
-    backgroundColor: '#ECEFF3',
-  },
-});
+    suggestWrap: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: t.spacing.s as number,
+      marginTop: t.spacing.md,
+    },
+    suggestChip: {
+      paddingHorizontal: t.spacing.md,
+      paddingVertical: 10,
+      borderRadius: 999,
+      backgroundColor: '#ECEFF3',
+      borderWidth: 1,
+      borderColor: '#E8EAF0',
+    },
+  });
 
 export default LoveNotesScreen;

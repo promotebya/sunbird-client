@@ -1,4 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useNavigation } from '@react-navigation/native';
 import * as ImagePicker from 'expo-image-picker';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
@@ -6,23 +7,21 @@ import {
   Alert,
   FlatList,
   Image,
-  KeyboardAvoidingView,
   Linking,
-  Platform,
   Pressable,
   StyleSheet,
   TextInput,
   View,
 } from 'react-native';
-import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import Button from '../components/Button';
 import Card from '../components/Card';
 import ConfettiTiny from '../components/ConfettiTiny';
 import MemoryShareCard from '../components/MemoryShareCard';
-import sharedStyles from '../components/sharedStyles';
+import ProgressBar from '../components/ProgressBar';
+import Screen from '../components/Screen';
 import ThemedText from '../components/ThemedText';
-import { tokens } from '../components/tokens';
+import { useTokens, type ThemeTokens } from '../components/ThemeProvider';
 
 import useAuthListener from '../hooks/useAuthListener';
 import { timeAgo } from '../utils/date';
@@ -43,32 +42,35 @@ const PROMPTS = [
 ];
 
 const QUICK_TAGS = ['Walk', 'Coffee', 'Cozy night', 'Movie', 'Homemade meal', 'Sunset'];
+const GOAL = 3;
+
+// Porcelain neutrals (harmonize with Home)
+const HAIRLINE = '#F0E6EF';
+const CHIP_BG = '#F3EEF6';
 
 function randid() {
   return `opt_${Math.random().toString(36).slice(2, 9)}`;
 }
 
 const MemoriesScreen: React.FC = () => {
-  const insets = useSafeAreaInsets();
+  const t = useTokens();
+  const s = useMemo(() => styles(t), [t]);
+  const nav = useNavigation<any>();
   const { user } = useAuthListener();
-  const [tab, setTab] = useState<Tab>('text');
 
+  const [tab, setTab] = useState<Tab>('text');
   const [pairId, setPairId] = useState<string | null>(null);
   const [serverItems, setServerItems] = useState<MemoryDoc[]>([]);
   const [optimistic, setOptimistic] = useState<OptMem[]>([]);
-
   const [title, setTitle] = useState('');
   const [note, setNote] = useState('');
-
   const [imageUri, setImageUri] = useState<string | null>(null);
   const [uploadProgress, setUploadProgress] = useState<number>(0);
-
   const [burstKey, setBurstKey] = useState<number>(0);
   const [saving, setSaving] = useState(false);
-
   const [promptIdx, setPromptIdx] = useState(() => Math.floor(Math.random() * PROMPTS.length));
-  const GOAL = 3;
 
+  // Pair
   useEffect(() => {
     (async () => {
       if (!user) return setPairId(null);
@@ -77,7 +79,7 @@ const MemoriesScreen: React.FC = () => {
     })();
   }, [user]);
 
-  // Subscribe to shared (pairId) memories
+  // Subscribe to shared memories
   useEffect(() => {
     if (!user) return;
     if (!pairId) {
@@ -93,7 +95,7 @@ const MemoriesScreen: React.FC = () => {
     return () => unsub && unsub();
   }, [user, pairId]);
 
-  // First real memory confetti (per pair)
+  // First-real-memory confetti (per pair)
   useEffect(() => {
     if (!pairId) return;
     const KEY = `lp:first-memory-pair:${pairId}`;
@@ -110,11 +112,11 @@ const MemoriesScreen: React.FC = () => {
 
   const items: MemoryDoc[] = [...optimistic, ...serverItems];
 
-  // Weekly progress
+  // Weekly progress count
   const weekCount = useMemo(() => {
     const now = new Date();
     const monday = new Date(now);
-    const day = (now.getDay() + 6) % 7; // Mon=0
+    const day = (now.getDay() + 6) % 7; // Mon = 0
     monday.setDate(now.getDate() - day);
     monday.setHours(0, 0, 0, 0);
     return items.filter((m) => {
@@ -123,9 +125,9 @@ const MemoriesScreen: React.FC = () => {
     }).length;
   }, [items]);
 
-  const progressPct = Math.min(100, (weekCount / GOAL) * 100);
-  const canAdd = !!user && !!pairId; // shared-only
+  const canAdd = !!user && !!pairId;
 
+  // Permissions + pickers
   async function requestLibrary() {
     const { status, canAskAgain } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (status !== 'granted') {
@@ -143,7 +145,6 @@ const MemoriesScreen: React.FC = () => {
     }
     return true;
   }
-
   async function requestCamera() {
     const { status, canAskAgain } = await ImagePicker.requestCameraPermissionsAsync();
     if (status !== 'granted') {
@@ -161,7 +162,6 @@ const MemoriesScreen: React.FC = () => {
     }
     return true;
   }
-
   async function pickImage() {
     const ok = await requestLibrary();
     if (!ok) return;
@@ -172,7 +172,6 @@ const MemoriesScreen: React.FC = () => {
     });
     if (!res.canceled && res.assets?.length) setImageUri(res.assets[0].uri);
   }
-
   async function captureImage() {
     const ok = await requestCamera();
     if (!ok) return;
@@ -180,6 +179,7 @@ const MemoriesScreen: React.FC = () => {
     if (!res.canceled && res.assets?.length) setImageUri(res.assets[0].uri);
   }
 
+  // Create memory
   async function onAdd() {
     if (!user || !pairId) {
       Alert.alert('Link with partner', 'Please link with your partner to add shared memories.');
@@ -190,9 +190,9 @@ const MemoriesScreen: React.FC = () => {
       const clientTag = randid();
       if (tab === 'text' || tab === 'milestone') {
         const kind: MemoryKind = tab;
-        const t = title.trim();
-        const n = note.trim();
-        if (!t && !n) {
+        const tTitle = title.trim();
+        const tNote = note.trim();
+        if (!tTitle && !tNote) {
           Alert.alert('Oops', 'Please add a title or note first.');
         } else {
           const opt: OptMem = {
@@ -201,18 +201,18 @@ const MemoriesScreen: React.FC = () => {
             ownerId: user.uid,
             pairId,
             kind,
-            title: t,
-            note: n,
+            title: tTitle,
+            note: tNote,
             photoURL: null,
             createdAt: new Date(),
             optimistic: true,
           };
           setOptimistic((prev) => [opt, ...prev]);
-          await createMemory({ ownerId: user.uid, pairId, kind, title: t, note: n, clientTag });
+          await createMemory({ ownerId: user.uid, pairId, kind, title: tTitle, note: tNote, clientTag });
           setTitle('');
           setNote('');
         }
-      } else if (tab === 'photo') {
+      } else {
         if (!imageUri) {
           Alert.alert('Pick or capture a photo', 'Choose or capture a photo to upload.');
         } else {
@@ -256,21 +256,22 @@ const MemoriesScreen: React.FC = () => {
     }
   }
 
+  // Timeline row
   const renderItem = ({ item }: { item: MemoryDoc }) => (
     <>
-      <View style={styles.itemHeader}>
+      <View style={s.itemHeader}>
         <View
           style={[
-            styles.kindPill,
-            item.kind === 'photo' && styles.kindPhoto,
-            item.kind === 'milestone' && styles.kindMilestone,
+            s.kindPill,
+            item.kind === 'photo' && { backgroundColor: withAlpha(t.colors.primary, 0.1) },
+            item.kind === 'milestone' && { backgroundColor: withAlpha('#FFB020', 0.18) },
           ]}
         >
-          <ThemedText variant="label" color={tokens.colors.buttonTextPrimary}>
+          <ThemedText variant="label" color={t.colors.text}>
             {item.kind}
           </ThemedText>
         </View>
-        <ThemedText variant="caption" color={tokens.colors.textDim}>
+        <ThemedText variant="caption" color={t.colors.textDim}>
           {timeAgo(item.createdAt)}
         </ThemedText>
       </View>
@@ -286,226 +287,295 @@ const MemoriesScreen: React.FC = () => {
   );
 
   return (
-    <SafeAreaView style={[sharedStyles.screen, { paddingTop: tokens.spacing.md }]} edges={['top', 'left', 'right']}>
+    <Screen keyboard scroll={false}>
       {burstKey ? <ConfettiTiny key={burstKey} /> : null}
 
-      <KeyboardAvoidingView behavior={Platform.select({ ios: 'padding', android: undefined })} style={{ flex: 1 }}>
-        {/* Header & tabs */}
-        <View style={styles.header}>
-          <ThemedText variant="display">Memories</ThemedText>
-          <View style={styles.tabs}>
-            {(['photo', 'text', 'milestone'] as Tab[]).map((t) => {
-              const active = tab === t;
-              return (
-                <Pressable key={t} onPress={() => setTab(t)} style={[styles.chip, active && styles.chipActive]}>
-                  <ThemedText
-                    variant="label"
-                    color={active ? tokens.colors.buttonTextPrimary : tokens.colors.textDim}
+      <FlatList
+        data={items}
+        keyExtractor={(it) => it.id}
+        ItemSeparatorComponent={() => <View style={{ height: t.spacing.s }} />}
+        renderItem={renderItem}
+        keyboardShouldPersistTaps="handled"
+        contentContainerStyle={{ paddingVertical: t.spacing.md, paddingBottom: t.spacing.xl }}
+        ListHeaderComponent={
+          <>
+            {/* Header + Settings (outline) */}
+            <View style={s.headerRow}>
+              <ThemedText variant="display">Memories</ThemedText>
+              <Button label="Settings" variant="outline" onPress={() => nav.navigate('Settings')} />
+            </View>
+
+            {/* Segmented tabs */}
+            <View style={s.segmented}>
+              {(['photo', 'text', 'milestone'] as const).map((key) => {
+                const active = tab === key;
+                return (
+                  <Pressable
+                    key={key}
+                    onPress={() => setTab(key)}
+                    accessibilityRole="button"
+                    style={[s.segment, active && s.segmentActive]}
                   >
-                    {t[0].toUpperCase() + t.slice(1)}
+                    <ThemedText variant="label" color={active ? t.colors.text : t.colors.textDim}>
+                      {key.charAt(0).toUpperCase() + key.slice(1)}
+                    </ThemedText>
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            {/* Prompt + quick tags + weekly goal */}
+            <Card style={{ marginBottom: t.spacing.md }}>
+              <View style={s.rowBetween}>
+                <ThemedText variant="subtitle">Today’s prompt</ThemedText>
+
+                {/* 🎲 Shuffle pill with a11y + long-press hint */}
+                <Pressable
+                  onPress={() => setPromptIdx((i) => (i + 1) % PROMPTS.length)}
+                  onLongPress={() =>
+                    Alert.alert('Shuffle prompts', 'Tap “Shuffle” to get a different idea.')
+                  }
+                  accessibilityRole="button"
+                  accessibilityLabel="Shuffle prompt"
+                  accessibilityHint="Tap to get another prompt"
+                  style={s.shufflePill}
+                >
+                  <ThemedText variant="label" style={{ marginRight: 6 }}>
+                    🎲
+                  </ThemedText>
+                  <ThemedText variant="label" color={t.colors.textDim}>
+                    Shuffle
                   </ThemedText>
                 </Pressable>
-              );
-            })}
-          </View>
-        </View>
+              </View>
 
-        {/* Prompt + quick tags + weekly goal */}
-        <Card style={{ marginBottom: tokens.spacing.md }}>
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-            <ThemedText variant="h2">Today’s prompt</ThemedText>
-            <Pressable onPress={() => setPromptIdx((i) => (i + 1) % PROMPTS.length)} style={styles.dice}>
-              <ThemedText variant="label">🎲</ThemedText>
-            </Pressable>
-          </View>
-          <ThemedText variant="body" color={tokens.colors.textDim} style={{ marginTop: 6 }}>
-            {PROMPTS[promptIdx]}
-          </ThemedText>
-
-          <View style={styles.tagWrap}>
-            {QUICK_TAGS.map((t) => (
-              <Pressable key={t} onPress={() => setTitle((prev) => (prev ? `${prev} · ${t}` : t))} style={styles.tag}>
-                <ThemedText variant="label">{t}</ThemedText>
-              </Pressable>
-            ))}
-          </View>
-
-          <View style={{ marginTop: tokens.spacing.md }}>
-            <ThemedText variant="label" color={tokens.colors.textDim}>
-              Weekly goal · {weekCount}/{GOAL}
-            </ThemedText>
-            <View style={styles.track}>
-              <View style={[styles.fill, { width: `${Math.min(100, progressPct)}%` }]} />
-            </View>
-          </View>
-        </Card>
-
-        {/* Add memory */}
-        <Card>
-          {!pairId ? (
-            <>
-              <ThemedText variant="title">Share memories together</ThemedText>
-              <ThemedText variant="caption" color={tokens.colors.textDim} style={{ marginTop: 6 }}>
-                Link with your partner to create a shared timeline.
+              <ThemedText variant="title" style={{ marginTop: 6 }}>
+                {PROMPTS[promptIdx]}
               </ThemedText>
-              <Pressable
-                onPress={() => Alert.alert('Link', 'Go to the pairing screen in settings to link.')}
-                style={styles.addBtn}
-              >
-                <ThemedText variant="button" color="#fff">Link now</ThemedText>
-              </Pressable>
-            </>
-          ) : tab === 'photo' ? (
-            <>
-              {imageUri ? (
-                <Image source={{ uri: imageUri as string }} style={styles.preview} />
-              ) : (
-                <View style={styles.photoPickRow}>
-                  <Pressable onPress={pickImage} style={styles.photoStub}>
-                    <ThemedText variant="subtitle" color={tokens.colors.textDim}>
-                      Pick from library
-                    </ThemedText>
+
+              <View style={s.tagWrap}>
+                {QUICK_TAGS.map((tag) => (
+                  <Pressable
+                    key={tag}
+                    onPress={() => setTitle((prev) => (prev ? `${prev} · ${tag}` : tag))}
+                    style={s.tag}
+                  >
+                    <ThemedText variant="label">{tag}</ThemedText>
                   </Pressable>
-                  <Pressable onPress={captureImage} style={styles.photoStub}>
-                    <ThemedText variant="subtitle" color={tokens.colors.textDim}>
-                      Use camera
-                    </ThemedText>
-                  </Pressable>
-                </View>
-              )}
-              {uploadProgress > 0 && uploadProgress < 1 && (
-                <View style={styles.progressRow}>
-                  <ActivityIndicator />
-                  <ThemedText variant="caption" style={{ marginLeft: tokens.spacing.xs }}>
-                    Uploading… {Math.round(uploadProgress * 100)}%
+                ))}
+              </View>
+
+              <View style={{ marginTop: 12 }}>
+                <View style={s.rowBetween}>
+                  <ThemedText variant="caption" color={t.colors.textDim}>
+                    Weekly goal
+                  </ThemedText>
+                  <ThemedText variant="caption" color={t.colors.textDim}>
+                    {weekCount} / {GOAL} · {Math.max(0, GOAL - weekCount)} to go
                   </ThemedText>
                 </View>
-              )}
-              <TextInput
-                value={title}
-                onChangeText={setTitle}
-                placeholder="Title (optional)"
-                placeholderTextColor={tokens.colors.textDim}
-                style={[styles.input, { marginTop: tokens.spacing.s }]}
-              />
-              <TextInput
-                value={note}
-                onChangeText={setNote}
-                placeholder="Note (optional)"
-                placeholderTextColor={tokens.colors.textDim}
-                style={[styles.input, { marginTop: tokens.spacing.s }]}
-              />
-              <Button label={saving ? 'Saving…' : 'Add'} onPress={onAdd} style={{ marginTop: tokens.spacing.md }} disabled={!canAdd || saving} />
-            </>
-          ) : (
-            <>
-              <TextInput
-                value={title}
-                onChangeText={setTitle}
-                placeholder={tab === 'text' ? 'Title' : 'Milestone title'}
-                placeholderTextColor={tokens.colors.textDim}
-                style={styles.input}
-                editable={!!pairId}
-              />
-              <TextInput
-                value={note}
-                onChangeText={setNote}
-                placeholder="Add a note (optional)"
-                placeholderTextColor={tokens.colors.textDim}
-                style={[styles.input, { marginTop: tokens.spacing.s }]}
-                multiline
-                editable={!!pairId}
-              />
-              <Button label={saving ? 'Saving…' : 'Add'} onPress={onAdd} style={{ marginTop: tokens.spacing.md }} disabled={!canAdd || saving} />
-            </>
-          )}
-        </Card>
+                <ProgressBar value={weekCount} max={GOAL} height={8} trackColor="#EDEAF1" />
+              </View>
+            </Card>
 
-        {/* Timeline */}
-        <FlatList
-          data={items}
-          keyExtractor={(it) => it.id}
-          contentContainerStyle={{ paddingVertical: tokens.spacing.md, paddingBottom: insets.bottom + tokens.spacing.xl }}
-          ItemSeparatorComponent={() => <View style={{ height: tokens.spacing.s }} />}
-          renderItem={renderItem}
-          ListEmptyComponent={
-            <View style={styles.empty}>
-              <ThemedText variant="title">No memories yet</ThemedText>
-              <ThemedText variant="subtitle" style={{ marginTop: tokens.spacing.xs }}>
-                Capture something small from today.
-              </ThemedText>
-            </View>
-          }
-        />
-      </KeyboardAvoidingView>
-    </SafeAreaView>
+            {/* Add memory */}
+            <Card>
+              {!pairId ? (
+                <>
+                  <ThemedText variant="title">Share memories together</ThemedText>
+                  <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 6 }}>
+                    Link with your partner to create a shared timeline.
+                  </ThemedText>
+                  <View style={{ marginTop: 10 }}>
+                    <Button label="Link now" onPress={() => nav.navigate('Pairing')} />
+                  </View>
+                </>
+              ) : tab === 'photo' ? (
+                <>
+                  {imageUri ? (
+                    <Image source={{ uri: imageUri }} style={s.preview} />
+                  ) : (
+                    <View style={s.photoPickRow}>
+                      <Button label="Pick from library" variant="outline" onPress={pickImage} />
+                      <Button label="Use camera" variant="outline" onPress={captureImage} />
+                    </View>
+                  )}
+
+                  {uploadProgress > 0 && uploadProgress < 1 && (
+                    <View style={s.progressRow}>
+                      <ActivityIndicator />
+                      <ThemedText variant="caption" style={{ marginLeft: t.spacing.xs }}>
+                        Uploading… {Math.round(uploadProgress * 100)}%
+                      </ThemedText>
+                    </View>
+                  )}
+
+                  <TextInput
+                    value={title}
+                    onChangeText={setTitle}
+                    placeholder="Title (optional)"
+                    placeholderTextColor={t.colors.textDim}
+                    style={[s.input, { marginTop: t.spacing.s }]}
+                  />
+                  <TextInput
+                    value={note}
+                    onChangeText={setNote}
+                    placeholder="Note (optional)"
+                    placeholderTextColor={t.colors.textDim}
+                    style={[s.input, { marginTop: t.spacing.s }]}
+                  />
+                  <Button
+                    label={saving ? 'Saving…' : 'Add'}
+                    onPress={onAdd}
+                    style={{ marginTop: t.spacing.md }}
+                    disabled={!canAdd || saving}
+                  />
+                </>
+              ) : (
+                <>
+                  <TextInput
+                    value={title}
+                    onChangeText={setTitle}
+                    placeholder={tab === 'text' ? 'Title' : 'Milestone title'}
+                    placeholderTextColor={t.colors.textDim}
+                    style={s.input}
+                    editable={!!pairId}
+                  />
+                  <TextInput
+                    value={note}
+                    onChangeText={setNote}
+                    placeholder="Add a note (optional)"
+                    placeholderTextColor={t.colors.textDim}
+                    style={[s.input, { marginTop: t.spacing.s }]}
+                    multiline
+                    editable={!!pairId}
+                  />
+                  <Button
+                    label={saving ? 'Saving…' : 'Add'}
+                    onPress={onAdd}
+                    style={{ marginTop: t.spacing.md }}
+                    disabled={!canAdd || saving}
+                  />
+                </>
+              )}
+            </Card>
+          </>
+        }
+        ListEmptyComponent={
+          <View style={s.empty}>
+            <ThemedText variant="title">No memories yet</ThemedText>
+            <ThemedText variant="subtitle" style={{ marginTop: t.spacing.xs }}>
+              Capture something small from today.
+            </ThemedText>
+          </View>
+        }
+      />
+    </Screen>
   );
 };
 
-const styles = StyleSheet.create({
-  header: { paddingHorizontal: tokens.spacing.md, paddingTop: tokens.spacing.md, paddingBottom: tokens.spacing.s },
-  tabs: { flexDirection: 'row', gap: tokens.spacing.s as number, marginTop: tokens.spacing.s },
-  chip: {
-    paddingHorizontal: tokens.spacing.md,
-    paddingVertical: 8,
-    borderRadius: tokens.radius.pill,
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-    backgroundColor: tokens.colors.card,
-  },
-  chipActive: { backgroundColor: tokens.colors.primary, borderColor: tokens.colors.primary },
-  input: {
-    minHeight: 44,
-    paddingVertical: tokens.spacing.s,
-    paddingHorizontal: tokens.spacing.md,
-    backgroundColor: tokens.colors.card,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-    color: tokens.colors.text,
-  },
-  photoPickRow: { flexDirection: 'row', gap: tokens.spacing.s as number },
-  photoStub: {
-    flex: 1,
-    height: 140,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-    backgroundColor: tokens.colors.card,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  preview: { width: '100%', height: 200, borderRadius: 12, resizeMode: 'cover' },
-  progressRow: { flexDirection: 'row', alignItems: 'center', marginTop: tokens.spacing.s },
-  empty: { paddingVertical: tokens.spacing.lg, alignItems: 'center' },
+function withAlpha(hex: string, alpha: number) {
+  const h = hex.replace('#', '');
+  const full = h.length === 3 ? h.split('').map((c) => c + c).join('') : h;
+  const a = Math.round(alpha * 255).toString(16).padStart(2, '0');
+  return `#${full}${a}`;
+}
 
-  itemHeader: {
-    paddingHorizontal: tokens.spacing.md,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: tokens.spacing.xs,
-  },
-  kindPill: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: '#F3F4F6' },
-  kindPhoto: { backgroundColor: '#DBEAFE' },
-  kindMilestone: { backgroundColor: '#FEF3C7' },
+const styles = (t: ThemeTokens) =>
+  StyleSheet.create({
+    headerRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: 8,
+    },
 
-  // fun bits
-  dice: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 10, backgroundColor: '#F3F4F6' },
-  tagWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: tokens.spacing.s },
-  tag: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, backgroundColor: '#ECEFF3' },
-  track: { height: 10, borderRadius: 999, backgroundColor: '#E5E7EB', overflow: 'hidden', marginTop: 8 },
-  fill: { height: 10, borderRadius: 999, backgroundColor: tokens.colors.primary },
+    // Segmented tabs (neutral by default, slight lift when active)
+    segmented: { flexDirection: 'row', gap: 8, marginBottom: 12 },
+    segment: {
+      flex: 1,
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingVertical: 10,
+      borderRadius: 14,
+      backgroundColor: CHIP_BG,
+      borderWidth: 1,
+      borderColor: HAIRLINE,
+    },
+    segmentActive: {
+      backgroundColor: '#FFFFFF',
+      borderColor: HAIRLINE,
+      shadowColor: 'rgba(16,24,40,0.08)',
+      shadowOpacity: 1,
+      shadowRadius: 8,
+      shadowOffset: { width: 0, height: 4 },
+      elevation: 3,
+    },
 
-  // ✅ missing before
-  addBtn: {
-    marginTop: tokens.spacing.md,
-    backgroundColor: tokens.colors.primary,
-    paddingVertical: 12,
-    paddingHorizontal: tokens.spacing.md,
-    borderRadius: tokens.radius.lg,
-    alignItems: 'center',
-  },
-});
+    rowBetween: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+
+    // Shuffle pill (replaces plain dice)
+    shufflePill: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: 12,
+      paddingVertical: 6,
+      borderRadius: 12,
+      backgroundColor: '#FFFFFF',
+      borderWidth: 1,
+      borderColor: HAIRLINE,
+      shadowColor: 'rgba(16,24,40,0.06)',
+      shadowOpacity: 1,
+      shadowRadius: 6,
+      shadowOffset: { width: 0, height: 3 },
+      elevation: 2,
+    },
+
+    // Tags
+    tagWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: t.spacing.s },
+    tag: {
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      borderRadius: 999,
+      backgroundColor: CHIP_BG,
+      borderWidth: 1,
+      borderColor: HAIRLINE,
+    },
+
+    // Add area
+    input: {
+      minHeight: 44,
+      paddingVertical: t.spacing.s,
+      paddingHorizontal: t.spacing.md,
+      backgroundColor: '#FFFFFF',
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: HAIRLINE,
+      color: t.colors.text,
+    },
+    photoPickRow: { flexDirection: 'row', gap: 8 },
+    preview: { width: '100%', height: 200, borderRadius: 12, resizeMode: 'cover' },
+    progressRow: { flexDirection: 'row', alignItems: 'center', marginTop: t.spacing.s },
+
+    // Timeline header
+    itemHeader: {
+      paddingHorizontal: t.spacing.md,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: t.spacing.xs,
+    },
+    kindPill: {
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+      borderRadius: 999,
+      backgroundColor: CHIP_BG,
+      borderWidth: 1,
+      borderColor: HAIRLINE,
+    },
+
+    // Empty state
+    empty: { paddingVertical: t.spacing.lg, alignItems: 'center' },
+  });
 
 export default MemoriesScreen;

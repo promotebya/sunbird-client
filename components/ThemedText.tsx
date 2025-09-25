@@ -1,27 +1,33 @@
 // components/ThemedText.tsx
 import React from 'react';
 import { StyleSheet, Text, type TextProps } from 'react-native';
-import Colors from '../constants/Colors';
-import useColorScheme from '../hooks/useColorScheme';
+import { useTokens, type ThemeTokens } from './ThemeProvider';
 
 type Variant = 'display' | 'title' | 'h2' | 'subtitle' | 'body' | 'label' | 'button' | 'caption';
 
 type Props = TextProps & {
   variant?: Variant;
-  color?: string;
+  /** You can pass a raw color (e.g. '#fff') OR a theme color key (e.g. 'textDim') */
+  color?: keyof ThemeTokens['colors'] | string;
   /** When true, applies textAlign: 'center' */
   center?: boolean;
 };
 
 const ThemedText: React.FC<Props> = ({ variant = 'body', style, color, center, ...rest }) => {
-  const scheme = useColorScheme();
-  const baseColor = color ?? (scheme === 'dark' ? Colors.dark.text : Colors.light.text);
+  const t = useTokens();
+
+  // Allow either a literal color or a theme color key
+  const resolvedColor =
+    typeof color === 'string' && color in (t.colors as any)
+      ? (t.colors as any)[color as keyof ThemeTokens['colors']]
+      : color || t.colors.text;
+
   return (
     <Text
       {...rest}
       style={[
         styles[variant],
-        { color: baseColor },
+        { color: resolvedColor },
         center ? styles.center : null,
         style,
       ]}

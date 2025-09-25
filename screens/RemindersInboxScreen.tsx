@@ -1,20 +1,29 @@
 // screens/RemindersInboxScreen.tsx
 import { addDoc, collection } from 'firebase/firestore';
-import { useEffect, useRef, useState } from 'react';
-import { Alert, Animated, Pressable, SectionList, StyleSheet, View } from 'react-native';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Alert,
+  Animated,
+  Pressable,
+  SectionList,
+  StyleSheet,
+  View,
+} from 'react-native';
 import { RectButton, Swipeable } from 'react-native-gesture-handler';
+
 import Card from '../components/Card';
-import sharedStyles from '../components/sharedStyles';
+import Screen from '../components/Screen';
 import ThemedText from '../components/ThemedText';
+import { useTokens, type ThemeTokens } from '../components/ThemeProvider';
 import ToastUndo from '../components/ToastUndo';
-import { tokens } from '../components/tokens';
+
 import { db } from '../firebaseConfig';
 import useAuthListener from '../hooks/useAuthListener';
 import {
-    ReminderDoc,
-    removeReminder,
-    subscribeRemindersForUid,
-    updateReminderStatus,
+  ReminderDoc,
+  removeReminder,
+  subscribeRemindersForUid,
+  updateReminderStatus,
 } from '../utils/reminders';
 
 function timeFromISO(iso?: string) {
@@ -23,6 +32,10 @@ function timeFromISO(iso?: string) {
   if (isNaN(d.getTime())) return '';
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
+
+// Porcelain neutrals (match other screens)
+const HAIRLINE = '#F0E6EF';
+const CHIP_BG  = '#F3EEF6';
 
 const ActionButton = ({
   color,
@@ -33,7 +46,7 @@ const ActionButton = ({
   label: string;
   onPress: () => void;
 }) => (
-  <RectButton onPress={onPress} style={[styles.actionBtn, { backgroundColor: color }]}>
+  <RectButton onPress={onPress} style={[stylesStatic.actionBtn, { backgroundColor: color }]}>
     <ThemedText variant="button" color="#fff" center>
       {label}
     </ThemedText>
@@ -41,20 +54,24 @@ const ActionButton = ({
 );
 
 export default function RemindersInboxScreen() {
+  const t = useTokens();
+  const s = useMemo(() => styles(t), [t]);
   const { user } = useAuthListener();
+
   const [pending, setPending] = useState<ReminderDoc[]>([]);
   const [scheduled, setScheduled] = useState<ReminderDoc[]>([]);
 
-  const [toast, setToast] = useState<{ visible: boolean; msg: string; undo?: () => Promise<void> | void; }>({
-    visible: false,
-    msg: '',
-  });
+  const [toast, setToast] = useState<{
+    visible: boolean;
+    msg: string;
+    undo?: () => Promise<void> | void;
+  }>({ visible: false, msg: '' });
 
   useEffect(() => {
     if (!user) return;
-    const unsub = subscribeRemindersForUid(user.uid, (p, s) => {
+    const unsub = subscribeRemindersForUid(user.uid, (p, sList) => {
       setPending(p);
-      setScheduled(s);
+      setScheduled(sList);
     });
     return () => unsub && unsub();
   }, [user]);
@@ -67,14 +84,14 @@ export default function RemindersInboxScreen() {
   ) => {
     if (isPending) {
       return (
-        <View style={styles.actionsRow}>
-          <ActionButton color={tokens.colors.primary} label="Schedule" onPress={() => onSchedule(item)} />
+        <View style={s.actionsRow}>
+          <ActionButton color={t.colors.primary} label="Schedule" onPress={() => onSchedule(item)} />
           <ActionButton color="#EF4444" label="Delete" onPress={() => onDelete(item)} />
         </View>
       );
     }
     return (
-      <View style={styles.actionsRow}>
+      <View style={s.actionsRow}>
         <ActionButton color="#6B7280" label="Dismiss" onPress={() => onDismiss(item)} />
       </View>
     );
@@ -108,21 +125,23 @@ export default function RemindersInboxScreen() {
         ref={swipeRef}
         friction={2}
         rightThreshold={40}
-        renderRightActions={(progress, dragX) => renderRightActions(progress, dragX, item, isPending)}
+        renderRightActions={(progress, dragX) =>
+          renderRightActions(progress, dragX, item, isPending)
+        }
       >
         <Card>
-          <View style={styles.row}>
+          <View style={s.row}>
             <View style={{ flex: 1 }}>
               <ThemedText variant="title">{item.title}</ThemedText>
-              <ThemedText variant="caption" color={tokens.colors.textDim}>
+              <ThemedText variant="caption" color={t.colors.textDim}>
                 Due {timeFromISO(item.dueAt)} • {isPending ? 'Pending' : 'Scheduled'}
               </ThemedText>
             </View>
 
             {isPending ? (
               <>
-                <Pressable onPress={() => onSchedule(item)} style={[styles.btn, styles.btnPrimary]}>
-                  <ThemedText variant="button" color={tokens.colors.buttonTextPrimary}>Schedule</ThemedText>
+                <Pressable onPress={() => onSchedule(item)} style={[s.btn, s.btnPrimary]} accessibilityRole="button">
+                  <ThemedText variant="button" color="#fff">Schedule</ThemedText>
                 </Pressable>
                 <Pressable
                   onPress={() =>
@@ -131,13 +150,14 @@ export default function RemindersInboxScreen() {
                       { text: 'Delete', style: 'destructive', onPress: () => onDelete(item) },
                     ])
                   }
-                  style={[styles.btn, styles.btnGhost]}
+                  style={[s.btn, s.btnGhost]}
+                  accessibilityRole="button"
                 >
                   <ThemedText variant="button">Delete</ThemedText>
                 </Pressable>
               </>
             ) : (
-              <Pressable onPress={() => onDismiss(item)} style={[styles.btn, styles.btnGhost]}>
+              <Pressable onPress={() => onDismiss(item)} style={[s.btn, s.btnGhost]} accessibilityRole="button">
                 <ThemedText variant="button">Dismiss</ThemedText>
               </Pressable>
             )}
@@ -152,26 +172,40 @@ export default function RemindersInboxScreen() {
     { title: 'Scheduled / Handled', data: scheduled, isPending: false },
   ];
 
+  const empty = !pending.length && !scheduled.length;
+
   return (
-    <View style={sharedStyles.screen}>
+    <Screen scroll={false}>
       <SectionList
         sections={sections}
         keyExtractor={(i) => i.id}
         renderSectionHeader={({ section }) => (
-          <ThemedText variant="h2" style={styles.section}>
+          <ThemedText variant="h2" style={s.section}>
             {section.title}
           </ThemedText>
         )}
         renderItem={({ item, section }) => <Row item={item} isPending={!!section.isPending} />}
-        ItemSeparatorComponent={() => <View style={{ height: tokens.spacing.s }} />}
+        ItemSeparatorComponent={() => <View style={{ height: t.spacing.s }} />}
         ListHeaderComponent={
-          <View style={styles.header}>
+          <View style={s.header}>
             <ThemedText variant="display">Inbox</ThemedText>
-            <ThemedText variant="subtitle" color={tokens.colors.textDim}>Partner reminders for you</ThemedText>
+            <ThemedText variant="subtitle" color={t.colors.textDim}>
+              Partner reminders for you • Swipe left for actions
+            </ThemedText>
           </View>
         }
+        ListEmptyComponent={
+          empty ? (
+            <Card>
+              <ThemedText variant="title">Nothing here yet</ThemedText>
+              <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 6 }}>
+                When your partner creates a shared reminder, it will appear here.
+              </ThemedText>
+            </Card>
+          ) : null
+        }
         stickySectionHeadersEnabled={false}
-        contentContainerStyle={{ paddingBottom: tokens.spacing.xl }}
+        contentContainerStyle={{ paddingBottom: t.spacing.xl }}
       />
 
       <ToastUndo
@@ -180,24 +214,61 @@ export default function RemindersInboxScreen() {
         onAction={toast.undo}
         onHide={() => setToast({ visible: false, msg: '' })}
       />
-    </View>
+    </Screen>
   );
 }
 
-const styles = StyleSheet.create({
-  header: { paddingHorizontal: tokens.spacing.md, paddingTop: tokens.spacing.md, paddingBottom: tokens.spacing.s },
-  section: { paddingHorizontal: tokens.spacing.md, marginTop: tokens.spacing.lg, marginBottom: tokens.spacing.s },
-  row: { flexDirection: 'row', alignItems: 'center', gap: tokens.spacing.s as unknown as number },
-  btn: {
-    paddingHorizontal: tokens.spacing.md,
-    paddingVertical: tokens.spacing.s,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-    marginLeft: tokens.spacing.s,
+const styles = (t: ThemeTokens) =>
+  StyleSheet.create({
+    header: {
+      paddingHorizontal: t.spacing.md,
+      paddingTop: t.spacing.md,
+      paddingBottom: t.spacing.s,
+    },
+    section: {
+      paddingHorizontal: t.spacing.md,
+      marginTop: t.spacing.lg,
+      marginBottom: t.spacing.s,
+    },
+
+    row: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: t.spacing.s,
+    },
+
+    // compact in-row buttons that fit cards
+    btn: {
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: HAIRLINE,
+      backgroundColor: '#FFFFFF',
+      marginLeft: t.spacing.s,
+    },
+    btnPrimary: {
+      backgroundColor: t.colors.primary,
+      borderColor: t.colors.primary,
+    },
+    btnGhost: {
+      backgroundColor: '#FFFFFF',
+    },
+
+    actionsRow: {
+      width: 180,
+      flexDirection: 'row',
+      justifyContent: 'flex-end',
+      alignItems: 'stretch',
+    },
+  });
+
+// Styles used only inside ActionButton (static so we can create outside the hook)
+const stylesStatic = StyleSheet.create({
+  actionBtn: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
   },
-  btnPrimary: { backgroundColor: tokens.colors.primary, borderColor: tokens.colors.primary },
-  btnGhost: { backgroundColor: tokens.colors.card },
-  actionsRow: { width: 180, flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'stretch' },
-  actionBtn: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: tokens.spacing.s },
 });

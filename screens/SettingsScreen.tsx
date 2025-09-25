@@ -11,6 +11,7 @@ import Card from '../components/Card';
 import PairingQR from '../components/PairingQR';
 import sharedStyles from '../components/sharedStyles';
 import ThemedText from '../components/ThemedText';
+import { useThemeContext } from '../components/ThemeProvider';
 import tokens from '../components/tokens';
 
 import useAuthListener from '../hooks/useAuthListener';
@@ -64,6 +65,24 @@ const LinkButton = ({ title, onPress }: { title: string; onPress: () => void }) 
     <ThemedText variant="button" color={tokens.colors.primary}>{title}</ThemedText>
   </Pressable>
 );
+
+/** Theme picker row */
+const ThemeRow = ({ label, value }: {
+  label: string;
+  value: 'system' | 'light-rose' | 'dark-rose' | 'ocean' | 'forest' | 'mono' | 'high-contrast' | 'light' | 'dark';
+}) => {
+  const { pref, setPref } = useThemeContext();
+  const selected = pref === value;
+  return (
+    <Row
+      icon={selected ? 'color-palette' : undefined}
+      title={label}
+      subtitle={selected ? 'Selected' : undefined}
+      right={selected ? <Ionicons name="checkmark" size={18} color={tokens.colors.primary} /> : null}
+      onPress={() => setPref(value as any)}
+    />
+  );
+};
 
 const SettingsScreen: React.FC = () => {
   const nav = useNavigation<any>();
@@ -301,6 +320,22 @@ const SettingsScreen: React.FC = () => {
             <LinkButton title="Open Settings" onPress={() => showOpenSettingsAlert('Camera', 'Open system settings to allow camera access.')} />
           </View>
         ) : null}
+      </Card>
+
+      {/* Appearance */}
+      <Card style={{ marginTop: tokens.spacing.md }}>
+        <View style={styles.sectionHeader}>
+          <ThemedText variant="h2">Appearance</ThemedText>
+          <Badge label="Live" bg="#EEF2FF" color="#3730A3" />
+        </View>
+
+        <ThemeRow label="Follow system" value="system" />
+        <ThemeRow label="Light (Rose)" value="light-rose" />
+        <ThemeRow label="Dark (Rose)" value="dark-rose" />
+        <ThemeRow label="Ocean" value="ocean" />
+        <ThemeRow label="Forest" value="forest" />
+        <ThemeRow label="Minimal (Mono)" value="mono" />
+        <ThemeRow label="High Contrast" value="high-contrast" />
       </Card>
 
       {/* Account */}

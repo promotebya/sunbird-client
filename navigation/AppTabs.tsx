@@ -3,22 +3,21 @@ import { Ionicons } from '@expo/vector-icons';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { tokens } from '../components/tokens';
 
-// Your existing screens
+// Screens
 import HomeScreen from '../screens/HomeScreen';
 import LoveNotesScreen from '../screens/LoveNotesScreen';
 import MemoriesScreen from '../screens/MemoriesScreen';
-import PointsScreen from '../screens/PointsScreen';
+// import PointsScreen from '../screens/PointsScreen'; // removed
 import RemindersScreen from '../screens/RemindersScreen';
 import TasksScreen from '../screens/TasksScreen';
 
-// New feature screens are available from the root stack (not in the tab bar)
+// Root-stack-only screens (not in tab bar)
 // import ChallengesScreen from '../screens/ChallengesScreen';
 // import DiscoverScreen from '../screens/DiscoverScreen';
 
 export type TabsParamList = {
   Home: undefined;
   Memories: undefined;
-  Points: undefined;
   Reminders: undefined;
   LoveNotes: undefined;
   Tasks: undefined;
@@ -38,7 +37,6 @@ export default function AppTabs() {
           const map: Record<string, keyof typeof Ionicons.glyphMap> = {
             Home: 'home',
             Memories: 'images',
-            Points: 'trophy',
             Reminders: 'alarm',
             LoveNotes: 'heart',
             Tasks: 'checkmark-done',
@@ -50,7 +48,6 @@ export default function AppTabs() {
     >
       <Tab.Screen name="Home" component={HomeScreen} />
       <Tab.Screen name="Memories" component={MemoriesScreen} />
-      <Tab.Screen name="Points" component={PointsScreen} />
       <Tab.Screen name="Reminders" component={RemindersScreen} />
       <Tab.Screen name="LoveNotes" component={LoveNotesScreen} />
       <Tab.Screen name="Tasks" component={TasksScreen} />

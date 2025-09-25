@@ -2,13 +2,22 @@
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import * as Notifications from 'expo-notifications';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Platform, Pressable, StyleSheet, Switch, TextInput, View } from 'react-native';
+import {
+  Alert,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Switch,
+  TextInput,
+  View,
+} from 'react-native';
 import DateTimePickerModal from 'react-native-modal-datetime-picker';
 
+import Button from '../components/Button';
 import Card from '../components/Card';
 import Screen from '../components/Screen';
 import ThemedText from '../components/ThemedText';
-import { tokens } from '../components/tokens';
+import { useTokens, type ThemeTokens } from '../components/ThemeProvider';
 
 import useAuthListener from '../hooks/useAuthListener';
 import usePendingRemindersBadge from '../hooks/usePendingRemindersBadge';
@@ -23,7 +32,13 @@ import {
 
 type SavedReq = Notifications.NotificationRequest;
 
+// Neutral porcelain tones (match Home/Memories)
+const HAIRLINE = '#F0E6EF';
+const CHIP_BG = '#F3EEF6';
+
 const RemindersScreen: React.FC = () => {
+  const t = useTokens();
+  const s = useMemo(() => styles(t), [t]);
   const navigation = useNavigation<any>();
   const { user } = useAuthListener();
 
@@ -34,9 +49,6 @@ const RemindersScreen: React.FC = () => {
   const [dateOnly, setDateOnly] = useState<Date | null>(null);
   const [timeOnly, setTimeOnly] = useState<Date | null>(null);
 
-  const [remind7, setRemind7] = useState(true);
-  const [remind1, setRemind1] = useState(true);
-  const [remind0, setRemind0] = useState(true);
   const [forBoth, setForBoth] = useState(false);
 
   const [showDatePicker, setShowDatePicker] = useState(false);
@@ -99,7 +111,7 @@ const RemindersScreen: React.FC = () => {
   useEffect(() => { loadScheduled(); }, [loadScheduled]);
   useFocusEffect(useCallback(() => { loadScheduled(); }, [loadScheduled]));
 
-  // Show ONLY the "on the day" anchor; hide "One week…" and "Tomorrow…"
+  // Only show “on the day” entries here
   const visibleScheduled = useMemo(() => {
     return scheduled.filter((req) => {
       const body = (req.content.body ?? '') as string;
@@ -109,10 +121,9 @@ const RemindersScreen: React.FC = () => {
 
   function triggerToText(trigger: any): string {
     if (!trigger) return 'Scheduled';
-
-    const CAL  = Notifications.SchedulableTriggerInputTypes.CALENDAR;
-    const DATE = Notifications.SchedulableTriggerInputTypes.DATE;
-    const INT  = Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL;
+    const CAL  = Notifications.SchedulableTriggerInputTypes?.CALENDAR ?? 'calendar';
+    const DATE = Notifications.SchedulableTriggerInputTypes?.DATE ?? 'date';
+    const INT  = Notifications.SchedulableTriggerInputTypes?.TIME_INTERVAL ?? 'timeInterval';
     const t = trigger.type;
 
     if (t === CAL || t === 'calendar') {
@@ -172,38 +183,35 @@ const RemindersScreen: React.FC = () => {
       const hour = timeOnly.getHours();
       const minute = timeOnly.getMinutes();
 
-      if (remind0) {
-        await scheduleYearlyNotification({
-          title,
-          body: `It's today! 💞 Did you plan something?`,
-          month: baseMonth,
-          day: baseDay,
-          hour,
-          minute,
-        });
-      }
-      if (remind1) {
-        const d = new Date(new Date(2000, baseMonth - 1, baseDay).getTime() - 24 * 60 * 60 * 1000);
-        await scheduleYearlyNotification({
-          title,
-          body: `Tomorrow is your ${title}. A tiny plan goes a long way ✨`,
-          month: d.getMonth() + 1,
-          day: d.getDate(),
-          hour,
-          minute,
-        });
-      }
-      if (remind7) {
-        const d = new Date(new Date(2000, baseMonth - 1, baseDay).getTime() - 7 * 24 * 60 * 60 * 1000);
-        await scheduleYearlyNotification({
-          title,
-          body: `One week until your ${title}! Want ideas?`,
-          month: d.getMonth() + 1,
-          day: d.getDate(),
-          hour,
-          minute,
-        });
-      }
+      // Always schedule all three
+      await scheduleYearlyNotification({
+        title,
+        body: `It's today! 💞 Did you plan something?`,
+        month: baseMonth,
+        day: baseDay,
+        hour,
+        minute,
+      });
+
+      const d1 = new Date(new Date(2000, baseMonth - 1, baseDay).getTime() - 24 * 60 * 60 * 1000);
+      await scheduleYearlyNotification({
+        title,
+        body: `Tomorrow is your ${title}. A tiny plan goes a long way ✨`,
+        month: d1.getMonth() + 1,
+        day: d1.getDate(),
+        hour,
+        minute,
+      });
+
+      const d7 = new Date(new Date(2000, baseMonth - 1, baseDay).getTime() - 7 * 24 * 60 * 60 * 1000);
+      await scheduleYearlyNotification({
+        title,
+        body: `One week until your ${title}! Want ideas?`,
+        month: d7.getMonth() + 1,
+        day: d7.getDate(),
+        hour,
+        minute,
+      });
 
       if (forBoth && canCreateForBoth && partnerUid) {
         const dueAt = nextOccurrence(baseMonth, baseDay, hour, minute);
@@ -211,7 +219,7 @@ const RemindersScreen: React.FC = () => {
       }
 
       setBanner('Reminders saved ✨');
-      setTimeout(() => setBanner(null), 2000);
+      setTimeout(() => setBanner(null), 1800);
       await loadScheduled();
     } catch (e: any) {
       Alert.alert('Could not schedule', e?.message ?? 'Please try again.');
@@ -220,113 +228,120 @@ const RemindersScreen: React.FC = () => {
     }
   }
 
+  const fixedSummary = `We’ll remind you 7 days before, 1 day before, and on the day${
+    timeOnly ? ` at ${formatLocalTime(timeOnly)}` : ''
+  }.`;
+
   return (
     <Screen keyboard>
-      <View style={styles.header}>
+      {/* Title row + outline inbox button with badge */}
+      <View style={s.headerRow}>
         <ThemedText variant="display">Anniversary</ThemedText>
-
-        <Pressable
-          onPress={() => navigation.navigate('Reminders', { screen: 'RemindersInbox' })}
-          style={styles.inboxBtn}
-        >
-          <ThemedText variant="label" color="#fff">Inbox</ThemedText>
-          {badge ? (
-            <View style={styles.inboxBadge}>
-              <ThemedText variant="caption" color="#fff">{badge}</ThemedText>
-            </View>
-          ) : null}
-        </Pressable>
-
-        <ThemedText variant="subtitle" color={tokens.colors.textDim} style={{ marginTop: tokens.spacing.xs }}>
-          Yearly reminders: 7 days before, 1 day before, and on the day.
-        </ThemedText>
+        <Button
+          label={badge ? `Inbox  ${badge}` : 'Inbox'}
+          variant="outline"
+          onPress={() => navigation.navigate('RemindersStack')}
+        />
       </View>
 
+      <ThemedText variant="subtitle" color={t.colors.textDim} style={{ marginBottom: t.spacing.md }}>
+        Yearly reminders—set once, we’ll take care of the nudges.
+      </ThemedText>
+
+      {/* Title + quick presets */}
       <Card>
-        <ThemedText variant="h2" style={{ marginBottom: tokens.spacing.s }}>Title</ThemedText>
+        <ThemedText variant="h2" style={{ marginBottom: t.spacing.s }}>Title</ThemedText>
         <TextInput
           value={title}
           onChangeText={setTitle}
           placeholder="Anniversary"
-          placeholderTextColor={tokens.colors.textDim}
-          style={styles.input}
+          placeholderTextColor={t.colors.textDim}
+          style={s.input}
           onFocus={ensureHasDefaults}
         />
-        <View style={styles.rowWrap}>
-          {['Anniversary', 'First Date', 'Engagement Day', 'Wedding Day'].map((t) => (
-            <Pressable key={t} onPress={() => setTitle(t)} style={styles.pill}>
-              <ThemedText variant="label">{t}</ThemedText>
+        <View style={s.rowWrap}>
+          {['Anniversary', 'First Date', 'Engagement Day', 'Wedding Day'].map((name) => (
+            <Pressable key={name} onPress={() => setTitle(name)} accessibilityRole="button" style={s.pill}>
+              <ThemedText variant="label">{name}</ThemedText>
             </Pressable>
           ))}
         </View>
       </Card>
 
-      <Card style={{ marginTop: tokens.spacing.md }}>
+      {/* Date / Time + fixed info + partner toggle */}
+      <Card style={{ marginTop: t.spacing.md }}>
         <ThemedText variant="h2">Date</ThemedText>
-        <Pressable onPress={() => { ensureHasDefaults(); setShowDatePicker(true); }} style={styles.input}>
-          <ThemedText variant="body" color={dateOnly ? tokens.colors.text : tokens.colors.textDim}>
+        <Pressable
+          onPress={() => { ensureHasDefaults(); setShowDatePicker(true); }}
+          style={s.input}
+          accessibilityRole="button"
+        >
+          <ThemedText variant="body" color={dateOnly ? t.colors.text : t.colors.textDim}>
             {dateLabel}
           </ThemedText>
         </Pressable>
 
-        <ThemedText variant="h2" style={{ marginTop: tokens.spacing.md }}>Time</ThemedText>
-        <Pressable onPress={() => { ensureHasDefaults(); setShowTimePicker(true); }} style={styles.input}>
-          <ThemedText variant="body" color={timeOnly ? tokens.colors.text : tokens.colors.textDim}>
+        <ThemedText variant="h2" style={{ marginTop: t.spacing.md }}>Time</ThemedText>
+        <Pressable
+          onPress={() => { ensureHasDefaults(); setShowTimePicker(true); }}
+          style={s.input}
+          accessibilityRole="button"
+        >
+          <ThemedText variant="body" color={timeOnly ? t.colors.text : t.colors.textDim}>
             {timeLabel}
           </ThemedText>
         </Pressable>
 
-        <View style={styles.toggleRow}>
-          <ThemedText variant="body">Remind 7 days before</ThemedText>
-          <Switch value={remind7} onValueChange={setRemind7} />
-        </View>
-        <View style={styles.toggleRow}>
-          <ThemedText variant="body">Remind 1 day before</ThemedText>
-          <Switch value={remind1} onValueChange={setRemind1} />
-        </View>
-        <View style={styles.toggleRow}>
-          <ThemedText variant="body">Remind on the day</ThemedText>
-          <Switch value={remind0} onValueChange={setRemind0} />
-        </View>
+        <View style={s.rowDivider} />
 
-        <View style={styles.toggleRow}>
+        <ThemedText variant="caption" color={t.colors.textDim}>
+          {fixedSummary}
+        </ThemedText>
+
+        <View style={s.rowDivider} />
+
+        <View style={s.toggleRow}>
           <ThemedText variant="body">Also create for partner</ThemedText>
           <Switch
             value={forBoth}
             onValueChange={setForBoth}
             disabled={!canCreateForBoth}
             trackColor={{ true: '#FF9FBE', false: '#D1D5DB' }}
-            thumbColor={forBoth ? tokens.colors.primary : '#f4f3f4'}
+            thumbColor={forBoth ? t.colors.primary : '#f4f3f4'}
           />
         </View>
 
-        <Pressable onPress={onSave} disabled={saving} style={[styles.saveBtn, saving && { opacity: 0.6 }]}>
-          <ThemedText variant="button" color="#fff">{saving ? 'Saving…' : 'Save reminders'}</ThemedText>
-        </Pressable>
+        <View style={{ marginTop: t.spacing.lg }}>
+          <Button label={saving ? 'Saving…' : 'Save reminders'} onPress={onSave} disabled={saving} />
+        </View>
       </Card>
 
-      {/* Saved reminders — ONLY the anchor “on the day” */}
-      <Card style={{ marginTop: tokens.spacing.md }}>
-        <View style={styles.savedHeader}>
+      {/* Saved reminders (anchor only) */}
+      <Card style={{ marginTop: t.spacing.md }}>
+        <View style={s.savedHeader}>
           <ThemedText variant="h2">Saved reminders</ThemedText>
-          <Pressable onPress={loadScheduled} style={styles.refreshBtn}>
-            <ThemedText variant="label">{loadingScheduled ? 'Loading…' : 'Refresh'}</ThemedText>
-          </Pressable>
+          <Button
+            label={loadingScheduled ? 'Loading…' : 'Refresh'}
+            variant="outline"
+            onPress={loadScheduled}
+          />
         </View>
 
         {visibleScheduled.length === 0 ? (
-          <ThemedText variant="caption" color={tokens.colors.textDim}>No local reminders yet.</ThemedText>
+          <ThemedText variant="caption" color={t.colors.textDim}>
+            No local reminders yet.
+          </ThemedText>
         ) : (
           <View style={{ rowGap: 10 }}>
             {visibleScheduled.map((req) => (
-              <View key={req.identifier} style={styles.savedRow}>
+              <View key={req.identifier} style={s.savedRow}>
                 <View style={{ flex: 1 }}>
                   <ThemedText variant="title">{req.content.title ?? 'Reminder'}</ThemedText>
-                  <ThemedText variant="caption" color={tokens.colors.textDim} style={{ marginTop: 2 }}>
+                  <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 2 }}>
                     {triggerToText(req.trigger as any)}
                   </ThemedText>
                 </View>
-                <Pressable onPress={() => onCancel(req.identifier)} style={styles.cancelBtn}>
+                <Pressable onPress={() => onCancel(req.identifier)} style={s.cancelBtn} accessibilityRole="button">
                   <ThemedText variant="label" color="#fff">Cancel</ThemedText>
                 </Pressable>
               </View>
@@ -344,7 +359,6 @@ const RemindersScreen: React.FC = () => {
         onConfirm={(d: Date) => { setDateOnly(d); setShowDatePicker(false); }}
         onCancel={() => setShowDatePicker(false)}
       />
-
       <DateTimePickerModal
         isVisible={showTimePicker}
         mode="time"
@@ -355,7 +369,7 @@ const RemindersScreen: React.FC = () => {
       />
 
       {banner ? (
-        <View style={styles.toast}>
+        <View style={s.toast}>
           <ThemedText variant="button" color="#fff" center>{banner}</ThemedText>
         </View>
       ) : null}
@@ -363,46 +377,83 @@ const RemindersScreen: React.FC = () => {
   );
 };
 
-const styles = StyleSheet.create({
-  header: { paddingBottom: tokens.spacing.s },
-  inboxBtn: {
-    alignSelf: 'flex-start',
-    marginTop: tokens.spacing.s,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: tokens.spacing.xs as number,
-    backgroundColor: tokens.colors.primary,
-    paddingHorizontal: tokens.spacing.md,
-    paddingVertical: 6,
-    borderRadius: 999,
-  },
-  inboxBadge: {
-    marginLeft: tokens.spacing.xs,
-    minWidth: 18, height: 18, paddingHorizontal: 6,
-    borderRadius: 999, backgroundColor: 'rgba(0,0,0,0.25)',
-    alignItems: 'center', justifyContent: 'center',
-  },
-  input: {
-    minHeight: 44,
-    paddingVertical: tokens.spacing.s,
-    paddingHorizontal: tokens.spacing.md,
-    backgroundColor: tokens.colors.card,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-    color: tokens.colors.text,
-    marginTop: tokens.spacing.s,
-    justifyContent: 'center',
-  },
-  rowWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: tokens.spacing.s },
-  pill: { paddingHorizontal: 14, paddingVertical: 10, borderRadius: 999, backgroundColor: '#ECEFF3' },
-  toggleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: tokens.spacing.md },
-  saveBtn: { marginTop: tokens.spacing.lg, backgroundColor: tokens.colors.primary, paddingVertical: 12, borderRadius: tokens.radius.lg, alignItems: 'center' },
-  savedHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: tokens.spacing.s },
-  refreshBtn: { paddingHorizontal: 10, paddingVertical: 8, borderRadius: 999, backgroundColor: '#ECEFF3' },
-  savedRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  cancelBtn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, backgroundColor: '#EF4444' },
-  toast: { position: 'absolute', left: tokens.spacing.md, right: tokens.spacing.md, bottom: tokens.spacing.xl, backgroundColor: '#111827', padding: tokens.spacing.md, borderRadius: tokens.radius.lg },
-});
+const styles = (t: ThemeTokens) =>
+  StyleSheet.create({
+    headerRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingBottom: t.spacing.s,
+    },
+
+    input: {
+      minHeight: 44,
+      paddingVertical: t.spacing.s,
+      paddingHorizontal: t.spacing.md,
+      backgroundColor: '#FFFFFF',
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: HAIRLINE,
+      color: t.colors.text,
+      marginTop: t.spacing.s,
+      justifyContent: 'center',
+    },
+
+    rowWrap: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 10,
+      marginTop: t.spacing.s,
+    },
+    pill: {
+      paddingHorizontal: 14,
+      paddingVertical: 10,
+      borderRadius: 999,
+      backgroundColor: CHIP_BG,
+      borderWidth: 1,
+      borderColor: HAIRLINE,
+    },
+
+    rowDivider: {
+      height: StyleSheet.hairlineWidth,
+      backgroundColor: HAIRLINE,
+      marginVertical: t.spacing.md,
+    },
+
+    toggleRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginTop: t.spacing.s,
+    },
+
+    savedHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: t.spacing.s,
+    },
+    savedRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+    },
+    cancelBtn: {
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      borderRadius: 10,
+      backgroundColor: '#EF4444',
+    },
+
+    toast: {
+      position: 'absolute',
+      left: t.spacing.md,
+      right: t.spacing.md,
+      bottom: t.spacing.xl,
+      backgroundColor: '#111827',
+      padding: t.spacing.md,
+      borderRadius: t.radius.lg,
+    },
+  });
 
 export default RemindersScreen;

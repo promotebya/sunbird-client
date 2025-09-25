@@ -1,6 +1,7 @@
 // screens/TasksScreen.tsx
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useNavigation, useRoute } from '@react-navigation/native';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
@@ -22,8 +23,8 @@ import ConfettiTiny from '../components/ConfettiTiny';
 import Input from '../components/Input';
 import sharedStyles from '../components/sharedStyles';
 import ThemedText from '../components/ThemedText';
+import { useTokens, type ThemeTokens } from '../components/ThemeProvider';
 import ToastUndo from '../components/ToastUndo';
-import { tokens } from '../components/tokens';
 
 import {
   addDoc,
@@ -62,9 +63,24 @@ type TaskDoc = {
 const FIRST_DONE_KEY = (uid: string) =>
   `lp:first-done:${uid}:${new Date().toISOString().slice(0, 10)}`;
 
+// Porcelain neutrals (harmonize with Home/Memories)
+const HAIRLINE = '#F0E6EF';
+const CHIP_BG  = '#F3EEF6';
+
+function withAlpha(hex: string, alpha: number) {
+  const h = hex.replace('#', '');
+  const full = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
+  const a = Math.round(alpha * 255).toString(16).padStart(2, '0');
+  return `#${full}${a}`;
+}
+
 const TasksScreen: React.FC = () => {
+  const nav = useNavigation<any>();
+  const route = useRoute<any>();
   const insets = useSafeAreaInsets();
   const { user } = useAuthListener();
+  const t = useTokens();
+  const s = useMemo(() => styles(t), [t]);
 
   const [pairId, setPairId] = useState<string | null>(null);
   const [tasks, setTasks] = useState<TaskDoc[]>([]);
@@ -89,6 +105,16 @@ const TasksScreen: React.FC = () => {
     catchupWeekISO?: string;
     catchupIntentWeekISO?: string;
   } | null>(null);
+
+  // Accept preset idea from Home: nav.navigate('Tasks', { presetIdea: '...' })
+  useEffect(() => {
+    const preset: string | undefined = route.params?.presetIdea;
+    if (preset) {
+      setTitle(preset);
+      requestAnimationFrame(() => inputRef.current?.focus?.());
+      nav.setParams?.({ presetIdea: undefined });
+    }
+  }, [route.params, nav]);
 
   useEffect(() => {
     (async () => {
@@ -124,8 +150,11 @@ const TasksScreen: React.FC = () => {
   }, [user]);
 
   const personalTasks = useMemo(() => tasks.filter((t) => !t.pairId), [tasks]);
-  const sharedTasks = useMemo(() => tasks.filter((t) => !!t.pairId), [tasks]);
+  const sharedTasks   = useMemo(() => tasks.filter((t) => !!t.pairId), [tasks]);
   const data = tab === 'personal' ? personalTasks : sharedTasks;
+
+  const personalCount = personalTasks.length;
+  const sharedCount   = sharedTasks.length;
 
   async function handleAddTask() {
     if (!user) return;
@@ -239,34 +268,34 @@ const TasksScreen: React.FC = () => {
   const renderItem = ({ item }: { item: TaskDoc }) => {
     const done = !!item.done;
     return (
-      <Card style={styles.itemCard}>
-        <Pressable onPress={() => handleToggleDone(item)} style={styles.itemRow}>
-          <View style={[styles.checkbox, done && styles.checkboxOn]}>
+      <Card style={s.itemCard}>
+        <Pressable onPress={() => handleToggleDone(item)} style={s.itemRow} accessibilityRole="button">
+          <View style={[s.checkbox, done && { backgroundColor: t.colors.primary, borderColor: t.colors.primary }]}>
             {done ? <Ionicons name="checkmark" size={16} color="#fff" /> : null}
           </View>
 
           <View style={{ flex: 1 }}>
-            <ThemedText variant="body" style={done ? styles.itemDone : undefined}>
+            <ThemedText variant="title" color={done ? t.colors.textDim : t.colors.text}>
               {item.title}
             </ThemedText>
-            <View style={styles.metaRow}>
+            <View style={s.metaRow}>
               {typeof item.points === 'number' && item.points > 0 ? (
-                <View style={styles.pointsPill}>
-                  <ThemedText variant="caption" color="#1E3A8A">
+                <View style={s.pointsPill}>
+                  <ThemedText variant="caption" color={t.colors.primary}>
                     +{item.points} pt{item.points === 1 ? '' : 's'}
                   </ThemedText>
                 </View>
               ) : (
-                <ThemedText variant="caption" color={tokens.colors.textDim}>No points yet</ThemedText>
+                <ThemedText variant="caption" color={t.colors.textDim}>No points yet</ThemedText>
               )}
             </View>
           </View>
 
-          <Pressable onPress={() => handleAwardPoint(item)} style={styles.awardBtn}>
-            <Ionicons name="add-circle" size={20} color={tokens.colors.primary} />
+          <Pressable onPress={() => handleAwardPoint(item)} style={s.awardBtn} hitSlop={8} accessibilityLabel="Add point">
+            <Ionicons name="add-circle" size={20} color={t.colors.primary} />
           </Pressable>
 
-          <Pressable onPress={() => handleDelete(item)} style={styles.deleteBtn}>
+          <Pressable onPress={() => handleDelete(item)} style={s.deleteBtn} hitSlop={8} accessibilityLabel="Delete task">
             <Ionicons name="trash-outline" size={20} color="#EF4444" />
           </Pressable>
         </Pressable>
@@ -277,81 +306,119 @@ const TasksScreen: React.FC = () => {
   const showCatchupChip = useMemo(() => {
     if (!streak) return true;
     const thisWeek = isoWeekStr(new Date());
-    const alreadyUsedThisWeek = streak.catchupWeekISO === thisWeek;
+    const alreadyUsedThisWeek  = streak.catchupWeekISO === thisWeek;
     const alreadyArmedThisWeek = streak.catchupIntentWeekISO === thisWeek;
     const pending = !!streak.catchupPending;
     return !alreadyUsedThisWeek && !alreadyArmedThisWeek && !pending;
   }, [streak]);
 
   return (
-    <SafeAreaView style={[sharedStyles.screen, { paddingTop: tokens.spacing.md }]} edges={['top', 'left', 'right']}>
+    <SafeAreaView style={[sharedStyles.screen, { paddingTop: t.spacing.md }]} edges={['top', 'left', 'right']}>
       {showConfetti ? <ConfettiTiny /> : null}
 
       <KeyboardAvoidingView behavior={Platform.select({ ios: 'padding', android: undefined })} style={{ flex: 1 }}>
         {/* Header */}
-        <View style={styles.header}>
+        <View style={s.header}>
           <ThemedText variant="display">Tasks</ThemedText>
-          <ThemedText variant="subtitle" color={tokens.colors.textDim}>
+          <ThemedText variant="subtitle" color={t.colors.textDim}>
             Keep track of kind little things
           </ThemedText>
         </View>
 
-        {/* Tabs */}
-        <View style={styles.chips}>
-          <Pressable style={[styles.tabChip, tab === 'personal' && styles.tabChipActive]} onPress={() => setTab('personal')}>
-            <ThemedText variant="label" color={tab === 'personal' ? tokens.colors.buttonTextPrimary : tokens.colors.textDim}>Personal</ThemedText>
-          </Pressable>
-          <Pressable style={[styles.tabChip, tab === 'shared' && styles.tabChipActive]} onPress={() => setTab('shared')}>
-            <ThemedText variant="label" color={tab === 'shared' ? tokens.colors.buttonTextPrimary : tokens.colors.textDim}>Shared</ThemedText>
-          </Pressable>
+        {/* Segmented tabs (counts) */}
+        <View style={s.segmented}>
+          {(['personal', 'shared'] as const).map((k) => {
+            const active = tab === k;
+            const count = k === 'personal' ? personalCount : sharedCount;
+            return (
+              <Pressable
+                key={k}
+                onPress={() => setTab(k)}
+                accessibilityRole="button"
+                style={[s.segment, active && s.segmentActive]}
+              >
+                <ThemedText variant="label" color={active ? t.colors.text : t.colors.textDim}>
+                  {k === 'personal' ? 'Personal' : 'Shared'}{count ? ` (${count})` : ''}
+                </ThemedText>
+              </Pressable>
+            );
+          })}
         </View>
+
+        {/* Shared tab link banner */}
+        {tab === 'shared' && !pairId && (
+          <Card style={{ marginBottom: t.spacing.md, paddingVertical: 12, borderWidth: 1, borderColor: HAIRLINE }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+              <View
+                style={{
+                  width: 36, height: 36, borderRadius: 10,
+                  backgroundColor: withAlpha(t.colors.primary, 0.08),
+                  alignItems: 'center', justifyContent: 'center',
+                }}
+              >
+                <Ionicons name="link" size={18} color={t.colors.primary} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <ThemedText variant="title">Link with your partner</ThemedText>
+                <ThemedText variant="caption" color={t.colors.textDim}>Share tasks and progress.</ThemedText>
+              </View>
+            </View>
+            <View style={{ flexDirection: 'row', gap: 12, marginTop: 10 }}>
+              <Button label="Link now" onPress={() => nav.navigate('Pairing')} />
+              <Button label="Later" variant="ghost" />
+            </View>
+          </Card>
+        )}
 
         {/* Catch-up helper */}
         {showCatchupChip && (
-          <View style={{ paddingHorizontal: tokens.spacing.md, marginBottom: tokens.spacing.s }}>
+          <View style={{ paddingHorizontal: t.spacing.md, marginBottom: t.spacing.s }}>
             <Pressable
               onPress={async () => {
                 if (!user) return;
                 await activateCatchup(user.uid);
                 showUndo('Catch-up armed for this week');
               }}
-              style={styles.catchupChip}
+              style={s.catchupChip}
             >
               <Ionicons name="sparkles" size={14} color="#92400E" />
               <ThemedText variant="label" color="#92400E" style={{ marginLeft: 6 }}>
                 Catch-up day
               </ThemedText>
             </Pressable>
-            <ThemedText variant="caption" color={tokens.colors.textDim} style={{ marginTop: 4 }}>
+            <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 4 }}>
               Missed yesterday? Complete 2 tasks today to keep your streak.
             </ThemedText>
           </View>
         )}
 
         {/* Composer */}
-        <Card style={{ marginBottom: tokens.spacing.md }}>
-          <View style={styles.inputRow}>
+        <Card style={{ marginBottom: t.spacing.md }}>
+          <View style={s.inputRow}>
             <Input
               ref={inputRef}
               value={title}
-              onChangeText={(t) => {
-                setTitle(t);
+              onChangeText={(val) => {
+                setTitle(val);
                 if (titleError) setTitleError(undefined);
               }}
               placeholder="New task…"
-              containerStyle={{ flex: 1, marginRight: tokens.spacing.s }}
+              containerStyle={{ flex: 1, marginRight: t.spacing.s }}
               errorText={titleError}
               returnKeyType="done"
               onSubmitEditing={handleAddTask}
             />
-            <Button label="Add" onPress={handleAddTask} />
+            <Button label="Add" onPress={handleAddTask} disabled={!title.trim()} />
           </View>
 
-          {/* Suggestions */}
-          <View style={styles.suggestWrap}>
-            {['Plan a mini date', 'Write a love note', 'Make coffee', 'Do the dishes', 'Book a walk', 'Bring a snack'].map((s) => (
-              <Pressable key={s} onPress={() => setTitle(s)} style={styles.suggestChip}>
-                <ThemedText variant="label">{s}</ThemedText>
+          {/* Quick ideas */}
+          <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: t.spacing.s }}>
+            Tap to add to your list.
+          </ThemedText>
+          <View style={s.suggestWrap}>
+            {['Plan a mini date', 'Write a love note', 'Make coffee', 'Do the dishes', 'Book a walk', 'Bring a snack'].map((txt) => (
+              <Pressable key={txt} onPress={() => setTitle(txt)} style={s.suggestChip} accessibilityRole="button">
+                <ThemedText variant="label">{txt}</ThemedText>
               </Pressable>
             ))}
           </View>
@@ -361,22 +428,22 @@ const TasksScreen: React.FC = () => {
         <FlatList
           data={data}
           keyExtractor={(i) => i.id}
-          ItemSeparatorComponent={() => <View style={{ height: tokens.spacing.s }} />}
+          ItemSeparatorComponent={() => <View style={{ height: t.spacing.s }} />}
           renderItem={renderItem}
-          contentContainerStyle={{ paddingBottom: insets.bottom + tokens.spacing.xl }}
+          contentContainerStyle={{ paddingBottom: insets.bottom + t.spacing.xl }}
           ListEmptyComponent={
             <Card>
-              <View style={{ alignItems: 'center', paddingVertical: tokens.spacing.lg }}>
+              <View style={{ alignItems: 'center', paddingVertical: t.spacing.lg }}>
                 <ThemedText variant="display">📝</ThemedText>
-                <ThemedText variant="title" style={{ marginTop: tokens.spacing.xs }}>
+                <ThemedText variant="title" style={{ marginTop: t.spacing.xs }}>
                   No tasks yet
                 </ThemedText>
-                <ThemedText variant="caption" color={tokens.colors.textDim} style={{ marginTop: tokens.spacing.xs }}>
+                <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: t.spacing.xs }}>
                   Try adding ‘Plan a surprise’ 😉
                 </ThemedText>
-                <Pressable onPress={() => inputRef.current?.focus()} style={styles.emptyBtn}>
-                  <ThemedText variant="button" color="#fff">Add a task</ThemedText>
-                </Pressable>
+                <View style={{ marginTop: t.spacing.md }}>
+                  <Button label="Add a task" onPress={() => inputRef.current?.focus()} />
+                </View>
               </View>
             </Card>
           }
@@ -393,89 +460,99 @@ const TasksScreen: React.FC = () => {
   );
 };
 
-const styles = StyleSheet.create({
-  header: { padding: tokens.spacing.md, paddingBottom: tokens.spacing.s },
+const styles = (t: ThemeTokens) =>
+  StyleSheet.create({
+    header: { padding: t.spacing.md, paddingBottom: t.spacing.s },
 
-  // unified chips like Challenges
-  chips: {
-    flexDirection: 'row',
-    gap: tokens.spacing.s as number,
-    paddingHorizontal: tokens.spacing.md,
-    marginBottom: tokens.spacing.md,
-  },
-  tabChip: {
-    paddingHorizontal: tokens.spacing.md,
-    paddingVertical: 8,
-    borderRadius: tokens.radius.pill,
-    borderWidth: 1,
-    borderColor: tokens.colors.cardBorder,
-    backgroundColor: tokens.colors.card,
-  },
-  tabChipActive: {
-    backgroundColor: tokens.colors.primary,
-    borderColor: tokens.colors.primary,
-  },
+    // Segmented tabs (neutral by default, slight lift when active)
+    segmented: { flexDirection: 'row', gap: 8, paddingHorizontal: t.spacing.md, marginBottom: t.spacing.md },
+    segment: {
+      flex: 1,
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingVertical: 10,
+      borderRadius: 14,
+      backgroundColor: CHIP_BG,
+      borderWidth: 1,
+      borderColor: HAIRLINE,
+    },
+    segmentActive: {
+      backgroundColor: '#FFFFFF',
+      borderColor: HAIRLINE,
+      shadowColor: 'rgba(16,24,40,0.08)',
+      shadowOpacity: 1,
+      shadowRadius: 8,
+      shadowOffset: { width: 0, height: 4 },
+      elevation: 3,
+    },
 
-  catchupChip: {
-    alignSelf: 'flex-start',
-    backgroundColor: '#FEF3C7',
-    borderColor: '#FDE68A',
-    borderWidth: 1,
-    paddingHorizontal: tokens.spacing.md,
-    paddingVertical: 8,
-    borderRadius: 999,
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
+    catchupChip: {
+      alignSelf: 'flex-start',
+      backgroundColor: '#FEF3C7',
+      borderColor: '#FDE68A',
+      borderWidth: 1,
+      paddingHorizontal: t.spacing.md,
+      paddingVertical: 8,
+      borderRadius: 999,
+      flexDirection: 'row',
+      alignItems: 'center',
+    },
 
-  inputRow: { flexDirection: 'row', alignItems: 'center' },
+    inputRow: { flexDirection: 'row', alignItems: 'center' },
 
-  suggestWrap: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: tokens.spacing.s as number,
-    marginTop: tokens.spacing.s,
-  },
-  suggestChip: {
-    paddingHorizontal: tokens.spacing.md,
-    paddingVertical: 10,
-    borderRadius: 999,
-    backgroundColor: '#ECEFF3',
-  },
+    suggestWrap: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: t.spacing.s as number,
+      marginTop: t.spacing.s,
+    },
+    suggestChip: {
+      paddingHorizontal: t.spacing.md,
+      paddingVertical: 10,
+      borderRadius: 999,
+      backgroundColor: '#ECEFF3',
+      borderWidth: 1,
+      borderColor: '#E8EAF0',
+    },
 
-  itemCard: { marginHorizontal: tokens.spacing.md },
-  itemRow: { flexDirection: 'row', alignItems: 'center', gap: tokens.spacing.s as number },
+    itemCard: { marginHorizontal: t.spacing.md },
+    itemRow: { flexDirection: 'row', alignItems: 'center', gap: t.spacing.s as number },
 
-  checkbox: {
-    width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: '#E5E7EB',
-    alignItems: 'center', justifyContent: 'center', marginRight: tokens.spacing.s,
-  },
-  checkboxOn: { backgroundColor: tokens.colors.primary, borderColor: tokens.colors.primary },
-  itemDone: { textDecorationLine: 'line-through', color: tokens.colors.textDim },
+    checkbox: {
+      width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: '#E5E7EB',
+      alignItems: 'center', justifyContent: 'center', marginRight: t.spacing.s,
+    },
 
-  metaRow: { marginTop: 2 },
-  pointsPill: {
-    paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999,
-    backgroundColor: '#DBEAFE', borderWidth: 1, borderColor: '#BFDBFE',
-    alignSelf: 'flex-start',
-  },
+    metaRow: { marginTop: 2 },
 
-  awardBtn: {
-    paddingHorizontal: 6, paddingVertical: 6, borderRadius: 8,
-    backgroundColor: tokens.colors.card, borderWidth: 1, borderColor: '#FCE7F3',
-  },
-  deleteBtn: {
-    marginLeft: 6, paddingHorizontal: 8, paddingVertical: 6, borderRadius: 8,
-    backgroundColor: tokens.colors.card, borderWidth: 1, borderColor: '#F3F4F6',
-  },
+    // Theme-tinted points pill
+    pointsPill: {
+      paddingHorizontal: 10,
+      paddingVertical: 4,
+      borderRadius: 999,
+      backgroundColor: withAlpha(t.colors.primary, 0.14),
+      borderWidth: 1,
+      borderColor: withAlpha(t.colors.primary, 0.28),
+      alignSelf: 'flex-start',
+    },
 
-  emptyBtn: {
-    marginTop: tokens.spacing.md,
-    backgroundColor: tokens.colors.primary,
-    paddingHorizontal: tokens.spacing.md,
-    paddingVertical: 10,
-    borderRadius: tokens.radius.md,
-  },
-});
+    awardBtn: {
+      paddingHorizontal: 6,
+      paddingVertical: 6,
+      borderRadius: 8,
+      backgroundColor: t.colors.card,
+      borderWidth: 1,
+      borderColor: withAlpha(t.colors.primary, 0.25),
+    },
+    deleteBtn: {
+      marginLeft: 6,
+      paddingHorizontal: 8,
+      paddingVertical: 6,
+      borderRadius: 8,
+      backgroundColor: t.colors.card,
+      borderWidth: 1,
+      borderColor: '#F3F4F6',
+    },
+  });
 
 export default TasksScreen;
