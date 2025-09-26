@@ -7,6 +7,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import Button from '../components/Button';
 import Card from '../components/Card';
+import ClampText from '../components/ClampText';
 import ThemedText from '../components/ThemedText';
 import { tokens } from '../components/tokens';
 
@@ -47,60 +48,12 @@ const DIFF_LABEL: Record<DiffKey, string> = {
   pro: 'Forever & Always',
 };
 
-// tiny colored dots for the legend
 const DIFF_DOT: Record<DiffKey, string> = {
-  easy:  '#F8B4C6',
-  medium:'#C7B9FF',
-  hard:  '#FFB4A6',
-  pro:   '#F9D773',
+  easy: '#F8B4C6',
+  medium: '#C7B9FF',
+  hard: '#FFB4A6',
+  pro: '#F9D773',
 };
-
-// Local clamp for long descriptions — expands/collapses per row safely
-function ClampText({
-  text,
-  initialLines = 4,
-}: {
-  text: string;
-  initialLines?: number;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const [showToggle, setShowToggle] = useState(false);
-  const measuredOnce = (global as any).__SB_CLAMP_MEASURED__ ?? { current: false };
-
-  const onTextLayout = (e: any) => {
-    if (measuredOnce.current) return;
-    measuredOnce.current = true;
-    const lines = e?.nativeEvent?.lines?.length ?? 0;
-    if (lines > initialLines) setShowToggle(true);
-  };
-
-  return (
-    <View>
-      <ThemedText
-        variant="body"
-        color={tokens.colors.textDim}
-        style={{ marginTop: 4 }}
-        numberOfLines={expanded ? undefined : initialLines}
-        onTextLayout={onTextLayout}
-      >
-        {text}
-      </ThemedText>
-
-      {showToggle ? (
-        <Pressable
-          onPress={() => setExpanded((v) => !v)}
-          accessibilityRole="button"
-          accessibilityLabel={expanded ? 'Show less' : 'Read more'}
-          style={{ marginTop: 6, alignSelf: 'flex-start' }}
-        >
-          <ThemedText variant="label" color={tokens.colors.primaryDark}>
-            {expanded ? 'Show less' : 'Read more'}
-          </ThemedText>
-        </Pressable>
-      ) : null}
-    </View>
-  );
-}
 
 export default function ChallengesScreen() {
   const nav = useNavigation<any>();
@@ -111,10 +64,7 @@ export default function ChallengesScreen() {
 
   const [tab, setTab] = useState<TabKey>('all');
 
-  /**
-   * Selection comes from your seed helper. Make sure CHALLENGE_POOL now
-   * includes the 50 “easy / Tender Moments” items we finalized.
-   */
+  // Selection from seeded helper (guarantees 1 Easy visible for free plan)
   const selection = useMemo(
     () =>
       getWeeklyChallengeSet({
@@ -131,25 +81,17 @@ export default function ChallengesScreen() {
     return src.filter((c) => (tab === 'all' ? true : c.category === tab));
   }, [selection, tab]);
 
-  // Premium opens: 3 Easy + 1 Medium + 1 Hard + 1 Pro = 6 instantly playable.
-  const PREMIUM_BASE_OPEN = 6;
+  const PREMIUM_BASE_OPEN = 6; // 3E + 1M + 1H + 1P
   const currentVisibleCount = selection.visible.length;
   const moreWithPremiumNow = Math.max(0, PREMIUM_BASE_OPEN - currentVisibleCount);
 
-  // Prefer a preview from Medium → Hard → Pro among currently locked
   const previewCandidate = useMemo(() => {
-    const byPref: DiffKey[] = ['medium', 'hard', 'pro', 'easy'];
-    return byPref
-      .map(diff => selection.locked.find(c => (c as any).difficulty === diff))
+    const order: DiffKey[] = ['medium', 'hard', 'pro', 'easy'];
+    return order
+      .map((d) => selection.locked.find((c) => (c as any).difficulty === d))
       .find(Boolean) ?? selection.locked[0];
   }, [selection.locked]);
 
-  // Locked iff it isn't in the visible set
-  function isLocked(c: SeedChallenge) {
-    return !selection.visible.some((v) => v.id === c.id);
-  }
-
-  // Count visible by difficulty (for a tiny legend)
   const visibleByDiff = useMemo(() => {
     const m: Record<DiffKey, number> = { easy: 0, medium: 0, hard: 0, pro: 0 };
     for (const c of selection.visible) {
@@ -158,6 +100,18 @@ export default function ChallengesScreen() {
     }
     return m;
   }, [selection.visible]);
+
+  function isLocked(c: SeedChallenge) {
+    return !selection.visible.some((v) => v.id === c.id);
+  }
+
+  function openPaywall() {
+    try {
+      nav.navigate('Paywall');
+    } catch {
+      Alert.alert('Premium', 'Coming soon ✨');
+    }
+  }
 
   const Header = (
     <View style={styles.header}>
@@ -188,9 +142,9 @@ export default function ChallengesScreen() {
         })}
       </View>
 
-      {/* Tiny difficulty legend (non-interactive) */}
+      {/* Tiny difficulty legend */}
       <View style={styles.legendRow} accessibilityRole="text">
-        {(['easy','medium','hard','pro'] as DiffKey[]).map((d) => (
+        {(['easy', 'medium', 'hard', 'pro'] as DiffKey[]).map((d) => (
           <View key={d} style={styles.legendItem}>
             <View style={[styles.legendDot, { backgroundColor: DIFF_DOT[d] }]} />
             <ThemedText variant="caption" color={tokens.colors.textDim}>
@@ -218,102 +172,6 @@ export default function ChallengesScreen() {
       )}
     </View>
   );
-
-  function openPaywall() {
-    try {
-      nav.navigate('Paywall');
-    } catch {
-      Alert.alert('Premium', 'Coming soon ✨');
-    }
-  }
-
-  // --- Upsell under the list (single, persuasive card) ---
-  function PremiumUpsell({
-    lockedCount,
-    previewTitle,
-  }: {
-    lockedCount: number;
-    previewTitle?: string;
-  }) {
-    const deltaEasy = 2; // free has 1 easy; premium opens 3
-
-    return (
-      <Card style={[styles.card, styles.premiumTeaser]}>
-        <View accessible accessibilityLabel="Premium upgrade">
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-            <View style={styles.diamondSmall}>
-              <Ionicons name="diamond" size={14} color="#fff" />
-            </View>
-            <ThemedText variant="title">Bring your relationship to the next level</ThemedText>
-          </View>
-
-          <ThemedText variant="body" style={{ marginTop: 6 }}>
-            Unlock expert‑curated challenges that turn ordinary nights into memorable moments — together.
-          </ThemedText>
-
-          <View style={styles.checkList}>
-            <Check text={`Start tonight: +${deltaEasy} more Easy challenges open`} />
-            <Check text="Also open 1 Medium, 1 Hard & 1 Pro immediately" />
-            <Check text="Unlock even more each week as you earn points" />
-            <Check text="One subscription covers both partners" />
-          </View>
-
-          <ThemedText variant="caption" color={tokens.colors.textDim} style={{ marginTop: 8 }}>
-            Upgrade now and get <ThemedText variant="caption">+{lockedCount}</ThemedText> more playable challenges right away.
-          </ThemedText>
-
-          {previewTitle ? (
-            <View style={styles.previewRow}>
-              <Ionicons name="lock-closed" size={14} color="#6B7280" />
-              <ThemedText variant="caption" color="#6B7280" style={{ marginLeft: 6 }}>
-                First look: {previewTitle}
-              </ThemedText>
-            </View>
-          ) : null}
-
-          <Button label="Try Premium" onPress={openPaywall} style={{ marginTop: tokens.spacing.md }} />
-        </View>
-      </Card>
-    );
-  }
-
-  function Check({ text }: { text: string }) {
-    return (
-      <View style={styles.checkRow}>
-        <Ionicons name="checkmark-circle" size={16} color={tokens.colors.primaryDark} />
-        <ThemedText variant="body" style={{ marginLeft: 8 }}>
-          {text}
-        </ThemedText>
-      </View>
-    );
-  }
-
-
-  function Bullet({ label, dot }: { label: string; dot: string }) {
-    return (
-      <View style={styles.bulletRow}>
-        <View style={[styles.bulletDot, { backgroundColor: dot }]} />
-        <ThemedText variant="body">{label}</ThemedText>
-      </View>
-    );
-  }
-
-  // Helper for lock messaging
-  function lockMessage(item: SeedChallenge): string {
-    // If the item is marked premiumOnly in your pool (optional flag)
-    // show Premium requirement. Otherwise show tier threshold.
-    // Fallback to premium hint for >easy base items when free plan.
-    const tier = (item as any).tier as 'base' | '10' | '25' | '50' | undefined;
-    const diff = (item as any).difficulty as DiffKey | undefined;
-
-    if (plan === 'free' && tier === 'base' && diff && diff !== 'easy') {
-      return 'Premium required';
-    }
-    if (tier === '10') return 'Needs 10+ pts';
-    if (tier === '25') return 'Needs 25+ pts';
-    if (tier === '50') return 'Needs 50+ pts';
-    return 'Locked';
-  }
 
   return (
     <View
@@ -347,7 +205,7 @@ export default function ChallengesScreen() {
 
                 <View style={{ flex: 1 }}>
                   <ThemedText variant="title">{item.title}</ThemedText>
-                  <ClampText initialLines={4} text={item.description} />
+                  <ClampText initialLines={4}>{item.description}</ClampText>
 
                   <View style={styles.metaRow}>
                     <View style={[styles.metaPill, { backgroundColor: cat.bg }]}>
@@ -370,7 +228,7 @@ export default function ChallengesScreen() {
               {locked ? (
                 <Pressable
                   onPress={() => {
-                    const msg = lockMessage(item);
+                    const msg = lockMessage(plan, item);
                     if (msg.includes('Premium')) openPaywall();
                   }}
                   style={styles.lockBtn}
@@ -378,11 +236,17 @@ export default function ChallengesScreen() {
                 >
                   <Ionicons name="lock-closed" size={16} color="#6B7280" />
                   <ThemedText variant="label" color="#6B7280" style={{ marginLeft: 8 }}>
-                    {lockMessage(item)}
+                    {lockMessage(plan, item)}
                   </ThemedText>
                 </Pressable>
               ) : (
-                <Button label="Start challenge" onPress={() => {}} style={{ marginTop: tokens.spacing.md }} />
+                <Button
+                  label="Start challenge"
+                  onPress={() => {
+                    // TODO: nav.navigate('ChallengeDetail', { id: item.id })
+                  }}
+                  style={{ marginTop: tokens.spacing.md }}
+                />
               )}
             </Card>
           );
@@ -392,6 +256,7 @@ export default function ChallengesScreen() {
             <PremiumUpsell
               lockedCount={moreWithPremiumNow}
               previewTitle={previewCandidate?.title}
+              onPress={openPaywall}
             />
           ) : null
         }
@@ -400,6 +265,93 @@ export default function ChallengesScreen() {
   );
 }
 
+/* ---------- helpers & subcomponents ---------- */
+
+function lockMessage(
+  plan: 'free' | 'premium',
+  item: SeedChallenge
+): string {
+  const tier = (item as any).tier as 'base' | '10' | '25' | '50' | undefined;
+  const diff = (item as any).difficulty as DiffKey | undefined;
+
+  if (plan === 'free' && tier === 'base' && diff && diff !== 'easy') {
+    return 'Premium required';
+  }
+  if (tier === '10') return 'Needs 10+ pts';
+  if (tier === '25') return 'Needs 25+ pts';
+  if (tier === '50') return 'Needs 50+ pts';
+  return 'Locked';
+}
+
+function PremiumUpsell({
+  lockedCount,
+  previewTitle,
+  onPress,
+}: {
+  lockedCount: number;
+  previewTitle?: string;
+  onPress: () => void;
+}) {
+  const deltaEasy = 2; // free has 1 easy; premium opens 3
+
+  return (
+    <Card style={[styles.card, styles.premiumTeaser]}>
+      {/* Put a11y props on a View, not Card, to avoid TS errors */}
+      <View accessible accessibilityLabel="Premium upgrade">
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          <View style={styles.diamondSmall}>
+            <Ionicons name="diamond" size={14} color="#fff" />
+          </View>
+          <ThemedText variant="title" style={{ marginLeft: 12 }}>
+            Bring your relationship to the next level
+          </ThemedText>
+        </View>
+
+        <ThemedText variant="body" style={{ marginTop: 6 }}>
+          Unlock expert-curated challenges that turn ordinary nights into memorable
+          moments — together.
+        </ThemedText>
+
+        <View style={styles.checkList}>
+          <Check text={`Start tonight: +${deltaEasy} more Easy challenges open`} />
+          <Check text="Also open 1 Medium, 1 Hard & 1 Pro immediately" />
+          <Check text="Unlock even more each week as you earn points" />
+          <Check text="One subscription covers both partners" />
+        </View>
+
+        <ThemedText variant="caption" color={tokens.colors.textDim} style={{ marginTop: 8 }}>
+          Upgrade now and get <ThemedText variant="caption">+{lockedCount}</ThemedText> more
+          playable challenges right away.
+        </ThemedText>
+
+        {previewTitle ? (
+          <View style={styles.previewRow}>
+            <Ionicons name="lock-closed" size={14} color="#6B7280" />
+            <ThemedText variant="caption" color="#6B7280" style={{ marginLeft: 6 }}>
+              First look: {previewTitle}
+            </ThemedText>
+          </View>
+        ) : null}
+
+        <Button label="Try Premium" onPress={onPress} style={{ marginTop: tokens.spacing.md }} />
+      </View>
+    </Card>
+  );
+}
+
+function Check({ text }: { text: string }) {
+  return (
+    <View style={styles.checkRow}>
+      <Ionicons name="checkmark-circle" size={16} color={tokens.colors.primaryDark} />
+      <ThemedText variant="body" style={{ marginLeft: 8 }}>
+        {text}
+      </ThemedText>
+    </View>
+  );
+}
+
+/* ---------- styles ---------- */
+
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: tokens.colors.bg },
   header: { paddingBottom: tokens.spacing.s },
@@ -407,10 +359,11 @@ const styles = StyleSheet.create({
   chips: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: tokens.spacing.s as number,
     marginTop: tokens.spacing.s,
   },
   chip: {
+    marginRight: 8,
+    marginBottom: 8,
     paddingHorizontal: tokens.spacing.md,
     paddingVertical: 8,
     borderRadius: tokens.radius.pill,
@@ -420,14 +373,12 @@ const styles = StyleSheet.create({
   },
   chipActive: { backgroundColor: tokens.colors.primary, borderColor: tokens.colors.primary },
 
-  // tiny difficulty legend
   legendRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 12,
     marginTop: tokens.spacing.s,
   },
-  legendItem: { flexDirection: 'row', alignItems: 'center' },
+  legendItem: { flexDirection: 'row', alignItems: 'center', marginRight: 12, marginBottom: 6 },
   legendDot: { width: 8, height: 8, borderRadius: 999, marginRight: 6 },
 
   lockBanner: {
@@ -456,7 +407,7 @@ const styles = StyleSheet.create({
   },
 
   card: { marginTop: tokens.spacing.md },
-  row: { flexDirection: 'row', gap: tokens.spacing.md as number },
+  row: { flexDirection: 'row' },
 
   iconBubble: {
     width: 36,
@@ -485,31 +436,16 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
 
-  // Upsell under the list
+  // Upsell
   premiumTeaser: {
     borderWidth: 1,
     borderColor: tokens.colors.cardBorder,
     backgroundColor: '#FFF7FB',
   },
-  checkList: { marginTop: tokens.spacing.s, rowGap: 8 },
-  checkRow: { flexDirection: 'row', alignItems: 'center' },
+  checkList: { marginTop: tokens.spacing.s },
+  checkRow: { flexDirection: 'row', alignItems: 'center', marginTop: 8 },
   previewRow: { flexDirection: 'row', alignItems: 'center', marginTop: 6 },
 
-  // Fallback long card (rarely used)
-  premiumCard: {
-    borderWidth: 1,
-    borderColor: tokens.colors.cardBorder,
-    backgroundColor: '#FFF5F8',
-  },
-  premiumHeader: { flexDirection: 'row', alignItems: 'center' },
-  diamond: {
-    width: 24,
-    height: 24,
-    borderRadius: 6,
-    backgroundColor: tokens.colors.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
   diamondSmall: {
     width: 20,
     height: 20,
@@ -517,21 +453,5 @@ const styles = StyleSheet.create({
     backgroundColor: tokens.colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  bullets: { marginTop: tokens.spacing.s, rowGap: 6 },
-  bulletRow: { flexDirection: 'row', alignItems: 'center' },
-  bulletDot: { width: 8, height: 8, borderRadius: 999, marginRight: 8 },
-
-  partnerChip: {
-    marginTop: 8,
-    alignSelf: 'flex-start',
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: tokens.radius.pill,
-    backgroundColor: tokens.colors.primarySoft,
-    borderWidth: 1,
-    borderColor: tokens.colors.primarySoftBorder,
   },
 });
