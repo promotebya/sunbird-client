@@ -2,7 +2,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { useMemo, useState } from 'react';
-import { Alert, FlatList, Pressable, StyleSheet, View } from 'react-native';
+import { Alert, FlatList, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import Button from '../components/Button';
@@ -20,25 +20,25 @@ import {
   type SeedChallenge,
 } from '../utils/seedchallenges';
 
-type TabKey = 'all' | 'date' | 'kindness' | 'conversation' | 'surprise' | 'play';
+type DiffTabKey = 'all' | 'easy' | 'medium' | 'hard' | 'pro';
 type DiffKey = 'easy' | 'medium' | 'hard' | 'pro';
+type CatKey = 'date' | 'kindness' | 'conversation' | 'surprise' | 'play';
 
-const TABS: { key: TabKey; label: string }[] = [
+const TABS: { key: DiffTabKey; label: string }[] = [
   { key: 'all', label: 'All' },
-  { key: 'date', label: 'Dates' },
-  { key: 'kindness', label: 'Kindness' },
-  { key: 'conversation', label: 'Talk' },
-  { key: 'surprise', label: 'Surprise' },
-  { key: 'play', label: 'Play' },
+  { key: 'easy', label: 'Tender Moments (easy)' },
+  { key: 'medium', label: 'Heart to Heart (medium)' },
+  { key: 'hard', label: 'Passionate Quests (hard)' },
+  { key: 'pro', label: 'Forever & Always (pro)' },
 ];
 
-const CAT_COLORS: Record<TabKey, { bg: string; fg: string }> = {
-  all: { bg: '#F3F4F6', fg: tokens.colors.textDim },
-  date: { bg: '#FFE5EE', fg: '#8B264C' },
-  kindness: { bg: '#E8F7EE', fg: '#1E6E46' },
-  conversation: { bg: '#EDE7FF', fg: '#4F46E5' },
-  surprise: { bg: '#FFF4E5', fg: '#9A3412' },
-  play: { bg: '#E7F0FF', fg: '#1D4ED8' },
+const DEFAULT_CAT_COLORS = { bg: tokens.colors.card, fg: tokens.colors.textDim } as const;
+const CAT_COLORS: Record<CatKey, { bg: string; fg: string }> = {
+  date: DEFAULT_CAT_COLORS,
+  kindness: DEFAULT_CAT_COLORS,
+  conversation: DEFAULT_CAT_COLORS,
+  surprise: DEFAULT_CAT_COLORS,
+  play: DEFAULT_CAT_COLORS,
 };
 
 const DIFF_LABEL: Record<DiffKey, string> = {
@@ -48,11 +48,19 @@ const DIFF_LABEL: Record<DiffKey, string> = {
   pro: 'Forever & Always',
 };
 
+const CATEGORY_LABEL: Record<CatKey, string> = {
+  date: 'Dates',
+  kindness: 'Kindness',
+  conversation: 'Talk',
+  surprise: 'Surprise',
+  play: 'Play',
+};
+
 const DIFF_DOT: Record<DiffKey, string> = {
-  easy: '#F8B4C6',
-  medium: '#C7B9FF',
-  hard: '#FFB4A6',
-  pro: '#F9D773',
+  easy: tokens.colors.primarySoft,
+  medium: tokens.colors.primarySoft,
+  hard: tokens.colors.primarySoft,
+  pro: tokens.colors.primarySoft,
 };
 
 export default function ChallengesScreen() {
@@ -62,47 +70,94 @@ export default function ChallengesScreen() {
   const plan = usePlan(user?.uid);
   const { total, weekly } = usePointsTotal(user?.uid);
 
-  const [tab, setTab] = useState<TabKey>('all');
+  // Safe defaults to protect first render / bad pool states
+  const safePlan: 'free' | 'premium' = plan === 'premium' ? 'premium' : 'free';
+  const weeklySafe: number = Number.isFinite(weekly as any) ? Number(weekly) : 0;
+
+  const [tab, setTab] = useState<DiffTabKey>('all');
 
   // Selection from seeded helper (guarantees 1 Easy visible for free plan)
   const selection = useMemo(
     () =>
       getWeeklyChallengeSet({
-        plan,
-        weeklyPoints: weekly,
+        plan: safePlan,
+        weeklyPoints: weeklySafe,
         uid: user?.uid ?? 'guest',
         pool: CHALLENGE_POOL,
       }),
-    [plan, weekly, user?.uid]
+    [safePlan, weeklySafe, user?.uid]
   );
 
+  // Fallback: ensure at least one card shows even if pool/selector glitch
+  const selectionSafe = useMemo(() => {
+    const total = selection.visible.length + selection.locked.length;
+    if (total > 0) return selection;
+
+    const anyEasy = CHALLENGE_POOL.find((c) => (c as any).difficulty === 'easy');
+    const anyHard = CHALLENGE_POOL.find((c) => (c as any).difficulty === 'hard');
+    const vis: SeedChallenge[] = [];
+    const lock: SeedChallenge[] = [];
+    if (anyEasy) vis.push({ ...(anyEasy as SeedChallenge), tier: 'base' as const });
+    if (anyHard) {
+      if (safePlan === 'free') lock.push({ ...(anyHard as SeedChallenge), tier: '25' as const });
+      else vis.push({ ...(anyHard as SeedChallenge), tier: 'base' as const });
+    }
+    return { visible: vis, locked: lock };
+  }, [selection, safePlan]);
+
+  // Dev visibility diagnostics
+  if (__DEV__) {
+    const poolLen = CHALLENGE_POOL.length;
+    const easyCount = CHALLENGE_POOL.filter((c) => (c as any).difficulty === 'easy').length;
+    const hardCount = CHALLENGE_POOL.filter((c) => (c as any).difficulty === 'hard').length;
+    // eslint-disable-next-line no-console
+    console.log('[ChallengesScreen] plan=%s weekly=%s pool=%d easy=%d hard=%d visible=%d locked=%d',
+      safePlan, weeklySafe, poolLen, easyCount, hardCount,
+      selectionSafe.visible.length, selectionSafe.locked.length);
+  }
+
   const listToShow = useMemo(() => {
-    const src = selection.visible.concat(selection.locked);
-    return src.filter((c) => (tab === 'all' ? true : c.category === tab));
-  }, [selection, tab]);
+    const src = selectionSafe.visible.concat(selectionSafe.locked);
+    return src.filter((c) => (tab === 'all' ? true : (c as any).difficulty === tab));
+  }, [selectionSafe, tab]);
 
   const PREMIUM_BASE_OPEN = 6; // 3E + 1M + 1H + 1P
-  const currentVisibleCount = selection.visible.length;
+  const currentVisibleCount = selectionSafe.visible.length;
   const moreWithPremiumNow = Math.max(0, PREMIUM_BASE_OPEN - currentVisibleCount);
 
   const previewCandidate = useMemo(() => {
     const order: DiffKey[] = ['medium', 'hard', 'pro', 'easy'];
     return order
-      .map((d) => selection.locked.find((c) => (c as any).difficulty === d))
-      .find(Boolean) ?? selection.locked[0];
-  }, [selection.locked]);
+      .map((d) => selectionSafe.locked.find((c) => (c as any).difficulty === d))
+      .find(Boolean) ?? selectionSafe.locked[0];
+  }, [selectionSafe.locked]);
 
   const visibleByDiff = useMemo(() => {
     const m: Record<DiffKey, number> = { easy: 0, medium: 0, hard: 0, pro: 0 };
-    for (const c of selection.visible) {
+    for (const c of selectionSafe.visible) {
       const d = (c as any).difficulty as DiffKey | undefined;
       if (d && m[d] !== undefined) m[d] += 1;
     }
     return m;
-  }, [selection.visible]);
+  }, [selectionSafe.visible]);
+
+  const visibleByCat = useMemo(() => {
+    const m: Record<CatKey, number> = {
+      date: 0,
+      kindness: 0,
+      conversation: 0,
+      surprise: 0,
+      play: 0,
+    };
+    for (const c of selectionSafe.visible) {
+      const k = (c as any).category as CatKey | undefined;
+      if (k && m[k] !== undefined) m[k] += 1;
+    }
+    return m;
+  }, [selectionSafe.visible]);
 
   function isLocked(c: SeedChallenge) {
-    return !selection.visible.some((v) => v.id === c.id);
+    return !selectionSafe.visible.some((v) => v.id === c.id);
   }
 
   function openPaywall() {
@@ -120,8 +175,12 @@ export default function ChallengesScreen() {
         Total points: {total}
       </ThemedText>
 
-      {/* Category chips */}
-      <View style={styles.chips}>
+      {/* Difficulty tabs (compact, horizontal scroll) */}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.chips}
+      >
         {TABS.map((t) => {
           const active = t.key === tab;
           return (
@@ -132,7 +191,7 @@ export default function ChallengesScreen() {
               accessibilityRole="button"
             >
               <ThemedText
-                variant="label"
+                variant="caption"
                 color={active ? tokens.colors.buttonTextPrimary : tokens.colors.textDim}
               >
                 {t.label}
@@ -140,29 +199,22 @@ export default function ChallengesScreen() {
             </Pressable>
           );
         })}
-      </View>
+      </ScrollView>
 
-      {/* Tiny difficulty legend */}
+      {/* Tiny category legend */}
       <View style={styles.legendRow} accessibilityRole="text">
-        {(['easy', 'medium', 'hard', 'pro'] as DiffKey[]).map((d) => (
-          <View key={d} style={styles.legendItem}>
-            <View style={[styles.legendDot, { backgroundColor: DIFF_DOT[d] }]} />
+        {(['date','kindness','conversation','surprise','play'] as CatKey[]).map((k) => (
+          <View key={k} style={styles.legendItem}>
+            <View style={[styles.legendDot, { backgroundColor: tokens.colors.cardBorder }]} />
             <ThemedText variant="caption" color={tokens.colors.textDim}>
-              {DIFF_LABEL[d]} {visibleByDiff[d] ? `· ${visibleByDiff[d]}` : ''}
+              {CATEGORY_LABEL[k]} {visibleByCat[k] ? `· ${visibleByCat[k]}` : ''}
             </ThemedText>
           </View>
         ))}
       </View>
 
       {/* Plan banner */}
-      {plan === 'free' ? (
-        <View style={styles.lockBanner}>
-          <Ionicons name="lock-closed" size={16} color={tokens.colors.primaryDark} />
-          <ThemedText variant="label" color={tokens.colors.primaryDark} style={{ marginLeft: 8 }}>
-            Free this week: 1 Easy is open. Earn points to unlock a bonus Hard.
-          </ThemedText>
-        </View>
-      ) : (
+      {safePlan === 'free' ? null : (
         <View style={styles.tipBanner}>
           <Ionicons name="trophy" size={16} color={tokens.colors.primaryDark} />
           <ThemedText variant="label" color={tokens.colors.primaryDark} style={{ marginLeft: 8 }}>
@@ -193,7 +245,7 @@ export default function ChallengesScreen() {
         ItemSeparatorComponent={() => <View style={{ height: tokens.spacing.s }} />}
         renderItem={({ item }) => {
           const locked = isLocked(item);
-          const cat = CAT_COLORS[item.category as TabKey] ?? CAT_COLORS.all;
+          const cat = CAT_COLORS[item.category as CatKey] ?? DEFAULT_CAT_COLORS;
           const diffLabel = DIFF_LABEL[((item as any).difficulty as DiffKey) ?? 'easy'];
 
           return (
@@ -205,38 +257,42 @@ export default function ChallengesScreen() {
 
                 <View style={{ flex: 1 }}>
                   <ThemedText variant="title">{item.title}</ThemedText>
-                  <ClampText initialLines={4}>{item.description}</ClampText>
+                  {!locked && (
+                    <>
+                      <ClampText initialLines={4}>{item.description}</ClampText>
 
-                  <View style={styles.metaRow}>
-                    <View style={[styles.metaPill, { backgroundColor: cat.bg }]}>
-                      <ThemedText variant="caption" color={cat.fg}>
-                        {item.category}
-                      </ThemedText>
-                    </View>
-                    <View style={[styles.metaPill, styles.levelPill]}>
-                      <ThemedText variant="caption" color={tokens.colors.primaryDark}>
-                        {diffLabel}
-                      </ThemedText>
-                    </View>
-                    <ThemedText variant="caption" color={tokens.colors.textDim}>
-                      {` • +${item.points} pts`}
-                    </ThemedText>
-                  </View>
+                      <View style={styles.metaRow}>
+                        <View style={[styles.metaPill, { backgroundColor: cat.bg }]}> 
+                          <ThemedText variant="caption" color={cat.fg}>
+                            {item.category}
+                          </ThemedText>
+                        </View>
+                        <View style={[styles.metaPill, styles.levelPill]}>
+                          <ThemedText variant="caption" color={tokens.colors.primaryDark}>
+                            {diffLabel}
+                          </ThemedText>
+                        </View>
+                        <ThemedText variant="caption" color={tokens.colors.textDim}>
+                          {` • +${item.points} pts`}
+                        </ThemedText>
+                      </View>
+                    </>
+                  )}
                 </View>
               </View>
 
               {locked ? (
                 <Pressable
                   onPress={() => {
-                    const msg = lockMessage(plan, item);
+                    const msg = lockMessage(safePlan, item);
                     if (msg.includes('Premium')) openPaywall();
                   }}
                   style={styles.lockBtn}
                   accessibilityRole="button"
                 >
-                  <Ionicons name="lock-closed" size={16} color="#6B7280" />
-                  <ThemedText variant="label" color="#6B7280" style={{ marginLeft: 8 }}>
-                    {lockMessage(plan, item)}
+                  <Ionicons name="lock-closed" size={16} color={tokens.colors.textDim} />
+                  <ThemedText variant="label" color={tokens.colors.textDim} style={{ marginLeft: 8 }}>
+                    {lockMessage(safePlan, item)}
                   </ThemedText>
                 </Pressable>
               ) : (
@@ -252,7 +308,7 @@ export default function ChallengesScreen() {
           );
         }}
         ListFooterComponent={
-          plan === 'free' ? (
+          safePlan === 'free' ? (
             <PremiumUpsell
               lockedCount={moreWithPremiumNow}
               previewTitle={previewCandidate?.title}
@@ -300,7 +356,7 @@ function PremiumUpsell({
       <View accessible accessibilityLabel="Premium upgrade">
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
           <View style={styles.diamondSmall}>
-            <Ionicons name="diamond" size={14} color="#fff" />
+            <Ionicons name="diamond" size={14} color={tokens.colors.buttonTextPrimary} />
           </View>
           <ThemedText variant="title" style={{ marginLeft: 12 }}>
             Bring your relationship to the next level
@@ -308,26 +364,24 @@ function PremiumUpsell({
         </View>
 
         <ThemedText variant="body" style={{ marginTop: 6 }}>
-          Unlock expert-curated challenges that turn ordinary nights into memorable
-          moments — together.
+          Go Premium to turn date night into a weekly adventure. Fresh, expert‑curated challenges you’ll actually look forward to.
         </ThemedText>
 
         <View style={styles.checkList}>
-          <Check text={`Start tonight: +${deltaEasy} more Easy challenges open`} />
-          <Check text="Also open 1 Medium, 1 Hard & 1 Pro immediately" />
-          <Check text="Unlock even more each week as you earn points" />
+          <Check text="Unlock 12 curated challenges every week" />
+          <Check text="New every week — always fun, romantic or surprising" />
+          <Check text="Explore 200+ romantic, playful & competitive challenges" />
           <Check text="One subscription covers both partners" />
         </View>
 
         <ThemedText variant="caption" color={tokens.colors.textDim} style={{ marginTop: 8 }}>
-          Upgrade now and get <ThemedText variant="caption">+{lockedCount}</ThemedText> more
-          playable challenges right away.
+          Upgrade now and instantly unlock <ThemedText variant="caption">+{lockedCount}</ThemedText> more challenges today.
         </ThemedText>
 
         {previewTitle ? (
           <View style={styles.previewRow}>
-            <Ionicons name="lock-closed" size={14} color="#6B7280" />
-            <ThemedText variant="caption" color="#6B7280" style={{ marginLeft: 6 }}>
+            <Ionicons name="lock-closed" size={14} color={tokens.colors.textDim} />
+            <ThemedText variant="caption" color={tokens.colors.textDim} style={{ marginLeft: 6 }}>
               First look: {previewTitle}
             </ThemedText>
           </View>
@@ -342,8 +396,10 @@ function PremiumUpsell({
 function Check({ text }: { text: string }) {
   return (
     <View style={styles.checkRow}>
-      <Ionicons name="checkmark-circle" size={16} color={tokens.colors.primaryDark} />
-      <ThemedText variant="body" style={{ marginLeft: 8 }}>
+      <View style={styles.checkIcon}>
+        <Ionicons name="checkmark-circle" size={16} color={tokens.colors.primaryDark} />
+      </View>
+      <ThemedText variant="body" style={{ marginLeft: 8, flex: 1 }}>
         {text}
       </ThemedText>
     </View>
@@ -358,14 +414,14 @@ const styles = StyleSheet.create({
 
   chips: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
+    alignItems: 'center',
     marginTop: tokens.spacing.s,
+    paddingVertical: 4,
   },
   chip: {
     marginRight: 8,
-    marginBottom: 8,
-    paddingHorizontal: tokens.spacing.md,
-    paddingVertical: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
     borderRadius: tokens.radius.pill,
     borderWidth: 1,
     borderColor: tokens.colors.cardBorder,
@@ -396,8 +452,8 @@ const styles = StyleSheet.create({
   tipBanner: {
     marginTop: tokens.spacing.md,
     alignSelf: 'stretch',
-    backgroundColor: '#EEF2FF',
-    borderColor: '#E0E7FF',
+    backgroundColor: tokens.colors.primarySoft,
+    borderColor: tokens.colors.primarySoftBorder,
     borderWidth: 1,
     borderRadius: tokens.radius.pill,
     paddingHorizontal: tokens.spacing.md,
@@ -421,7 +477,7 @@ const styles = StyleSheet.create({
 
   metaRow: { flexDirection: 'row', alignItems: 'center', marginTop: 6, flexWrap: 'wrap' },
   metaPill: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: tokens.radius.pill, marginRight: 6 },
-  levelPill: { backgroundColor: '#FFE1EA', borderWidth: 1, borderColor: '#FFD0DF' },
+  levelPill: { backgroundColor: tokens.colors.primarySoft, borderWidth: 1, borderColor: tokens.colors.primarySoftBorder },
 
   lockBtn: {
     marginTop: tokens.spacing.md,
@@ -440,10 +496,11 @@ const styles = StyleSheet.create({
   premiumTeaser: {
     borderWidth: 1,
     borderColor: tokens.colors.cardBorder,
-    backgroundColor: '#FFF7FB',
+    backgroundColor: tokens.colors.card,
   },
   checkList: { marginTop: tokens.spacing.s },
-  checkRow: { flexDirection: 'row', alignItems: 'center', marginTop: 8 },
+  checkRow: { flexDirection: 'row', alignItems: 'flex-start', marginTop: 6 },
+  checkIcon: { marginTop: 2 },
   previewRow: { flexDirection: 'row', alignItems: 'center', marginTop: 6 },
 
   diamondSmall: {

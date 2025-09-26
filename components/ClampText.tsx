@@ -13,10 +13,11 @@ import { tokens } from './tokens';
 
 type ClampTextProps = {
   children: string;
-  initialLines?: number;      // default 4
+  initialLines?: number;  // default 4
   style?: TextStyle | TextStyle[];
-  moreLabel?: string;         // default "Read more"
-  lessLabel?: string;         // default "Show less"
+  moreLabel?: string;     // default "Read more"
+  lessLabel?: string;     // default "Show less"
+  color?: string;         // optional text color
 };
 
 export default function ClampText({
@@ -25,6 +26,7 @@ export default function ClampText({
   style,
   moreLabel = 'Read more',
   lessLabel = 'Show less',
+  color = tokens.colors.textDim,
 }: ClampTextProps) {
   const [expanded, setExpanded] = useState(false);
   const [showToggle, setShowToggle] = useState(false);
@@ -32,10 +34,9 @@ export default function ClampText({
 
   const onTextLayout = useCallback(
     (e: NativeSyntheticEvent<TextLayoutEventData>) => {
-      // Measure only once to avoid layout loops on Android
-      if (measuredOnce.current) return;
+      if (measuredOnce.current) return; // avoid loops on Android
       measuredOnce.current = true;
-      const lines = e.nativeEvent.lines?.length ?? 0;
+      const lines = e?.nativeEvent?.lines?.length ?? 0;
       if (lines > initialLines) setShowToggle(true);
     },
     [initialLines]
@@ -45,7 +46,7 @@ export default function ClampText({
     <View>
       <ThemedText
         variant="body"
-        color={tokens.colors.textDim}
+        color={color}
         style={style}
         numberOfLines={expanded ? undefined : initialLines}
         onTextLayout={onTextLayout}
@@ -55,12 +56,16 @@ export default function ClampText({
 
       {showToggle && (
         <Pressable
-          onPress={() => setExpanded((v) => !v)}
+          onPress={() => setExpanded(v => !v)}
           accessibilityRole="button"
-          accessibilityLabel={expanded ? 'Show less' : 'Read more'}
+          // remove accessibilityLabel type error — we can place it on the Text instead
           style={styles.toggleBtn}
         >
-          <ThemedText variant="label" color={tokens.colors.primaryDark}>
+          <ThemedText
+            variant="label"
+            color={tokens.colors.primaryDark}
+            accessibilityLabel={expanded ? 'Show less' : 'Read more'}
+          >
             {expanded ? lessLabel : moreLabel}
           </ThemedText>
         </Pressable>
