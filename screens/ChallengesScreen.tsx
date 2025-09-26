@@ -55,6 +55,53 @@ const DIFF_DOT: Record<DiffKey, string> = {
   pro:   '#F9D773',
 };
 
+// Local clamp for long descriptions — expands/collapses per row safely
+function ClampText({
+  text,
+  initialLines = 4,
+}: {
+  text: string;
+  initialLines?: number;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [showToggle, setShowToggle] = useState(false);
+  const measuredOnce = (global as any).__SB_CLAMP_MEASURED__ ?? { current: false };
+
+  const onTextLayout = (e: any) => {
+    if (measuredOnce.current) return;
+    measuredOnce.current = true;
+    const lines = e?.nativeEvent?.lines?.length ?? 0;
+    if (lines > initialLines) setShowToggle(true);
+  };
+
+  return (
+    <View>
+      <ThemedText
+        variant="body"
+        color={tokens.colors.textDim}
+        style={{ marginTop: 4 }}
+        numberOfLines={expanded ? undefined : initialLines}
+        onTextLayout={onTextLayout}
+      >
+        {text}
+      </ThemedText>
+
+      {showToggle ? (
+        <Pressable
+          onPress={() => setExpanded((v) => !v)}
+          accessibilityRole="button"
+          accessibilityLabel={expanded ? 'Show less' : 'Read more'}
+          style={{ marginTop: 6, alignSelf: 'flex-start' }}
+        >
+          <ThemedText variant="label" color={tokens.colors.primaryDark}>
+            {expanded ? 'Show less' : 'Read more'}
+          </ThemedText>
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
+
 export default function ChallengesScreen() {
   const nav = useNavigation<any>();
   const insets = useSafeAreaInsets();
@@ -180,8 +227,8 @@ export default function ChallengesScreen() {
     }
   }
 
-  // --- Upsell under the list ---
-  function PremiumTeaser({
+  // --- Upsell under the list (single, persuasive card) ---
+  function PremiumUpsell({
     lockedCount,
     previewTitle,
   }: {
@@ -192,40 +239,40 @@ export default function ChallengesScreen() {
 
     return (
       <Card style={[styles.card, styles.premiumTeaser]}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-          <View style={styles.diamondSmall}>
-            <Ionicons name="diamond" size={14} color="#fff" />
+        <View accessible accessibilityLabel="Premium upgrade">
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+            <View style={styles.diamondSmall}>
+              <Ionicons name="diamond" size={14} color="#fff" />
+            </View>
+            <ThemedText variant="title">Bring your relationship to the next level</ThemedText>
           </View>
-          <ThemedText variant="title">Premium — for both of you</ThemedText>
-        </View>
 
-        <View style={styles.checkList}>
-          <Check text={`Start tonight: +${deltaEasy} more Easy unlocked`} />
-          <Check text="Also open 1 Medium, 1 Hard, 1 Pro immediately" />
-          <Check text="Unlock the rest with your weekly points" />
-        </View>
-
-        <View style={styles.partnerChip}>
-          <Ionicons name="people-outline" size={14} color={tokens.colors.primaryDark} />
-          <ThemedText variant="label" color={tokens.colors.primaryDark} style={{ marginLeft: 6 }}>
-            One purchase covers both partners
+          <ThemedText variant="body" style={{ marginTop: 6 }}>
+            Unlock expert‑curated challenges that turn ordinary nights into memorable moments — together.
           </ThemedText>
-        </View>
 
-        <ThemedText variant="caption" color={tokens.colors.textDim} style={{ marginTop: 8 }}>
-          You’d get <ThemedText variant="caption">+{lockedCount}</ThemedText> more playable challenges right now.
-        </ThemedText>
-
-        {previewTitle ? (
-          <View style={styles.previewRow}>
-            <Ionicons name="lock-closed" size={14} color="#6B7280" />
-            <ThemedText variant="caption" color="#6B7280" style={{ marginLeft: 6 }}>
-              Preview: {previewTitle}
-            </ThemedText>
+          <View style={styles.checkList}>
+            <Check text={`Start tonight: +${deltaEasy} more Easy challenges open`} />
+            <Check text="Also open 1 Medium, 1 Hard & 1 Pro immediately" />
+            <Check text="Unlock even more each week as you earn points" />
+            <Check text="One subscription covers both partners" />
           </View>
-        ) : null}
 
-        <Button label="Try Premium" onPress={openPaywall} style={{ marginTop: tokens.spacing.md }} />
+          <ThemedText variant="caption" color={tokens.colors.textDim} style={{ marginTop: 8 }}>
+            Upgrade now and get <ThemedText variant="caption">+{lockedCount}</ThemedText> more playable challenges right away.
+          </ThemedText>
+
+          {previewTitle ? (
+            <View style={styles.previewRow}>
+              <Ionicons name="lock-closed" size={14} color="#6B7280" />
+              <ThemedText variant="caption" color="#6B7280" style={{ marginLeft: 6 }}>
+                First look: {previewTitle}
+              </ThemedText>
+            </View>
+          ) : null}
+
+          <Button label="Try Premium" onPress={openPaywall} style={{ marginTop: tokens.spacing.md }} />
+        </View>
       </Card>
     );
   }
@@ -241,36 +288,6 @@ export default function ChallengesScreen() {
     );
   }
 
-  // Optional long-form card (rare)
-  function PremiumCard() {
-    return (
-      <Card style={[styles.card, styles.premiumCard]}>
-        <View style={styles.premiumHeader}>
-          <View style={styles.diamond}>
-            <Ionicons name="diamond" size={16} color="#fff" />
-          </View>
-          <ThemedText variant="title" style={{ marginLeft: 8 }}>
-            Go Premium
-          </ThemedText>
-        </View>
-
-        <View style={styles.bullets}>
-          <Bullet label="Tender Moments — sweet & simple" dot={DIFF_DOT.easy} />
-          <Bullet label="Heart to Heart — bonding conversations" dot={DIFF_DOT.medium} />
-          <Bullet label="Passionate Quests — playful & adventurous" dot={DIFF_DOT.hard} />
-          <Bullet label="Forever & Always — milestone moments" dot={DIFF_DOT.pro} />
-          <View style={styles.partnerChip}>
-            <Ionicons name="people-outline" size={14} color={tokens.colors.primaryDark} />
-            <ThemedText variant="label" color={tokens.colors.primaryDark} style={{ marginLeft: 6 }}>
-              Premium includes both partners automatically
-            </ThemedText>
-          </View>
-        </View>
-
-        <Button label="See Premium options" onPress={openPaywall} style={{ marginTop: tokens.spacing.md }} />
-      </Card>
-    );
-  }
 
   function Bullet({ label, dot }: { label: string; dot: string }) {
     return (
@@ -330,9 +347,7 @@ export default function ChallengesScreen() {
 
                 <View style={{ flex: 1 }}>
                   <ThemedText variant="title">{item.title}</ThemedText>
-                  <ThemedText variant="body" color={tokens.colors.textDim} style={{ marginTop: 4 }}>
-                    {item.description}
-                  </ThemedText>
+                  <ClampText initialLines={4} text={item.description} />
 
                   <View style={styles.metaRow}>
                     <View style={[styles.metaPill, { backgroundColor: cat.bg }]}>
@@ -372,10 +387,9 @@ export default function ChallengesScreen() {
             </Card>
           );
         }}
-        ListEmptyComponent={<PremiumCard />}
         ListFooterComponent={
           plan === 'free' ? (
-            <PremiumTeaser
+            <PremiumUpsell
               lockedCount={moreWithPremiumNow}
               previewTitle={previewCandidate?.title}
             />

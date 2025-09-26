@@ -325,13 +325,18 @@ export function getWeeklyChallengeSet(opts: {
   const locked: SeedChallenge[] = [];
 
   if (plan === 'free') {
+    // Always show exactly 1 Easy open — with a safe fallback if the pool is empty
     const e = pickRotate(easy, 1, seed ^ 0x1111);
-    if (e[0]) visible.push(withTier(e[0], 'base'));
+    if (e.length && e[0]) {
+      visible.push(withTier(e[0], 'base'));
+    }
 
+    // Tease exactly 1 Hard. It is locked until 25 points this week, then becomes visible.
+    // Ensure we never duplicate the Easy pick (not possible across difficulties, but keep the pattern clear)
     const h = pickRotate(hard, 1, seed ^ 0x3333);
-    if (h[0]) {
-      if (weeklyPoints >= 25) visible.push(withTier(h[0], 'base'));
-      else locked.push(withTier(h[0], '25'));
+    if (h.length && h[0]) {
+      const hardWithTier = weeklyPoints >= 25 ? withTier(h[0], 'base') : withTier(h[0], '25');
+      (weeklyPoints >= 25 ? visible : locked).push(hardWithTier);
     }
 
     return { visible, locked };
