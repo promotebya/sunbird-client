@@ -1,9 +1,10 @@
 // components/ThemeProvider.tsx
 import { StatusBar } from 'expo-status-bar';
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
-import { Appearance, ColorSchemeName } from 'react-native';
 import useAuthListener from '../hooks/useAuthListener';
 import { getUserPrefs } from '../utils/settings';
+
+/* ── Theme shape ───────────────────────────────────────────── */
 
 export type ThemeName =
   | 'light-rose'
@@ -24,7 +25,6 @@ export type ThemeTokens = {
     success: string;
     danger: string;
   };
-  /** NEW: background wash per theme */
   bgGradient: { start: string; end: string };
   spacing: { xs: number; s: number; md: number; lg: number; xl: number };
   radius: { sm: number; md: number; lg: number; pill: number };
@@ -58,7 +58,7 @@ const THEMES: Record<ThemeName, ThemeTokens> = {
       success: '#3CCB7F',
       danger: '#EF4444',
     },
-    bgGradient: { start: '#FFE8F1', end: '#FFF6FA' }, // very light
+    bgGradient: { start: '#FFE8F1', end: '#FFF6FA' },
   },
   'dark-rose': {
     ...base,
@@ -72,7 +72,7 @@ const THEMES: Record<ThemeName, ThemeTokens> = {
       success: '#22C55E',
       danger: '#F87171',
     },
-    bgGradient: { start: '#0B0F14', end: '#111827' }, // subtle dark wash
+    bgGradient: { start: '#0B0F14', end: '#111827' },
   },
   ocean: {
     ...base,
@@ -114,7 +114,7 @@ const THEMES: Record<ThemeName, ThemeTokens> = {
       success: '#111111',
       danger: '#111111',
     },
-    bgGradient: { start: '#FAFAFB', end: '#FAFAFB' }, // solid
+    bgGradient: { start: '#FAFAFB', end: '#FAFAFB' },
   },
   'high-contrast': {
     ...base,
@@ -128,72 +128,68 @@ const THEMES: Record<ThemeName, ThemeTokens> = {
       success: '#000000',
       danger: '#000000',
     },
-    bgGradient: { start: '#FFFFFF', end: '#FFFFFF' }, // solid
+    bgGradient: { start: '#FFFFFF', end: '#FFFFFF' },
   },
 };
 
-type ThemePref =
-  | 'system'
-  | 'light'
-  | 'dark'
-  | 'light-rose'
-  | 'dark-rose'
-  | 'ocean'
-  | 'forest'
-  | 'mono'
-  | 'high-contrast';
+/* ── Context ───────────────────────────────────────────── */
 
 type ThemeContextType = {
-  pref: ThemePref;
+  pref: ThemeName;
   resolved: 'light' | 'dark';
   themeName: ThemeName;
   tokens: ThemeTokens;
-  setPref: (p: ThemePref) => void;
+  setPref: (p: ThemeName) => void;
 };
 
+const DEFAULT_PREF: ThemeName = 'ocean';
+
 const ThemeContext = createContext<ThemeContextType>({
-  pref: 'system',
+  pref: DEFAULT_PREF,
   resolved: 'light',
-  themeName: 'light-rose',
-  tokens: THEMES['light-rose'],
+  themeName: DEFAULT_PREF,
+  tokens: THEMES[DEFAULT_PREF],
   setPref: () => {},
 });
 
 export const useThemeContext = () => useContext(ThemeContext);
 export const useTokens = () => useThemeContext().tokens;
 
+/* ── Helpers ───────────────────────────────────────────── */
+
+function normalizeLegacy(value?: string | null): ThemeName {
+  // Migrate any old values to current names; fallback to ocean.
+  if (!value) return DEFAULT_PREF;
+  if (value === 'system') return DEFAULT_PREF;
+  if (value === 'light') return 'light-rose';
+  if (value === 'dark') return 'dark-rose';
+  const allowed: ThemeName[] = ['light-rose', 'dark-rose', 'ocean', 'forest', 'mono', 'high-contrast'];
+  return (allowed.includes(value as ThemeName) ? value : DEFAULT_PREF) as ThemeName;
+}
+
+function resolveBrightness(name: ThemeName): 'light' | 'dark' {
+  return name === 'dark-rose' ? 'dark' : 'light';
+}
+
+/* ── Provider ───────────────────────────────────────────── */
+
 export const ThemeProvider: React.FC<React.PropsWithChildren<{}>> = ({ children }) => {
   const { user } = useAuthListener();
-  const [pref, setPref] = useState<ThemePref>('system');
-  const [system, setSystem] = useState<ColorSchemeName>(Appearance.getColorScheme());
 
-  useEffect(() => {
-    const sub = Appearance.addChangeListener(({ colorScheme }) => setSystem(colorScheme));
-    return () => sub.remove();
-  }, []);
+  const [pref, setPref] = useState<ThemeName>(DEFAULT_PREF);
 
+  // Load user preference (and normalize away any legacy 'system'/'light'/'dark')
   useEffect(() => {
     (async () => {
       if (!user) return;
       const p = await getUserPrefs(user.uid);
-      if (p?.theme) setPref(p.theme);
+      if (p?.theme) setPref(normalizeLegacy(p.theme));
     })();
   }, [user]);
 
-  const resolved: 'light' | 'dark' = useMemo(() => {
-    if (pref === 'light') return 'light';
-    if (pref === 'dark') return 'dark';
-    return (system ?? 'light') as 'light' | 'dark';
-  }, [pref, system]);
-
-  const themeName: ThemeName = useMemo(() => {
-    if (pref === 'system') return resolved === 'dark' ? 'dark-rose' : 'light-rose';
-    if (pref === 'light') return 'light-rose';
-    if (pref === 'dark') return 'dark-rose';
-    return pref as ThemeName;
-  }, [pref, resolved]);
-
+  const themeName: ThemeName = pref;
   const tokens = THEMES[themeName];
+  const resolved = resolveBrightness(themeName);
   const barStyle = resolved === 'dark' ? 'light' : 'dark';
 
   const value = useMemo(

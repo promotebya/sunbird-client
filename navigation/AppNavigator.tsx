@@ -8,12 +8,13 @@ import HomeScreen from '../screens/HomeScreen';
 import LoveNotesScreen from '../screens/LoveNotesScreen';
 import MemoriesScreen from '../screens/MemoriesScreen';
 import PairingScanScreen from '../screens/PairingScanScreen';
-// ❌ Removed: PointsScreen import
+import PaywallScreen from '../screens/PaywallScreen';
 import SettingsScreen from '../screens/SettingsScreen';
 import TasksScreen from '../screens/TasksScreen';
+
 import RemindersStack from './RemindersStack';
 
-import { tokens } from '../components/tokens';
+import { useTokens } from '../components/ThemeProvider';
 import useAuthListener from '../hooks/useAuthListener';
 import usePendingRemindersBadge from '../hooks/usePendingRemindersBadge';
 
@@ -23,6 +24,7 @@ const Root = createNativeStackNavigator();
 function Tabs() {
   const { user } = useAuthListener();
   const { badge } = usePendingRemindersBadge(user?.uid ?? null);
+  const t = useTokens();
 
   return (
     <Tab.Navigator
@@ -30,21 +32,21 @@ function Tabs() {
       backBehavior="history"
       screenOptions={({ route }) => ({
         headerShown: false,
-        tabBarActiveTintColor: tokens.colors.primary,
-        tabBarInactiveTintColor: tokens.colors.textDim,
+        sceneContainerStyle: { backgroundColor: t.colors.bg },
+        tabBarActiveTintColor: t.colors.primary,
+        tabBarInactiveTintColor: t.colors.textDim,
         tabBarHideOnKeyboard: true,
         tabBarStyle: {
-          backgroundColor: tokens.colors.card,
-          borderTopColor: '#E5E7EB',
+          backgroundColor: t.colors.card,
+          borderTopColor: t.colors.border,
         },
         tabBarIcon: ({ color, size }) => {
           const map: Record<string, keyof typeof Ionicons.glyphMap> = {
             Home: 'home',
             Memories: 'images',
-            // ❌ Points removed
-            Tasks: 'checkmark-done',
             Reminders: 'alarm',
             LoveNotes: 'heart',
+            Tasks: 'checkmark-done',
             Challenges: 'sparkles',
           };
           const name = map[route.name] ?? 'ellipse';
@@ -54,15 +56,14 @@ function Tabs() {
     >
       <Tab.Screen name="Home" component={HomeScreen} />
       <Tab.Screen name="Memories" component={MemoriesScreen} />
-      {/* ❌ Removed <Tab.Screen name="Points" ... /> */}
       <Tab.Screen
         name="Reminders"
         component={RemindersStack}
         options={{
           tabBarBadge: badge ?? undefined,
           tabBarBadgeStyle: {
-            backgroundColor: tokens.colors.primary,
-            color: tokens.colors.buttonTextPrimary,
+            backgroundColor: t.colors.primary,
+            color: '#fff',
           },
         }}
       />
@@ -78,9 +79,26 @@ function Tabs() {
 }
 
 export default function AppNavigator() {
+  const t = useTokens();
   return (
-    <Root.Navigator screenOptions={{ headerShown: false }}>
+    <Root.Navigator
+      screenOptions={{
+        headerShown: false,
+        contentStyle: { backgroundColor: t.colors.bg }, // ✅ fixes black background on stacks/modals
+      }}
+    >
       <Root.Screen name="Tabs" component={Tabs} />
+
+      <Root.Screen
+        name="Paywall"
+        component={PaywallScreen}
+        options={{
+          headerShown: true,
+          title: 'Premium',
+          presentation: 'modal',
+        }}
+      />
+
       <Root.Screen
         name="Settings"
         component={SettingsScreen}
@@ -91,7 +109,6 @@ export default function AppNavigator() {
         component={PairingScanScreen}
         options={{ headerShown: true, title: 'Scan code' }}
       />
-      {/* No Points route here either */}
     </Root.Navigator>
   );
 }

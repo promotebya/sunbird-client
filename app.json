@@ -1,10 +1,11 @@
 {
   "expo": {
-    "name": "LovePointsApp",
+    "name": "LovePoints",
     "slug": "LovePointsApp",
     "scheme": "lovepoints",
     "version": "1.0.0",
     "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
     "icon": "./assets/icon.png",
     "splash": {
       "image": "./assets/splash.png",
@@ -16,7 +17,8 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.yourcompany.lovepoints",
+      "bundleIdentifier": "com.promotebya.LovePointsApp",
+      "buildNumber": "1.0.0",
       "infoPlist": {
         "NSPhotoLibraryUsageDescription": "We need access to your photos to add memories.",
         "NSCameraUsageDescription": "We use your camera to capture memory photos and scan QR codes.",
@@ -25,12 +27,15 @@
       }
     },
     "android": {
-      "package": "com.yourcompany.lovepoints",
+      "package": "com.promotebya.lovepoints",
+      "versionCode": 1,
       "adaptiveIcon": {
         "foregroundImage": "./assets/icon.png",
         "backgroundColor": "#FFFFFF"
       },
       "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",
         "android.permission.CAMERA"
       ]
@@ -64,6 +69,9 @@
     "runtimeVersion": {
       "policy": "appVersion"
     },
-    "jsEngine": "hermes"
+    "jsEngine": "hermes",
+    "updates": {
+      "url": "https://u.expo.dev/d791c6d2-2f30-4b8e-b5b6-0f52eb421bf3"
+    }
   }
 }

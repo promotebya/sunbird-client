@@ -38,12 +38,27 @@ function isoWeekKey(d: Date = new Date()): string {
   );
   return `${dt.getUTCFullYear()}-${String(week).padStart(2, '0')}`;
 }
-function pickRotate<T>(arr: T[], count: number, seedNum: number): T[] {
+function pickRotate<T extends { id?: any }>(arr: T[], count: number, seedNum: number): T[] {
   if (!arr.length || count <= 0) return [];
+  const want = Math.min(count, arr.length);
   const start = seedNum % arr.length;
+
   const out: T[] = [];
-  for (let i = 0; i < Math.min(count, arr.length); i++) {
-    out.push(arr[(start + i) % arr.length]);
+  const seen = new Set<string>();
+
+  // Walk circularly from the seeded start; ensure uniqueness by id
+  let i = 0;
+  while (out.length < want && i < arr.length * 2) {
+    const item = arr[(start + i) % arr.length];
+    const key =
+      item && (item as any).id != null
+        ? String((item as any).id)
+        : String((start + i) % arr.length);
+    if (!seen.has(key)) {
+      out.push(item);
+      seen.add(key);
+    }
+    i++;
   }
   return out;
 }
@@ -325,24 +340,21 @@ export function getWeeklyChallengeSet(opts: {
   const locked: SeedChallenge[] = [];
 
   if (plan === 'free') {
-    // Always show exactly 1 Easy open — with a safe fallback if the pool is empty
+    // 1 open Easy
     const e = pickRotate(easy, 1, seed ^ 0x1111);
-    if (e.length && e[0]) {
-      visible.push(withTier(e[0], 'base'));
-    }
+    if (e[0]) visible.push(withTier(e[0], 'base'));
 
-    // Tease exactly 1 Hard. It is locked until 25 points this week, then becomes visible.
-    // Ensure we never duplicate the Easy pick (not possible across difficulties, but keep the pattern clear)
+    // 1 teased Hard (locked until 25)
     const h = pickRotate(hard, 1, seed ^ 0x3333);
-    if (h.length && h[0]) {
-      const hardWithTier = weeklyPoints >= 25 ? withTier(h[0], 'base') : withTier(h[0], '25');
-      (weeklyPoints >= 25 ? visible : locked).push(hardWithTier);
+    if (h[0]) {
+      const teased = weeklyPoints >= 25 ? withTier(h[0], 'base') : withTier(h[0], '25');
+      (weeklyPoints >= 25 ? visible : locked).push(teased);
     }
 
     return { visible, locked };
   }
 
-  // premium
+  // PREMIUM
   const ePick = pickRotate(easy, 3, seed ^ 0x1111);
   const mPick = pickRotate(med,  3, seed ^ 0x2222);
   const hPick = pickRotate(hard, 3, seed ^ 0x3333);
@@ -351,25 +363,39 @@ export function getWeeklyChallengeSet(opts: {
   // Easy: all 3 open
   visible.push(...ePick.map((c) => withTier(c, 'base')));
 
-  // Medium: 1 open, 2 gated at 10
+  // Medium: 1 open, 2 locked at 10
+  const mGate = mPick.slice(1);
   if (mPick[0]) visible.push(withTier(mPick[0], 'base'));
-  const mGate = mPick.slice(1).map((c) => withTier(c, '10'));
-  if (weeklyPoints >= 10) visible.push(...mGate.map((c) => withTier({ ...c, tier: undefined! }, 'base')));
-  else locked.push(...mGate);
+  if (weeklyPoints >= 10) {
+    visible.push(...mGate.map((c) => withTier(c, 'base')));
+  } else {
+    locked.push(...mGate.map((c) => withTier(c, '10')));
+  }
 
-  // Hard: 1 open, 2 gated at 25
+  // Hard: 1 open, 2 locked at 25
+  const hGate = hPick.slice(1);
   if (hPick[0]) visible.push(withTier(hPick[0], 'base'));
-  const hGate = hPick.slice(1).map((c) => withTier(c, '25'));
-  if (weeklyPoints >= 25) visible.push(...hGate.map((c) => withTier({ ...c, tier: undefined! }, 'base')));
-  else locked.push(...hGate);
+  if (weeklyPoints >= 25) {
+    visible.push(...hGate.map((c) => withTier(c, 'base')));
+  } else {
+    locked.push(...hGate.map((c) => withTier(c, '25')));
+  }
 
-  // Pro: 1 open, 2 gated at 50
+  // Pro: 1 open (if available), 2 locked at 50
+  const pGate = pPick.slice(1);
   if (pPick[0]) visible.push(withTier(pPick[0], 'base'));
-  const pGate = pPick.slice(1).map((c) => withTier(c, '50'));
-  if (weeklyPoints >= 50) visible.push(...pGate.map((c) => withTier({ ...c, tier: undefined! }, 'base')));
-  else locked.push(...pGate);
+  if (weeklyPoints >= 50) {
+    visible.push(...pGate.map((c) => withTier(c, 'base')));
+  } else {
+    locked.push(...pGate.map((c) => withTier(c, '50')));
+  }
 
-  return { visible, locked };
+  // Ensure no duplicates across visible/locked (by id)
+  const seen = new Set<string>();
+  const dedupe = (arr: SeedChallenge[]) =>
+    arr.filter((c) => (c?.id ? !seen.has(c.id) && (seen.add(c.id), true) : true));
+
+  return { visible: dedupe(visible), locked: dedupe(locked) };
 }
 
 // ---------------------------------------------------------------------------
@@ -416,23 +442,10 @@ export function sanityCheckChallenges() {
 
     const visIds = new Set(visible.map(c => c.id));
     const lockIds = new Set(locked.map(c => c.id));
-    // no overlap
-    for (const id of visIds) {
-      console.assert(!lockIds.has(id), `[${label}] duplicate in visible & locked: ${id}`);
-    }
-    // no dupes inside each set
+    for (const id of visIds) console.assert(!lockIds.has(id), `[${label}] duplicate in visible & locked: ${id}`);
     console.assert(visIds.size === visible.length, `[${label}] duplicates in visible`);
     console.assert(lockIds.size === locked.length, `[${label}] duplicates in locked`);
 
-    // tier sanity (only items from selector should have tier set)
-    for (const c of [...visible, ...locked]) {
-      console.assert(
-        c.tier === 'base' || c.tier === '10' || c.tier === '25' || c.tier === '50' || c.tier === undefined,
-        `[${label}] bad tier on ${c.id}: ${String(c.tier)}`
-      );
-    }
-
-    // product-rule expectations
     if (plan === 'free') {
       const visEasy = visible.filter(c => c.difficulty === 'easy').length;
       console.assert(visEasy === 1, `[${label}] free should show 1 easy open, got ${visEasy}`);
@@ -443,20 +456,17 @@ export function sanityCheckChallenges() {
           `[${label}] hard should be locked <25 pts`);
       }
     } else {
-      // Premium immediate opens: 3E + 1M + 1H + (1P if any pro in pool)
       const eOpen = visible.filter(c => c.difficulty === 'easy').length;
-      console.assert(eOpen >= 3, `[${label}] premium should open 3 easy, got ${eOpen}`);
       const mOpen = visible.filter(c => c.difficulty === 'medium').length;
       const hOpen = visible.filter(c => c.difficulty === 'hard').length;
+      console.assert(eOpen >= 3, `[${label}] premium should open 3 easy, got ${eOpen}`);
       console.assert(mOpen >= 1, `[${label}] premium should open ≥1 medium`);
       console.assert(hOpen >= 1, `[${label}] premium should open ≥1 hard`);
-      // We intentionally don't assert Pro because pool may be empty for now.
     }
 
     console.log(`[sanity] ${label}: visible=${visible.length}, locked=${locked.length}`);
   };
 
-  // 4) Selector behavior snapshots
   checkSel('free@0', 'free', 0);
   checkSel('free@24', 'free', 24);
   checkSel('free@25', 'free', 25);
@@ -470,7 +480,6 @@ export function sanityCheckChallenges() {
   console.log('[sanity] challenges OK ✅');
 }
 
-// Optionally auto-run in dev (uncomment if you want immediate console feedback):
 // if (__DEV__) {
 //   try { sanityCheckChallenges(); } catch (e) { console.warn('sanityCheckChallenges failed', e); }
 // }

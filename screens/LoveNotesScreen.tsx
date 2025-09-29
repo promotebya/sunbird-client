@@ -19,7 +19,6 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import Button from '../components/Button';
 import Card from '../components/Card';
 import Input from '../components/Input';
-import sharedStyles from '../components/sharedStyles';
 import ThemedText from '../components/ThemedText';
 import { useTokens, type ThemeTokens } from '../components/ThemeProvider';
 
@@ -128,7 +127,10 @@ const LoveNotesScreen: React.FC = () => {
   );
 
   return (
-    <SafeAreaView style={[sharedStyles.screen, { paddingTop: t.spacing.md }]} edges={['top', 'left', 'right']}>
+    <SafeAreaView
+      style={{ flex: 1, backgroundColor: t.colors.bg, paddingTop: t.spacing.md }}
+      edges={['top', 'left', 'right']}
+    >
       <KeyboardAvoidingView behavior={Platform.select({ ios: 'padding', android: undefined })} style={{ flex: 1 }}>
         {/* Header */}
         <View style={s.header}>
@@ -152,7 +154,7 @@ const LoveNotesScreen: React.FC = () => {
               onSubmitEditing={sendNote}
             />
             <View style={{ flexDirection: 'row', gap: 12, marginTop: t.spacing.md }}>
-              <Button label="Send" onPress={sendNote} />
+              <Button label="Send" onPress={sendNote} disabled={!text.trim()} />
               <Button label="Send via Messages…" variant="outline" onPress={shareViaMessages} />
             </View>
           </Card>
@@ -166,7 +168,13 @@ const LoveNotesScreen: React.FC = () => {
           </ThemedText>
           <View style={s.suggestWrap}>
             {SUGGESTIONS.map((sug) => (
-              <Pressable key={sug} onPress={() => onPickSuggestion(sug)} style={s.suggestChip}>
+              <Pressable
+                key={sug}
+                onPress={() => onPickSuggestion(sug)}
+                style={s.suggestChip}
+                accessibilityRole="button"
+                accessibilityLabel={`Suggestion: ${sug}`}
+              >
                 <ThemedText variant="label">{sug}</ThemedText>
               </Pressable>
             ))}
@@ -194,7 +202,7 @@ const styles = (t: ThemeTokens) =>
       width: 36,
       height: 36,
       borderRadius: 10,
-      backgroundColor: withAlpha(t.colors.primary, 0.08), // ← theme-aware tint (matches Home)
+      backgroundColor: withAlpha(t.colors.primary, 0.08), // theme-aware tint (matches Home)
       alignItems: 'center',
       justifyContent: 'center',
     },
@@ -205,13 +213,15 @@ const styles = (t: ThemeTokens) =>
       gap: t.spacing.s as number,
       marginTop: t.spacing.md,
     },
+
+    // ✅ theme-safe neutral chip (replaces hard-coded pink/gray)
     suggestChip: {
       paddingHorizontal: t.spacing.md,
       paddingVertical: 10,
       borderRadius: 999,
-      backgroundColor: '#ECEFF3',
+      backgroundColor: t.colors.card,
       borderWidth: 1,
-      borderColor: '#E8EAF0',
+      borderColor: t.colors.border,
     },
   });
 

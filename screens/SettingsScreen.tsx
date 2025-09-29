@@ -4,14 +4,21 @@ import { useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import * as Notifications from 'expo-notifications';
 import React, { useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, ScrollView, Share, StyleSheet, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Alert,
+  Pressable,
+  ScrollView,
+  Share,
+  StyleSheet,
+  View,
+} from 'react-native';
 
 import Button from '../components/Button';
 import Card from '../components/Card';
 import PairingQR from '../components/PairingQR';
-import sharedStyles from '../components/sharedStyles';
 import ThemedText from '../components/ThemedText';
-import { useThemeContext } from '../components/ThemeProvider';
+import { useThemeContext, useTokens } from '../components/ThemeProvider';
 import tokens from '../components/tokens';
 
 import useAuthListener from '../hooks/useAuthListener';
@@ -28,6 +35,10 @@ import { auth } from '../firebaseConfig';
 /** Local alias to avoid TS namespace issues */
 type SimplePermissionStatus = 'granted' | 'denied' | 'undetermined' | 'checking';
 
+/* ──────────────────────────────────────────────────────────── */
+/* Small primitives                                             */
+/* ──────────────────────────────────────────────────────────── */
+
 const Row = ({
   icon,
   title,
@@ -40,37 +51,53 @@ const Row = ({
   subtitle?: string;
   right?: React.ReactNode;
   onPress?: () => void;
-}) => (
-  <Pressable onPress={onPress} style={styles.row}>
-    <View style={styles.rowLeft}>
-      {icon ? <Ionicons name={icon} size={22} color={tokens.colors.textDim} style={{ marginRight: 10 }} /> : null}
-      <View style={{ flex: 1 }}>
-        <ThemedText variant="title">{title}</ThemedText>
-        {subtitle ? <ThemedText variant="caption" color={tokens.colors.textDim}>{subtitle}</ThemedText> : null}
+}) => {
+  const t = useTokens();
+  return (
+    <Pressable onPress={onPress} style={styles.row}>
+      <View style={styles.rowLeft}>
+        {icon ? (
+          <Ionicons name={icon} size={22} color={t.colors.textDim} style={{ marginRight: 10 }} />
+        ) : null}
+        <View style={{ flex: 1 }}>
+          <ThemedText variant="title">{title}</ThemedText>
+          {subtitle ? (
+            <ThemedText variant="caption" color={t.colors.textDim}>
+              {subtitle}
+            </ThemedText>
+          ) : null}
+        </View>
       </View>
-    </View>
-    <View style={{ marginLeft: 10 }}>{right}</View>
-  </Pressable>
-);
+      <View style={{ marginLeft: 10 }}>{right}</View>
+    </Pressable>
+  );
+};
 
 const Badge = ({ label, color, bg }: { label: string; color?: string; bg?: string }) => (
   <View style={[styles.badge, { backgroundColor: bg ?? '#EEF2FF' }]}>
-    <ThemedText variant="label" color={color ?? '#3730A3'}>{label}</ThemedText>
+    <ThemedText variant="label" color={color ?? '#3730A3'}>
+      {label}
+    </ThemedText>
   </View>
 );
 
 /** Small text-style button to mimic a "link" */
-const LinkButton = ({ title, onPress }: { title: string; onPress: () => void }) => (
-  <Pressable onPress={onPress} style={styles.linkBtn}>
-    <ThemedText variant="button" color={tokens.colors.primary}>{title}</ThemedText>
-  </Pressable>
-);
+const LinkButton = ({ title, onPress }: { title: string; onPress: () => void }) => {
+  const t = useTokens();
+  return (
+    <Pressable onPress={onPress} style={styles.linkBtn}>
+      <ThemedText variant="button" color={t.colors.primary}>
+        {title}
+      </ThemedText>
+    </Pressable>
+  );
+};
 
-/** Theme picker row */
-const ThemeRow = ({ label, value }: {
-  label: string;
-  value: 'system' | 'light-rose' | 'dark-rose' | 'ocean' | 'forest' | 'mono' | 'high-contrast' | 'light' | 'dark';
-}) => {
+/** Theme picker row – trimmed list (no “system”) */
+type AllowedTheme = 'light-rose' | 'ocean' | 'forest' | 'mono';
+
+const ThemeRow = ({ label, value }: { label: string; value: AllowedTheme }) => {
+  const t = useTokens();
   const { pref, setPref } = useThemeContext();
   const selected = pref === value;
   return (
@@ -78,14 +105,18 @@ const ThemeRow = ({ label, value }: {
       icon={selected ? 'color-palette' : undefined}
       title={label}
       subtitle={selected ? 'Selected' : undefined}
-      right={selected ? <Ionicons name="checkmark" size={18} color={tokens.colors.primary} /> : null}
-      onPress={() => setPref(value as any)}
+      right={selected ? <Ionicons name="checkmark" size={18} color={t.colors.primary} /> : null}
+      onPress={() => setPref(value)}
     />
   );
 };
 
+/* ──────────────────────────────────────────────────────────── */
+
 const SettingsScreen: React.FC = () => {
   const nav = useNavigation<any>();
+  const t = useTokens();
+
   const { user } = useAuthListener();
   const partnerUid = usePartnerUid(user?.uid ?? null);
   const [pairId, setPairId] = useState<string | null>(null);
@@ -157,28 +188,27 @@ const SettingsScreen: React.FC = () => {
 
   async function onRedeemPrompt() {
     if (!user) return;
-    // iOS only; Android fallback could be a small Input modal/screen
-    // @ts-ignore - Alert.prompt is iOS only
-    Alert.prompt?.(
-      'Enter pairing code',
-      'Paste the code you received to link accounts.',
-      async (code: string) => {
-        if (!code) return;
-        try {
-          await redeemPairCode(user.uid, code.trim());
-          Alert.alert('Linked', 'You are now linked 💞');
-        } catch (e: any) {
-          Alert.alert('Could not link', e?.message ?? 'Try again.');
-        }
+    // iOS-only convenience; Android could show a small input dialog/screen
+    // @ts-ignore
+    Alert.prompt?.('Enter pairing code', 'Paste the code you received to link accounts.', async (code: string) => {
+      if (!code) return;
+      try {
+        await redeemPairCode(user.uid, code.trim());
+        Alert.alert('Linked', 'You are now linked 💞');
+      } catch (e: any) {
+        Alert.alert('Could not link', e?.message ?? 'Try again.');
       }
-    );
+    });
   }
 
   async function requestNotifications() {
     const res = await Notifications.requestPermissionsAsync();
     setNotifStatus(res.status as SimplePermissionStatus);
     if (res.status !== 'granted') {
-      showOpenSettingsAlert('Notifications permission', 'Enable notifications in Settings for reminders and love notes.');
+      showOpenSettingsAlert(
+        'Notifications permission',
+        'Enable notifications in Settings for reminders and love notes.'
+      );
     }
   }
 
@@ -230,17 +260,26 @@ const SettingsScreen: React.FC = () => {
   const showCamOpenSettings = camStatus === 'denied';
 
   return (
-    <ScrollView contentContainerStyle={{ padding: tokens.spacing.md }} style={sharedStyles.screen}>
-      <ThemedText variant="display" style={{ marginBottom: tokens.spacing.md }}>Settings</ThemedText>
+    <ScrollView
+      style={{ flex: 1, backgroundColor: t.colors.bg }}
+      contentContainerStyle={{ padding: tokens.spacing.md }}
+    >
+      <ThemedText variant="display" style={{ marginBottom: tokens.spacing.md }}>
+        Settings
+      </ThemedText>
 
       {/* Partner linking */}
       <Card>
         <View style={styles.sectionHeader}>
           <ThemedText variant="h2">Partner linking</ThemedText>
-          {linked ? <Badge label="Linked" bg="#ECFDF5" color="#065F46" /> : <Badge label="Not linked" bg="#FEF2F2" color="#991B1B" />}
+          {linked ? (
+            <Badge label="Linked" bg="#ECFDF5" color="#065F46" />
+          ) : (
+            <Badge label="Not linked" bg="#FEF2F2" color="#991B1B" />
+          )}
         </View>
 
-        <ThemedText variant="caption" color={tokens.colors.textDim} style={{ marginBottom: tokens.spacing.s }}>
+        <ThemedText variant="caption" color={t.colors.textDim} style={{ marginBottom: tokens.spacing.s }}>
           Link with your partner to share points, tasks, memories, and notes.
         </ThemedText>
 
@@ -262,7 +301,9 @@ const SettingsScreen: React.FC = () => {
         {!linked && pairInfo?.code ? (
           <>
             <View style={styles.codeBox}>
-              <ThemedText variant="display" center>{pairInfo.code}</ThemedText>
+              <ThemedText variant="display" center>
+                {pairInfo.code}
+              </ThemedText>
             </View>
 
             <PairingQR code={pairInfo.code} />
@@ -291,7 +332,12 @@ const SettingsScreen: React.FC = () => {
         />
         {showNotifOpenSettings ? (
           <View style={styles.quickRow}>
-            <LinkButton title="Open Settings" onPress={() => showOpenSettingsAlert('Notifications', 'Open system settings to enable notifications.')} />
+            <LinkButton
+              title="Open Settings"
+              onPress={() =>
+                showOpenSettingsAlert('Notifications', 'Open system settings to enable notifications.')
+              }
+            />
           </View>
         ) : null}
 
@@ -304,7 +350,10 @@ const SettingsScreen: React.FC = () => {
         />
         {showLibOpenSettings ? (
           <View style={styles.quickRow}>
-            <LinkButton title="Open Settings" onPress={() => showOpenSettingsAlert('Photos', 'Open system settings to allow photo access.')} />
+            <LinkButton
+              title="Open Settings"
+              onPress={() => showOpenSettingsAlert('Photos', 'Open system settings to allow photo access.')}
+            />
           </View>
         ) : null}
 
@@ -317,35 +366,37 @@ const SettingsScreen: React.FC = () => {
         />
         {showCamOpenSettings ? (
           <View style={styles.quickRow}>
-            <LinkButton title="Open Settings" onPress={() => showOpenSettingsAlert('Camera', 'Open system settings to allow camera access.')} />
+            <LinkButton
+              title="Open Settings"
+              onPress={() => showOpenSettingsAlert('Camera', 'Open system settings to allow camera access.')}
+            />
           </View>
         ) : null}
       </Card>
 
-      {/* Appearance */}
+      {/* Appearance — no “Follow system” */}
       <Card style={{ marginTop: tokens.spacing.md }}>
         <View style={styles.sectionHeader}>
           <ThemedText variant="h2">Appearance</ThemedText>
           <Badge label="Live" bg="#EEF2FF" color="#3730A3" />
         </View>
 
-        <ThemeRow label="Follow system" value="system" />
         <ThemeRow label="Light (Rose)" value="light-rose" />
-        <ThemeRow label="Dark (Rose)" value="dark-rose" />
         <ThemeRow label="Ocean" value="ocean" />
         <ThemeRow label="Forest" value="forest" />
         <ThemeRow label="Minimal (Mono)" value="mono" />
-        <ThemeRow label="High Contrast" value="high-contrast" />
       </Card>
 
       {/* Account */}
       <Card style={{ marginTop: tokens.spacing.md }}>
-        <ThemedText variant="h2" style={{ marginBottom: tokens.spacing.s }}>Account</ThemedText>
+        <ThemedText variant="h2" style={{ marginBottom: tokens.spacing.s }}>
+          Account
+        </ThemedText>
         <Row
           icon="log-out"
           title="Sign out"
           subtitle="Log out of this device"
-          right={<Ionicons name="exit-outline" size={22} color={tokens.colors.textDim} />}
+          right={<Ionicons name="exit-outline" size={22} color={t.colors.textDim} />}
           onPress={onConfirmSignOut}
         />
       </Card>
@@ -353,7 +404,7 @@ const SettingsScreen: React.FC = () => {
       {/* About */}
       <Card style={{ marginTop: tokens.spacing.md }}>
         <ThemedText variant="h2">About</ThemedText>
-        <ThemedText variant="caption" color={tokens.colors.textDim} style={{ marginTop: tokens.spacing.xs }}>
+        <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: tokens.spacing.xs }}>
           LovePoints helps couples celebrate everyday kindness with points, memories, notes, and gentle reminders.
         </ThemedText>
       </Card>
@@ -363,12 +414,16 @@ const SettingsScreen: React.FC = () => {
 
 const styles = StyleSheet.create({
   sectionHeader: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     marginBottom: tokens.spacing.s,
   },
   row: {
     paddingVertical: tokens.spacing.s,
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
   rowLeft: { flexDirection: 'row', alignItems: 'center', flex: 1 },
   badge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999 },

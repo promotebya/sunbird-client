@@ -2,14 +2,20 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { useMemo, useState } from 'react';
-import { Alert, FlatList, Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import {
+  Alert,
+  Pressable,
+  ScrollView,
+  SectionList,
+  StyleSheet,
+  View,
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import Button from '../components/Button';
 import Card from '../components/Card';
-import ClampText from '../components/ClampText';
 import ThemedText from '../components/ThemedText';
-import { tokens } from '../components/tokens';
+import { useTokens, type ThemeTokens } from '../components/ThemeProvider';
 
 import useAuthListener from '../hooks/useAuthListener';
 import usePlan from '../hooks/usePlan';
@@ -19,10 +25,15 @@ import {
   getWeeklyChallengeSet,
   type SeedChallenge,
 } from '../utils/seedchallenges';
+import { usePro } from '../utils/subscriptions';
+
+/* ---------- types & labels ---------- */
 
 type DiffTabKey = 'all' | 'easy' | 'medium' | 'hard' | 'pro';
 type DiffKey = 'easy' | 'medium' | 'hard' | 'pro';
 type CatKey = 'date' | 'kindness' | 'conversation' | 'surprise' | 'play';
+
+const ORDER: DiffKey[] = ['easy', 'medium', 'hard', 'pro'];
 
 const TABS: { key: DiffTabKey; label: string }[] = [
   { key: 'all', label: 'All' },
@@ -32,22 +43,18 @@ const TABS: { key: DiffTabKey; label: string }[] = [
   { key: 'pro', label: 'Forever & Always (pro)' },
 ];
 
-const DEFAULT_CAT_COLORS = { bg: tokens.colors.card, fg: tokens.colors.textDim } as const;
-const CAT_COLORS: Record<CatKey, { bg: string; fg: string }> = {
-  date: DEFAULT_CAT_COLORS,
-  kindness: DEFAULT_CAT_COLORS,
-  conversation: DEFAULT_CAT_COLORS,
-  surprise: DEFAULT_CAT_COLORS,
-  play: DEFAULT_CAT_COLORS,
+const DIFF_SIMPLE: Record<DiffKey, string> = {
+  easy: 'Easy',
+  medium: 'Medium',
+  hard: 'Hard',
+  pro: 'Pro',
 };
-
 const DIFF_LABEL: Record<DiffKey, string> = {
   easy: 'Tender Moments',
   medium: 'Heart to Heart',
   hard: 'Passionate Quests',
   pro: 'Forever & Always',
 };
-
 const CATEGORY_LABEL: Record<CatKey, string> = {
   date: 'Dates',
   kindness: 'Kindness',
@@ -55,28 +62,176 @@ const CATEGORY_LABEL: Record<CatKey, string> = {
   surprise: 'Surprise',
   play: 'Play',
 };
-
-const DIFF_DOT: Record<DiffKey, string> = {
-  easy: tokens.colors.primarySoft,
-  medium: tokens.colors.primarySoft,
-  hard: tokens.colors.primarySoft,
-  pro: tokens.colors.primarySoft,
+const CAT_DOT: Record<CatKey, string> = {
+  date: '#F59E0B',
+  kindness: '#10B981',
+  conversation: '#A78BFA',
+  surprise: '#F97316',
+  play: '#60A5FA',
 };
+
+/* ---------- helpers ---------- */
+
+function withAlpha(hex: string, alpha: number) {
+  const h = hex.replace('#', '');
+  const full = h.length === 3 ? h.split('').map((c) => c + c).join('') : h;
+  const a = Math.round(alpha * 255).toString(16).padStart(2, '0');
+  return `#${full}${a}`;
+}
+
+/** Normalise difficulty to our keys (accept strings or 0..3) */
+function normDiff(raw: any): DiffKey | undefined {
+  if (raw === null || raw === undefined) return undefined;
+  const n = Number(raw);
+  if (Number.isFinite(n)) return ['easy', 'medium', 'hard', 'pro'][Math.max(0, Math.min(3, n))] as DiffKey;
+  const v = String(raw).trim().toLowerCase();
+  if (!v) return undefined;
+  if (v.startsWith('e')) return 'easy';
+  if (v.startsWith('m')) return 'medium';
+  if (v.startsWith('h')) return 'hard';
+  if (v.startsWith('p')) return 'pro';
+  return undefined;
+}
+
+function extractDiffStrict(c: any): DiffKey | undefined {
+  const tried = [c?.difficulty, c?.level, c?.diff, c?.difficultyLevel, c?.difficulty_label, c?.difficultyLabel, c?.d];
+  for (const t of tried) {
+    const k = normDiff(t);
+    if (k) return k;
+  }
+  return undefined;
+}
+
+function extractTitleStrict(c: any): string | undefined {
+  return c?.title ?? c?.name ?? c?.heading ?? c?.prompt ?? c?.text ?? undefined;
+}
+function extractDescriptionStrict(c: any): string | undefined {
+  return c?.description ?? c?.summary ?? c?.body ?? c?.details ?? undefined;
+}
+function extractCategoryStrict(c: any): CatKey | undefined {
+  const candidates: Array<string | string[]> = [
+    c?.category, c?.cat, c?.type, c?.topic, c?.tag, c?.tags, c?.labels, c?.categories,
+  ];
+  const set: Record<string, CatKey> = {
+    date: 'date', dates: 'date',
+    kindness: 'kindness',
+    talk: 'conversation', conversation: 'conversation', convo: 'conversation',
+    surprise: 'surprise',
+    play: 'play',
+  };
+  for (const cand of candidates) {
+    if (Array.isArray(cand)) {
+      for (const s of cand) {
+        const key = set[String(s).trim().toLowerCase()];
+        if (key) return key;
+      }
+    } else if (cand !== undefined && cand !== null) {
+      const key = set[String(cand).trim().toLowerCase()];
+      if (key) return key;
+    }
+  }
+  return undefined;
+}
+
+function safeTitle(c: any): string {
+  return extractTitleStrict(c) ?? 'Challenge';
+}
+function safeDescription(c: any): string | undefined {
+  return extractDescriptionStrict(c);
+}
+function safeCategory(c: any): CatKey | undefined {
+  return extractCategoryStrict(c);
+}
+
+/** Build a stable, unique row key */
+function rowKey(c: any, suffix: 'V' | 'L', index: number): string {
+  const base = c?.id ?? c?.slug ?? `${safeTitle(c)}|${safeCategory(c) ?? 'na'}|${extractDiffStrict(c) ?? 'na'}`;
+  return `${String(base)}__${suffix}_${index}`;
+}
+
+/** Merge where empty values from patch DO NOT overwrite base */
+function mergePreferBase<T extends Record<string, any>>(base: T, patch: Partial<T>): T {
+  const out: any = { ...base };
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === undefined || v === null) continue;
+    if (typeof v === 'string' && v.trim() === '') continue;
+    if (Array.isArray(v) && v.length === 0) continue;
+    out[k] = v;
+  }
+  return out as T;
+}
+
+function Clamp({
+  text,
+  lines = 4,
+  dimColor,
+}: {
+  text: string;
+  lines?: number;
+  dimColor: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [showToggle, setShowToggle] = useState(false);
+  const onTextLayout = (e: any) => {
+    const n = e?.nativeEvent?.lines?.length ?? 0;
+    if (n > lines) setShowToggle(true);
+  };
+  return (
+    <View>
+      <ThemedText
+        variant="body"
+        color={dimColor}
+        style={{ marginTop: 4 }}
+        numberOfLines={expanded ? undefined : lines}
+        onTextLayout={onTextLayout}
+      >
+        {text}
+      </ThemedText>
+      {showToggle && (
+        <Pressable
+          onPress={() => setExpanded((v) => !v)}
+          accessibilityRole="button"
+          style={{ marginTop: 6 }}
+        >
+          <ThemedText variant="label" color={dimColor}>
+            {expanded ? 'Show less' : 'Read more'}
+          </ThemedText>
+        </Pressable>
+      )}
+    </View>
+  );
+}
+
+function lockMessage(plan: 'free' | 'premium', c: SeedChallenge): string {
+  const tier = (c as any)?.tier as 'base' | '10' | '25' | '50' | undefined;
+  const d = extractDiffStrict(c);
+  if (plan === 'free' && (tier === 'base' || tier === undefined) && d && d !== 'easy') {
+    return 'Premium required';
+  }
+  if (tier === '10') return 'Needs 10+ pts';
+  if (tier === '25') return 'Needs 25+ pts';
+  if (tier === '50') return 'Needs 50+ pts';
+  return 'Locked';
+}
+
+/* ---------- screen ---------- */
 
 export default function ChallengesScreen() {
   const nav = useNavigation<any>();
   const insets = useSafeAreaInsets();
-  const { user } = useAuthListener();
-  const plan = usePlan(user?.uid);
-  const { total, weekly } = usePointsTotal(user?.uid);
+  const t = useTokens();
+  const s = useMemo(() => styles(t), [t]);
 
-  // Safe defaults to protect first render / bad pool states
-  const safePlan: 'free' | 'premium' = plan === 'premium' ? 'premium' : 'free';
-  const weeklySafe: number = Number.isFinite(weekly as any) ? Number(weekly) : 0;
+  const { user } = useAuthListener();
+  const planFromHook = usePlan(user?.uid);
+  const { total, weekly } = usePointsTotal(user?.uid);
+  const { hasPro } = usePro();
+
+  const safePlan: 'free' | 'premium' = hasPro || planFromHook === 'premium' ? 'premium' : 'free';
+  const weeklySafe = Number.isFinite(weekly as any) ? Number(weekly) : 0;
 
   const [tab, setTab] = useState<DiffTabKey>('all');
 
-  // Selection from seeded helper (guarantees 1 Easy visible for free plan)
   const selection = useMemo(
     () =>
       getWeeklyChallengeSet({
@@ -88,13 +243,23 @@ export default function ChallengesScreen() {
     [safePlan, weeklySafe, user?.uid]
   );
 
-  // Fallback: ensure at least one card shows even if pool/selector glitch
-  const selectionSafe = useMemo(() => {
-    const total = selection.visible.length + selection.locked.length;
-    if (total > 0) return selection;
+  // Index the pool by id for decoration.
+  const POOL_BY_ID = useMemo(() => {
+    const m = new Map<string, any>();
+    for (const p of CHALLENGE_POOL) {
+      const id = (p as any)?.id;
+      if (id !== undefined && id !== null) m.set(String(id), p);
+    }
+    return m;
+  }, []);
 
-    const anyEasy = CHALLENGE_POOL.find((c) => (c as any).difficulty === 'easy');
-    const anyHard = CHALLENGE_POOL.find((c) => (c as any).difficulty === 'hard');
+  // Fallback if selector produced nothing
+  const selectionSafe = useMemo(() => {
+    const totalCount = selection.visible.length + selection.locked.length;
+    if (totalCount > 0) return selection;
+
+    const anyEasy = CHALLENGE_POOL.find((c) => extractDiffStrict(c) === 'easy');
+    const anyHard = CHALLENGE_POOL.find((c) => extractDiffStrict(c) === 'hard');
     const vis: SeedChallenge[] = [];
     const lock: SeedChallenge[] = [];
     if (anyEasy) vis.push({ ...(anyEasy as SeedChallenge), tier: 'base' as const });
@@ -105,410 +270,321 @@ export default function ChallengesScreen() {
     return { visible: vis, locked: lock };
   }, [selection, safePlan]);
 
-  // Dev visibility diagnostics
-  if (__DEV__) {
-    const poolLen = CHALLENGE_POOL.length;
-    const easyCount = CHALLENGE_POOL.filter((c) => (c as any).difficulty === 'easy').length;
-    const hardCount = CHALLENGE_POOL.filter((c) => (c as any).difficulty === 'hard').length;
-    // eslint-disable-next-line no-console
-    console.log('[ChallengesScreen] plan=%s weekly=%s pool=%d easy=%d hard=%d visible=%d locked=%d',
-      safePlan, weeklySafe, poolLen, easyCount, hardCount,
-      selectionSafe.visible.length, selectionSafe.locked.length);
-  }
+  /* ---------- rows & sections ---------- */
 
-  const listToShow = useMemo(() => {
-    const src = selectionSafe.visible.concat(selectionSafe.locked);
-    return src.filter((c) => (tab === 'all' ? true : (c as any).difficulty === tab));
-  }, [selectionSafe, tab]);
+  type Row = { id: string; c: SeedChallenge; locked: boolean };
 
-  const PREMIUM_BASE_OPEN = 6; // 3E + 1M + 1H + 1P
-  const currentVisibleCount = selectionSafe.visible.length;
-  const moreWithPremiumNow = Math.max(0, PREMIUM_BASE_OPEN - currentVisibleCount);
+  const allRows = useMemo<Row[]>(() => {
+    const decorate = (c: SeedChallenge) => {
+      // decorate strictly by id; never guess by category/difficulty
+      const id = (c as any)?.id;
+      const base = id != null ? POOL_BY_ID.get(String(id)) : undefined;
+      if (!base) return c;
 
-  const previewCandidate = useMemo(() => {
-    const order: DiffKey[] = ['medium', 'hard', 'pro', 'easy'];
-    return order
-      .map((d) => selectionSafe.locked.find((c) => (c as any).difficulty === d))
-      .find(Boolean) ?? selectionSafe.locked[0];
-  }, [selectionSafe.locked]);
+      const merged = mergePreferBase(base, c as any);
 
-  const visibleByDiff = useMemo(() => {
-    const m: Record<DiffKey, number> = { easy: 0, medium: 0, hard: 0, pro: 0 };
-    for (const c of selectionSafe.visible) {
-      const d = (c as any).difficulty as DiffKey | undefined;
-      if (d && m[d] !== undefined) m[d] += 1;
+      (merged as any).difficulty  = extractDiffStrict(c) ?? extractDiffStrict(base);
+      (merged as any).title       = extractTitleStrict(c) ?? extractTitleStrict(base);
+      (merged as any).description = extractDescriptionStrict(c) ?? extractDescriptionStrict(base);
+      (merged as any).category    = extractCategoryStrict(c) ?? extractCategoryStrict(base);
+
+      return merged as SeedChallenge;
+    };
+
+    const vis: Row[] = selectionSafe.visible.map((c, i) => {
+      const merged = decorate(c);
+      return { id: rowKey(merged, 'V', i), c: merged, locked: false };
+    });
+
+    const lock: Row[] = selectionSafe.locked.map((c, i) => {
+      const merged = decorate(c);
+      return { id: rowKey(merged, 'L', i), c: merged, locked: true };
+    });
+
+    return [...vis, ...lock];
+  }, [selectionSafe.visible, selectionSafe.locked, POOL_BY_ID]);
+
+  const rowsByDiff = useMemo<Record<DiffKey, Row[]>>(() => {
+    const acc: Record<DiffKey, Row[]> = { easy: [], medium: [], hard: [], pro: [] };
+    for (const r of allRows) {
+      const d = extractDiffStrict(r.c) ?? 'easy';
+      acc[d].push(r);
     }
-    return m;
-  }, [selectionSafe.visible]);
+    return acc;
+  }, [allRows]);
+
+  const sections = useMemo(() => {
+    const wanted = tab === 'all' ? ORDER : ([tab] as DiffKey[]);
+    return wanted
+      .map((d) => ({
+        key: `sec_${d}`,
+        title: `${DIFF_SIMPLE[d]} — ${DIFF_LABEL[d]}`,
+        data: rowsByDiff[d],
+      }))
+      .filter((sec) => sec.data.length > 0);
+  }, [rowsByDiff, tab]);
+
+  /* ---------- legend (visible only) ---------- */
 
   const visibleByCat = useMemo(() => {
-    const m: Record<CatKey, number> = {
-      date: 0,
-      kindness: 0,
-      conversation: 0,
-      surprise: 0,
-      play: 0,
-    };
-    for (const c of selectionSafe.visible) {
-      const k = (c as any).category as CatKey | undefined;
-      if (k && m[k] !== undefined) m[k] += 1;
+    const m: Record<CatKey, number> = { date: 0, kindness: 0, conversation: 0, surprise: 0, play: 0 };
+    for (const r of allRows) {
+      if (!r.locked) {
+        const k = safeCategory(r.c);
+        if (k) m[k] += 1;
+      }
     }
     return m;
-  }, [selectionSafe.visible]);
+  }, [allRows]);
 
-  function isLocked(c: SeedChallenge) {
-    return !selectionSafe.visible.some((v) => v.id === c.id);
-  }
+  /* ---------- actions ---------- */
 
-  function openPaywall() {
+  function buyPremium(plan: 'monthly' | 'yearly') {
     try {
-      nav.navigate('Paywall');
+      (nav.getParent?.() ?? nav).navigate('Paywall', { plan });
     } catch {
-      Alert.alert('Premium', 'Coming soon ✨');
+      Alert.alert('Premium', 'Purchases are coming soon ✨');
     }
   }
 
+  /* ---------- header ---------- */
+
   const Header = (
-    <View style={styles.header}>
+    <View style={s.header}>
       <ThemedText variant="display">Challenges</ThemedText>
-      <ThemedText variant="subtitle" color={tokens.colors.textDim}>
+      <ThemedText variant="subtitle" color={t.colors.textDim}>
         Total points: {total}
       </ThemedText>
 
-      {/* Difficulty tabs (compact, horizontal scroll) */}
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.chips}
-      >
-        {TABS.map((t) => {
-          const active = t.key === tab;
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.chips}>
+        {TABS.map((tabDef) => {
+          const active = tabDef.key === tab;
           return (
             <Pressable
-              key={t.key}
-              onPress={() => setTab(t.key)}
-              style={[styles.chip, active && styles.chipActive]}
+              key={tabDef.key}
+              onPress={() => setTab(tabDef.key)}
+              style={[s.chip, active && { backgroundColor: t.colors.primary, borderColor: t.colors.primary }]}
               accessibilityRole="button"
             >
-              <ThemedText
-                variant="caption"
-                color={active ? tokens.colors.buttonTextPrimary : tokens.colors.textDim}
-              >
-                {t.label}
+              <ThemedText variant="caption" color={active ? '#fff' : t.colors.textDim}>
+                {tabDef.label}
               </ThemedText>
             </Pressable>
           );
         })}
       </ScrollView>
 
-      {/* Tiny category legend */}
-      <View style={styles.legendRow} accessibilityRole="text">
+      <View style={s.legendRow} accessibilityRole="text">
         {(['date','kindness','conversation','surprise','play'] as CatKey[]).map((k) => (
-          <View key={k} style={styles.legendItem}>
-            <View style={[styles.legendDot, { backgroundColor: tokens.colors.cardBorder }]} />
-            <ThemedText variant="caption" color={tokens.colors.textDim}>
+          <View key={k} style={s.legendItem}>
+            <View style={[s.legendDot, { backgroundColor: CAT_DOT[k] }]} />
+            <ThemedText variant="caption" color={t.colors.textDim}>
               {CATEGORY_LABEL[k]} {visibleByCat[k] ? `· ${visibleByCat[k]}` : ''}
             </ThemedText>
           </View>
         ))}
       </View>
-
-      {/* Plan banner */}
-      {safePlan === 'free' ? null : (
-        <View style={styles.tipBanner}>
-          <Ionicons name="trophy" size={16} color={tokens.colors.primaryDark} />
-          <ThemedText variant="label" color={tokens.colors.primaryDark} style={{ marginLeft: 8 }}>
-            Open now: 3 Easy + 1 Medium + 1 Hard + 1 Pro. Earn points to unlock even more.
-          </ThemedText>
-        </View>
-      )}
     </View>
   );
+
+  /* ---------- render ---------- */
 
   return (
     <View
-      style={[
-        styles.screen,
-        {
-          paddingTop: insets.top + tokens.spacing.md,
-          paddingBottom: insets.bottom + 12,
-          paddingHorizontal: tokens.spacing.lg,
-        },
-      ]}
+      style={{
+        flex: 1,
+        backgroundColor: t.colors.bg,
+        paddingTop: insets.top + t.spacing.md,
+        paddingBottom: insets.bottom + 12,
+        paddingHorizontal: t.spacing.lg,
+      }}
     >
-      <FlatList
+      <SectionList
+        sections={sections}
+        keyExtractor={(item) => item.id}
         ListHeaderComponent={Header}
+        renderSectionHeader={({ section }) => (
+          <View style={s.sectionHeader}>
+            <ThemedText variant="h2">{section.title}</ThemedText>
+          </View>
+        )}
+        ItemSeparatorComponent={() => <View style={{ height: t.spacing.s }} />}
+        SectionSeparatorComponent={() => <View style={{ height: t.spacing.s }} />}
+        stickySectionHeadersEnabled={false}
+        contentContainerStyle={{ paddingBottom: t.spacing.xl }}
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingBottom: tokens.spacing.xl }}
-        data={listToShow}
-        keyExtractor={(i) => i.id}
-        ItemSeparatorComponent={() => <View style={{ height: tokens.spacing.s }} />}
         renderItem={({ item }) => {
-          const locked = isLocked(item);
-          const cat = CAT_COLORS[item.category as CatKey] ?? DEFAULT_CAT_COLORS;
-          const diffLabel = DIFF_LABEL[((item as any).difficulty as DiffKey) ?? 'easy'];
+          const c: any = item.c;
+          const locked = item.locked;
+          const dKey = extractDiffStrict(c) ?? 'easy';
+          const diffLabel = DIFF_LABEL[dKey];
+          const catKey = safeCategory(c);
+          const title = safeTitle(c);
+          const desc = safeDescription(c);
 
           return (
-            <Card style={styles.card}>
-              <View style={styles.row}>
-                <View style={styles.iconBubble}>
-                  <Ionicons name="sparkles" size={18} color={tokens.colors.buttonTextPrimary} />
+            <Card style={s.card}>
+              <View style={s.row}>
+                <View style={s.iconBubble}>
+                  <Ionicons name="sparkles" size={18} color={t.colors.primary} />
                 </View>
-
                 <View style={{ flex: 1 }}>
-                  <ThemedText variant="title">{item.title}</ThemedText>
-                  {!locked && (
-                    <>
-                      <ClampText initialLines={4}>{item.description}</ClampText>
+                  <ThemedText variant="title">{title}</ThemedText>
 
-                      <View style={styles.metaRow}>
-                        <View style={[styles.metaPill, { backgroundColor: cat.bg }]}> 
-                          <ThemedText variant="caption" color={cat.fg}>
-                            {item.category}
-                          </ThemedText>
-                        </View>
-                        <View style={[styles.metaPill, styles.levelPill]}>
-                          <ThemedText variant="caption" color={tokens.colors.primaryDark}>
+                  {!locked ? (
+                    <>
+                      {!!desc && <Clamp text={desc} lines={4} dimColor={t.colors.textDim} />}
+
+                      <View style={s.metaRow}>
+                        {!!catKey && (
+                          <View style={s.metaPill}>
+                            <ThemedText variant="caption" color={t.colors.textDim}>
+                              {CATEGORY_LABEL[catKey]}
+                            </ThemedText>
+                          </View>
+                        )}
+                        <View style={[s.metaPill, s.levelPill]}>
+                          <ThemedText variant="caption" color={t.colors.primary}>
                             {diffLabel}
                           </ThemedText>
                         </View>
-                        <ThemedText variant="caption" color={tokens.colors.textDim}>
-                          {` • +${item.points} pts`}
-                        </ThemedText>
+                        {typeof c?.points === 'number' && (
+                          <ThemedText variant="caption" color={t.colors.textDim}>
+                            {` • +${c.points} pts`}
+                          </ThemedText>
+                        )}
                       </View>
+
+                      <Button label="Start challenge" onPress={() => {}} style={{ marginTop: t.spacing.md }} />
                     </>
+                  ) : (
+                    <View style={{ marginTop: t.spacing.s }}>
+                      <Pressable
+                        onPress={() => {
+                          const msg = lockMessage(safePlan, c);
+                          if (msg.includes('Premium')) buyPremium('monthly');
+                        }}
+                        style={s.lockBtn}
+                        accessibilityRole="button"
+                      >
+                        <Ionicons name="lock-closed" size={16} color={t.colors.textDim} />
+                        <ThemedText variant="label" color={t.colors.textDim} style={{ marginLeft: 8 }}>
+                          {lockMessage(safePlan, c)}
+                        </ThemedText>
+                      </Pressable>
+                    </View>
                   )}
                 </View>
               </View>
-
-              {locked ? (
-                <Pressable
-                  onPress={() => {
-                    const msg = lockMessage(safePlan, item);
-                    if (msg.includes('Premium')) openPaywall();
-                  }}
-                  style={styles.lockBtn}
-                  accessibilityRole="button"
-                >
-                  <Ionicons name="lock-closed" size={16} color={tokens.colors.textDim} />
-                  <ThemedText variant="label" color={tokens.colors.textDim} style={{ marginLeft: 8 }}>
-                    {lockMessage(safePlan, item)}
-                  </ThemedText>
-                </Pressable>
-              ) : (
-                <Button
-                  label="Start challenge"
-                  onPress={() => {
-                    // TODO: nav.navigate('ChallengeDetail', { id: item.id })
-                  }}
-                  style={{ marginTop: tokens.spacing.md }}
-                />
-              )}
             </Card>
           );
         }}
-        ListFooterComponent={
-          safePlan === 'free' ? (
-            <PremiumUpsell
-              lockedCount={moreWithPremiumNow}
-              previewTitle={previewCandidate?.title}
-              onPress={openPaywall}
-            />
-          ) : null
+        ListEmptyComponent={
+          <Card style={{ marginTop: t.spacing.md }}>
+            <ThemedText variant="title">No challenges here yet</ThemedText>
+            <ThemedText variant="caption" color={t.colors.textDim}>
+              Try another tab or come back later.
+            </ThemedText>
+          </Card>
         }
       />
-    </View>
-  );
-}
 
-/* ---------- helpers & subcomponents ---------- */
-
-function lockMessage(
-  plan: 'free' | 'premium',
-  item: SeedChallenge
-): string {
-  const tier = (item as any).tier as 'base' | '10' | '25' | '50' | undefined;
-  const diff = (item as any).difficulty as DiffKey | undefined;
-
-  if (plan === 'free' && tier === 'base' && diff && diff !== 'easy') {
-    return 'Premium required';
-  }
-  if (tier === '10') return 'Needs 10+ pts';
-  if (tier === '25') return 'Needs 25+ pts';
-  if (tier === '50') return 'Needs 50+ pts';
-  return 'Locked';
-}
-
-function PremiumUpsell({
-  lockedCount,
-  previewTitle,
-  onPress,
-}: {
-  lockedCount: number;
-  previewTitle?: string;
-  onPress: () => void;
-}) {
-  const deltaEasy = 2; // free has 1 easy; premium opens 3
-
-  return (
-    <Card style={[styles.card, styles.premiumTeaser]}>
-      {/* Put a11y props on a View, not Card, to avoid TS errors */}
-      <View accessible accessibilityLabel="Premium upgrade">
-        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-          <View style={styles.diamondSmall}>
-            <Ionicons name="diamond" size={14} color={tokens.colors.buttonTextPrimary} />
-          </View>
-          <ThemedText variant="title" style={{ marginLeft: 12 }}>
-            Bring your relationship to the next level
+      {hasPro ? (
+        <View style={[s.premiumBanner, { bottom: insets.bottom + 10 }]}>
+          <Ionicons name="sparkles" size={14} color="#fff" />
+          <ThemedText variant="label" color="#fff" style={{ marginLeft: 6 }}>
+            You’re Premium
           </ThemedText>
         </View>
-
-        <ThemedText variant="body" style={{ marginTop: 6 }}>
-          Go Premium to turn date night into a weekly adventure. Fresh, expert‑curated challenges you’ll actually look forward to.
-        </ThemedText>
-
-        <View style={styles.checkList}>
-          <Check text="Unlock 12 curated challenges every week" />
-          <Check text="New every week — always fun, romantic or surprising" />
-          <Check text="Explore 200+ romantic, playful & competitive challenges" />
-          <Check text="One subscription covers both partners" />
-        </View>
-
-        <ThemedText variant="caption" color={tokens.colors.textDim} style={{ marginTop: 8 }}>
-          Upgrade now and instantly unlock <ThemedText variant="caption">+{lockedCount}</ThemedText> more challenges today.
-        </ThemedText>
-
-        {previewTitle ? (
-          <View style={styles.previewRow}>
-            <Ionicons name="lock-closed" size={14} color={tokens.colors.textDim} />
-            <ThemedText variant="caption" color={tokens.colors.textDim} style={{ marginLeft: 6 }}>
-              First look: {previewTitle}
-            </ThemedText>
-          </View>
-        ) : null}
-
-        <Button label="Try Premium" onPress={onPress} style={{ marginTop: tokens.spacing.md }} />
-      </View>
-    </Card>
-  );
-}
-
-function Check({ text }: { text: string }) {
-  return (
-    <View style={styles.checkRow}>
-      <View style={styles.checkIcon}>
-        <Ionicons name="checkmark-circle" size={16} color={tokens.colors.primaryDark} />
-      </View>
-      <ThemedText variant="body" style={{ marginLeft: 8, flex: 1 }}>
-        {text}
-      </ThemedText>
+      ) : null}
     </View>
   );
 }
 
 /* ---------- styles ---------- */
 
-const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: tokens.colors.bg },
-  header: { paddingBottom: tokens.spacing.s },
+const styles = (t: ThemeTokens) =>
+  StyleSheet.create({
+    header: { paddingBottom: t.spacing.s },
 
-  chips: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: tokens.spacing.s,
-    paddingVertical: 4,
-  },
-  chip: {
-    marginRight: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: tokens.radius.pill,
-    borderWidth: 1,
-    borderColor: tokens.colors.cardBorder,
-    backgroundColor: tokens.colors.card,
-  },
-  chipActive: { backgroundColor: tokens.colors.primary, borderColor: tokens.colors.primary },
+    chips: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      marginTop: t.spacing.s,
+      paddingVertical: 4,
+    },
+    chip: {
+      marginRight: 8,
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+      borderRadius: t.radius.pill,
+      borderWidth: 1,
+      borderColor: t.colors.border,
+      backgroundColor: t.colors.card,
+    },
 
-  legendRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    marginTop: tokens.spacing.s,
-  },
-  legendItem: { flexDirection: 'row', alignItems: 'center', marginRight: 12, marginBottom: 6 },
-  legendDot: { width: 8, height: 8, borderRadius: 999, marginRight: 6 },
+    legendRow: { flexDirection: 'row', flexWrap: 'wrap', marginTop: t.spacing.s },
+    legendItem: { flexDirection: 'row', alignItems: 'center', marginRight: 12, marginBottom: 6 },
+    legendDot: { width: 8, height: 8, borderRadius: 999, marginRight: 6 },
 
-  lockBanner: {
-    marginTop: tokens.spacing.md,
-    alignSelf: 'stretch',
-    backgroundColor: tokens.colors.primarySoft,
-    borderColor: tokens.colors.primarySoftBorder,
-    borderWidth: 1,
-    borderRadius: tokens.radius.pill,
-    paddingHorizontal: tokens.spacing.md,
-    paddingVertical: 10,
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  tipBanner: {
-    marginTop: tokens.spacing.md,
-    alignSelf: 'stretch',
-    backgroundColor: tokens.colors.primarySoft,
-    borderColor: tokens.colors.primarySoftBorder,
-    borderWidth: 1,
-    borderRadius: tokens.radius.pill,
-    paddingHorizontal: tokens.spacing.md,
-    paddingVertical: 10,
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
+    sectionHeader: {
+      marginTop: t.spacing.md,
+      marginBottom: t.spacing.xs,
+    },
 
-  card: { marginTop: tokens.spacing.md },
-  row: { flexDirection: 'row' },
+    card: { marginTop: t.spacing.s },
+    row: { flexDirection: 'row' },
 
-  iconBubble: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    backgroundColor: tokens.colors.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 8,
-  },
+    iconBubble: {
+      width: 36,
+      height: 36,
+      borderRadius: 10,
+      backgroundColor: withAlpha(t.colors.primary, 0.12),
+      alignItems: 'center',
+      justifyContent: 'center',
+      marginRight: 8,
+    },
 
-  metaRow: { flexDirection: 'row', alignItems: 'center', marginTop: 6, flexWrap: 'wrap' },
-  metaPill: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: tokens.radius.pill, marginRight: 6 },
-  levelPill: { backgroundColor: tokens.colors.primarySoft, borderWidth: 1, borderColor: tokens.colors.primarySoftBorder },
+    metaRow: { flexDirection: 'row', alignItems: 'center', marginTop: 6, flexWrap: 'wrap' },
+    metaPill: {
+      paddingHorizontal: 10,
+      paddingVertical: 4,
+      borderRadius: t.radius.pill,
+      marginRight: 6,
+      backgroundColor: t.colors.card,
+      borderWidth: 1,
+      borderColor: t.colors.border,
+    },
+    levelPill: {
+      backgroundColor: withAlpha(t.colors.primary, 0.08),
+      borderColor: withAlpha(t.colors.primary, 0.18),
+    },
 
-  lockBtn: {
-    marginTop: tokens.spacing.md,
-    alignSelf: 'flex-start',
-    borderRadius: tokens.radius.pill,
-    paddingVertical: 8,
-    paddingHorizontal: tokens.spacing.md,
-    backgroundColor: tokens.colors.primarySoft,
-    borderWidth: 1,
-    borderColor: tokens.colors.primarySoftBorder,
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
+    lockBtn: {
+      alignSelf: 'flex-start',
+      borderRadius: t.radius.pill,
+      paddingVertical: 8,
+      paddingHorizontal: t.spacing.md,
+      backgroundColor: t.colors.card,
+      borderWidth: 1,
+      borderColor: t.colors.border,
+      flexDirection: 'row',
+      alignItems: 'center',
+    },
 
-  // Upsell
-  premiumTeaser: {
-    borderWidth: 1,
-    borderColor: tokens.colors.cardBorder,
-    backgroundColor: tokens.colors.card,
-  },
-  checkList: { marginTop: tokens.spacing.s },
-  checkRow: { flexDirection: 'row', alignItems: 'flex-start', marginTop: 6 },
-  checkIcon: { marginTop: 2 },
-  previewRow: { flexDirection: 'row', alignItems: 'center', marginTop: 6 },
-
-  diamondSmall: {
-    width: 20,
-    height: 20,
-    borderRadius: 6,
-    backgroundColor: tokens.colors.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-});
+    premiumBanner: {
+      position: 'absolute',
+      alignSelf: 'center',
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      borderRadius: 999,
+      backgroundColor: '#10B981',
+      shadowColor: 'rgba(0,0,0,0.15)',
+      shadowOpacity: 1,
+      shadowRadius: 8,
+      shadowOffset: { width: 0, height: 3 },
+      elevation: 3,
+    },
+  });

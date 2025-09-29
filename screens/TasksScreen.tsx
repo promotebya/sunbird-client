@@ -21,7 +21,6 @@ import Button from '../components/Button';
 import Card from '../components/Card';
 import ConfettiTiny from '../components/ConfettiTiny';
 import Input from '../components/Input';
-import sharedStyles from '../components/sharedStyles';
 import ThemedText from '../components/ThemedText';
 import { useTokens, type ThemeTokens } from '../components/ThemeProvider';
 import ToastUndo from '../components/ToastUndo';
@@ -63,10 +62,7 @@ type TaskDoc = {
 const FIRST_DONE_KEY = (uid: string) =>
   `lp:first-done:${uid}:${new Date().toISOString().slice(0, 10)}`;
 
-// Porcelain neutrals (harmonize with Home/Memories)
-const HAIRLINE = '#F0E6EF';
-const CHIP_BG  = '#F3EEF6';
-
+// theme utility
 function withAlpha(hex: string, alpha: number) {
   const h = hex.replace('#', '');
   const full = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
@@ -313,7 +309,7 @@ const TasksScreen: React.FC = () => {
   }, [streak]);
 
   return (
-    <SafeAreaView style={[sharedStyles.screen, { paddingTop: t.spacing.md }]} edges={['top', 'left', 'right']}>
+    <SafeAreaView style={[s.screen, { paddingTop: t.spacing.md }]} edges={['top', 'left', 'right']}>
       {showConfetti ? <ConfettiTiny /> : null}
 
       <KeyboardAvoidingView behavior={Platform.select({ ios: 'padding', android: undefined })} style={{ flex: 1 }}>
@@ -347,7 +343,7 @@ const TasksScreen: React.FC = () => {
 
         {/* Shared tab link banner */}
         {tab === 'shared' && !pairId && (
-          <Card style={{ marginBottom: t.spacing.md, paddingVertical: 12, borderWidth: 1, borderColor: HAIRLINE }}>
+          <Card style={{ marginBottom: t.spacing.md, paddingVertical: 12, borderWidth: 1, borderColor: t.colors.border }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
               <View
                 style={{
@@ -381,8 +377,8 @@ const TasksScreen: React.FC = () => {
               }}
               style={s.catchupChip}
             >
-              <Ionicons name="sparkles" size={14} color="#92400E" />
-              <ThemedText variant="label" color="#92400E" style={{ marginLeft: 6 }}>
+              <Ionicons name="sparkles" size={14} color={t.colors.primary} />
+              <ThemedText variant="label" color={t.colors.primary} style={{ marginLeft: 6 }}>
                 Catch-up day
               </ThemedText>
             </Pressable>
@@ -462,9 +458,11 @@ const TasksScreen: React.FC = () => {
 
 const styles = (t: ThemeTokens) =>
   StyleSheet.create({
+    screen: { flex: 1, backgroundColor: t.colors.bg },
+
     header: { padding: t.spacing.md, paddingBottom: t.spacing.s },
 
-    // Segmented tabs (neutral by default, slight lift when active)
+    // Segmented tabs (neutral; slight lift when active)
     segmented: { flexDirection: 'row', gap: 8, paddingHorizontal: t.spacing.md, marginBottom: t.spacing.md },
     segment: {
       flex: 1,
@@ -472,13 +470,13 @@ const styles = (t: ThemeTokens) =>
       justifyContent: 'center',
       paddingVertical: 10,
       borderRadius: 14,
-      backgroundColor: CHIP_BG,
+      backgroundColor: t.colors.card,
       borderWidth: 1,
-      borderColor: HAIRLINE,
+      borderColor: t.colors.border,
     },
     segmentActive: {
-      backgroundColor: '#FFFFFF',
-      borderColor: HAIRLINE,
+      backgroundColor: t.colors.card,
+      borderColor: t.colors.border,
       shadowColor: 'rgba(16,24,40,0.08)',
       shadowOpacity: 1,
       shadowRadius: 8,
@@ -486,10 +484,11 @@ const styles = (t: ThemeTokens) =>
       elevation: 3,
     },
 
+    // Catch-up chip: derive tint from primary (theme-safe)
     catchupChip: {
       alignSelf: 'flex-start',
-      backgroundColor: '#FEF3C7',
-      borderColor: '#FDE68A',
+      backgroundColor: withAlpha(t.colors.primary, 0.10),
+      borderColor: withAlpha(t.colors.primary, 0.22),
       borderWidth: 1,
       paddingHorizontal: t.spacing.md,
       paddingVertical: 8,
@@ -510,16 +509,16 @@ const styles = (t: ThemeTokens) =>
       paddingHorizontal: t.spacing.md,
       paddingVertical: 10,
       borderRadius: 999,
-      backgroundColor: '#ECEFF3',
+      backgroundColor: t.colors.card,
       borderWidth: 1,
-      borderColor: '#E8EAF0',
+      borderColor: t.colors.border,
     },
 
     itemCard: { marginHorizontal: t.spacing.md },
     itemRow: { flexDirection: 'row', alignItems: 'center', gap: t.spacing.s as number },
 
     checkbox: {
-      width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: '#E5E7EB',
+      width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: t.colors.border,
       alignItems: 'center', justifyContent: 'center', marginRight: t.spacing.s,
     },
 
@@ -551,7 +550,7 @@ const styles = (t: ThemeTokens) =>
       borderRadius: 8,
       backgroundColor: t.colors.card,
       borderWidth: 1,
-      borderColor: '#F3F4F6',
+      borderColor: t.colors.border,
     },
   });
 
