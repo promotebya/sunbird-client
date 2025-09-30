@@ -35,17 +35,45 @@ async function ensureUserDoc(
   const ref = doc(db, 'users', uid);
   const snap = await getDoc(ref);
   if (!snap.exists()) {
-    // Free, by default — do NOT set any premium flag here
+    // Free by default (no accidental premium)
     await setDoc(ref, {
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
       email: data.email ?? null,
       displayName: data.displayName ?? null,
       pairId: null,
-      plan: 'free',          // optional, used by usePlan.ts
-      isPremium: false,      // safe default for older code paths
-      premiumUntil: null,    // safe default for older code paths
+      plan: 'free',
+      isPremium: false,
+      premiumUntil: null,
     });
+  }
+}
+
+/** If there's no active entitlement, force a free plan on the doc. */
+async function enforceFreeIfNoEntitlement(uid: string) {
+  const ref = doc(db, 'users', uid);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) return;
+
+  const data: any = snap.data() || {};
+  const until =
+    typeof data.premiumUntil?.toMillis === 'function'
+      ? data.premiumUntil.toMillis()
+      : typeof data.premiumUntil === 'string'
+      ? Date.parse(data.premiumUntil)
+      : typeof data.premiumUntil === 'number'
+      ? data.premiumUntil
+      : null;
+
+  const hasActiveUntil = until != null && until > Date.now();
+  const hasExplicitPremium = data.plan === 'premium' || data.isPremium === true;
+
+  if (!hasActiveUntil && !hasExplicitPremium) {
+    await setDoc(
+      ref,
+      { plan: 'free', isPremium: false, premiumUntil: null, updatedAt: serverTimestamp() },
+      { merge: true }
+    );
   }
 }
 
@@ -65,6 +93,8 @@ function friendlyAuth(code?: string): string {
       return 'That email is already registered. Try signing in instead.';
     case 'auth/weak-password':
       return 'Please choose a stronger password (at least 6 characters).';
+    case 'auth/operation-not-allowed':
+      return 'Demo is disabled. Enable Anonymous sign-in in Firebase Console.';
     default:
       return 'Please try again.';
   }
@@ -98,12 +128,14 @@ const LoginScreen: React.FC = () => {
           email: cred.user.email ?? null,
           displayName: cred.user.displayName ?? null,
         });
+        await enforceFreeIfNoEntitlement(cred.user.uid);
       } else {
         const cred = await signInWithEmailAndPassword(auth, em, pass);
         await ensureUserDoc(cred.user.uid, {
           email: cred.user.email ?? null,
           displayName: cred.user.displayName ?? null,
         });
+        await enforceFreeIfNoEntitlement(cred.user.uid);
       }
     } catch (e: any) {
       Alert.alert('Authentication failed', friendlyAuth(e?.code));
@@ -134,13 +166,10 @@ const LoginScreen: React.FC = () => {
     try {
       const cred = await signInAnonymously(auth);
       await ensureUserDoc(cred.user.uid, { email: null, displayName: 'Guest' });
+      await enforceFreeIfNoEntitlement(cred.user.uid);
     } catch (e: any) {
       const code = e?.code as string | undefined;
-      const msg =
-        code === 'auth/operation-not-allowed'
-          ? 'Demo is disabled. In Firebase Console → Authentication → Sign-in method, enable Anonymous.'
-          : friendlyAuth(code);
-      Alert.alert('Demo sign-in failed', msg);
+      Alert.alert('Demo sign-in failed', friendlyAuth(code));
     } finally {
       setDemoLoading(false);
     }
@@ -214,7 +243,6 @@ const LoginScreen: React.FC = () => {
 
         <View style={{ height: t.spacing.lg }} />
 
-        {/* Use a supported variant */}
         <Button
           variant="outline"
           label={demoLoading ? 'Starting demo…' : 'Continue with Demo'}
