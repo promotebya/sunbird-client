@@ -97,10 +97,13 @@ const RemindersScreen: React.FC = () => {
     try {
       const items = await Notifications.getAllScheduledNotificationsAsync();
       items.sort((a, b) => {
-        const ta = a.content.title ?? '';
-        const tb = b.content.title ?? '';
+        const ta = a.content?.title ?? '';
+        const tb = b.content?.title ?? '';
         if (ta !== tb) return ta.localeCompare(tb);
-        return triggerToText(a.trigger).localeCompare(triggerToText(b.trigger));
+        // use safe trigger text (can’t throw)
+        const sa = triggerToText((a as any).trigger);
+        const sb = triggerToText((b as any).trigger);
+        return sa.localeCompare(sb);
       });
       setScheduled(items);
     } finally {
@@ -114,55 +117,73 @@ const RemindersScreen: React.FC = () => {
   // Only show “on the day” entries here
   const visibleScheduled = useMemo(() => {
     return scheduled.filter((req) => {
-      const body = (req.content.body ?? '') as string;
+      const body = (req.content?.body ?? '') as string;
       return !/one week/i.test(body) && !/tomorrow/i.test(body);
     });
   }, [scheduled]);
 
-  // Defensive shape handling for Expo notifications trigger
+  // Defensive shape handling for Expo notifications trigger (never throws)
   function triggerToText(trigger: any): string {
-    if (!trigger) return 'Scheduled';
+    try {
+      if (!trigger) return 'Scheduled';
 
-    // Some SDKs don’t expose SchedulableTriggerInputTypes; optional-chain safely.
-    const CAL  = Notifications.SchedulableTriggerInputTypes?.CALENDAR ?? 'calendar';
-    const DATE = Notifications.SchedulableTriggerInputTypes?.DATE ?? 'date';
-    const INT  = Notifications.SchedulableTriggerInputTypes?.TIME_INTERVAL ?? 'timeInterval';
+      // Optional constants — some SDKs don’t expose this object
+      const CAL  = Notifications.SchedulableTriggerInputTypes?.CALENDAR ?? 'calendar';
+      const DATE = Notifications.SchedulableTriggerInputTypes?.DATE ?? 'date';
+      const INT  = Notifications.SchedulableTriggerInputTypes?.TIME_INTERVAL ?? 'timeInterval';
 
-    const t = (trigger as any).type ?? (
-      (trigger as any).dateComponents ? CAL :
-      (trigger as any).date ? DATE :
-      undefined
-    );
+      const t = (trigger as any).type ?? (
+        (trigger as any).dateComponents ? CAL :
+        (trigger as any).date ? DATE :
+        undefined
+      );
 
-    if (t === CAL || t === 'calendar') {
-      const comps = (trigger as any).dateComponents && typeof (trigger as any).dateComponents === 'object'
-        ? (trigger as any).dateComponents
-        : trigger;
-      const month  = comps.month  ?? 1;
-      const day    = comps.day    ?? 1;
-      const hour   = comps.hour   ?? 0;
-      const minute = comps.minute ?? 0;
-      const when = new Date(2000, month - 1, day, hour, minute, 0, 0);
-      const md = when.toLocaleDateString([], { month: 'long', day: 'numeric' });
-      const hm = when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      return `${md} • ${hm} • yearly`;
+      if (t === CAL || t === 'calendar') {
+        const comps = (trigger as any).dateComponents && typeof (trigger as any).dateComponents === 'object'
+          ? (trigger as any).dateComponents
+          : trigger;
+
+        const month  = Number.isFinite(comps?.month)  ? comps.month  : 1;
+        const day    = Number.isFinite(comps?.day)    ? comps.day    : 1;
+        const hour   = Number.isFinite(comps?.hour)   ? comps.hour   : 0;
+        const minute = Number.isFinite(comps?.minute) ? comps.minute : 0;
+
+        const when = new Date(2000, month - 1, day, hour, minute, 0, 0);
+        let md = '';
+        try {
+          md = when.toLocaleDateString([], { month: 'long', day: 'numeric' });
+        } catch {
+          md = `${month}/${day}`;
+        }
+        const hm = formatLocalTime(when);
+        return `${md} • ${hm} • yearly`;
+      }
+
+      if (t === DATE || t === 'date') {
+        const raw = (trigger as any).date;
+        const d = raw ? new Date(raw) : null;
+        if (d && !isNaN(d.getTime())) {
+          let dd = '';
+          try {
+            dd = d.toLocaleDateString();
+          } catch {
+            dd = `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
+          }
+          return `${dd} • ${formatLocalTime(d)}`;
+        }
+        return 'Scheduled date';
+      }
+
+      if (t === INT || t === 'timeInterval') {
+        const secs = Number((trigger as any).seconds ?? 0);
+        const mins = secs ? Math.round(secs / 60) : 0;
+        return mins ? `in ${mins} min${mins === 1 ? '' : 's'}` : 'Time interval';
+      }
+
+      return 'Scheduled';
+    } catch {
+      return 'Scheduled';
     }
-
-    if (t === DATE || t === 'date') {
-      const dVal = (trigger as any).date;
-      const d = dVal ? new Date(dVal) : null;
-      return d
-        ? `${d.toLocaleDateString()} • ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
-        : 'Scheduled date';
-    }
-
-    if (t === INT || t === 'timeInterval') {
-      const secs = Number((trigger as any).seconds ?? 0);
-      const mins = secs ? Math.round(secs / 60) : 0;
-      return mins ? `in ${mins} min${mins === 1 ? '' : 's'}` : 'Time interval';
-    }
-
-    return 'Scheduled';
   }
 
   async function onCancel(id: string) {
@@ -245,10 +266,8 @@ const RemindersScreen: React.FC = () => {
   // SUPER-SAFE inbox navigation: try local stack first, then parent Tabs
   function openInbox() {
     try {
-      // If this screen is inside RemindersStack, this succeeds:
       navigation.navigate('RemindersInbox' as never);
     } catch {}
-    // If not, ask the parent Tabs to go to the Reminders tab -> Inbox:
     try {
       navigation.getParent?.()?.navigate('Reminders', { screen: 'RemindersInbox' });
     } catch {}
@@ -358,9 +377,9 @@ const RemindersScreen: React.FC = () => {
             {visibleScheduled.map((req) => (
               <View key={req.identifier} style={s.savedRow}>
                 <View style={{ flex: 1 }}>
-                  <ThemedText variant="title">{req.content.title ?? 'Reminder'}</ThemedText>
+                  <ThemedText variant="title">{req.content?.title ?? 'Reminder'}</ThemedText>
                   <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 2 }}>
-                    {triggerToText(req.trigger as any)}
+                    {triggerToText((req as any).trigger)}
                   </ThemedText>
                 </View>
                 <Pressable onPress={() => onCancel(req.identifier)} style={s.cancelBtn} accessibilityRole="button">

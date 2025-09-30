@@ -6,7 +6,6 @@ import {
   deleteDoc,
   doc,
   onSnapshot,
-  orderBy,
   query,
   serverTimestamp,
   Unsubscribe,
@@ -145,7 +144,11 @@ export function formatLocalTime(d: Date | string) {
 
 /** Live count of pending partner reminders (tab badge). */
 export function subscribePendingRemindersCount(uid: string, cb: (count: number) => void): Unsubscribe {
-  const q = query(collection(db, 'reminders'), where('forUid', '==', uid), where('status', '==', 'pending'));
+  const q = query(
+    collection(db, 'reminders'),
+    where('forUid', '==', uid),
+    where('status', '==', 'pending')
+  );
   return onSnapshot(q, (snap) => cb(snap.size));
 }
 
@@ -157,7 +160,7 @@ export type ReminderDoc = {
   ownerId: string;
   pairId?: string | null;
   title: string;
-  dueAt: string; // ISO
+  dueAt?: string; // ISO (optional)
   status: 'pending' | 'scheduled' | 'sent' | 'dismissed';
   localNotificationId?: string | null;
   createdAt?: any;
@@ -165,17 +168,61 @@ export type ReminderDoc = {
   scheduledAt?: any;
 };
 
+/**
+ * Subscribe to reminders for a user, split into two buckets:
+ *  - pending
+ *  - scheduled/handled (scheduled + dismissed + sent)
+ *
+ * Uses only equality filters (no orderBy / in), so it does NOT require
+ * any composite Firestore indexes.
+ */
 export function subscribeRemindersForUid(
   uid: string,
-  cb: (pending: ReminderDoc[], scheduled: ReminderDoc[]) => void
+  cb: (pending: ReminderDoc[], scheduledOrHandled: ReminderDoc[]) => void
 ): Unsubscribe {
-  const q = query(collection(db, 'reminders'), where('forUid', '==', uid), orderBy('createdAt', 'desc'));
-  return onSnapshot(q, (snap) => {
-    const all: ReminderDoc[] = snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<ReminderDoc, 'id'>) }));
-    const pending = all.filter((r) => r.status === 'pending');
-    const scheduled = all.filter((r) => r.status !== 'pending');
-    cb(pending, scheduled);
-  });
+  const col = collection(db, 'reminders');
+
+  const sortByDueAt = (list: ReminderDoc[]) =>
+    [...list].sort((a, b) => {
+      const ta = a.dueAt ? new Date(a.dueAt).getTime() : 0;
+      const tb = b.dueAt ? new Date(b.dueAt).getTime() : 0;
+      return ta - tb;
+    });
+
+  let pending: ReminderDoc[] = [];
+  let scheduled: ReminderDoc[] = [];
+  let dismissed: ReminderDoc[] = [];
+  let sent: ReminderDoc[] = [];
+
+  const flush = () => {
+    cb(sortByDueAt(pending), sortByDueAt([...scheduled, ...dismissed, ...sent]));
+  };
+
+  const u1 = onSnapshot(
+    query(col, where('forUid', '==', uid), where('status', '==', 'pending')),
+    (snap) => { pending = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) })); flush(); },
+    (err) => console.warn('inbox/pending listener', err)
+  );
+
+  const u2 = onSnapshot(
+    query(col, where('forUid', '==', uid), where('status', '==', 'scheduled')),
+    (snap) => { scheduled = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) })); flush(); },
+    (err) => console.warn('inbox/scheduled listener', err)
+  );
+
+  const u3 = onSnapshot(
+    query(col, where('forUid', '==', uid), where('status', '==', 'dismissed')),
+    (snap) => { dismissed = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) })); flush(); },
+    (err) => console.warn('inbox/dismissed listener', err)
+  );
+
+  const u4 = onSnapshot(
+    query(col, where('forUid', '==', uid), where('status', '==', 'sent')),
+    (snap) => { sent = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) })); flush(); },
+    (err) => console.warn('inbox/sent listener', err)
+  );
+
+  return () => { u1(); u2(); u3(); u4(); };
 }
 
 export async function updateReminderStatus(id: string, status: ReminderDoc['status']) {

@@ -30,12 +30,12 @@ function timeFromISO(iso?: string) {
   if (!iso) return '';
   const d = new Date(iso);
   if (isNaN(d.getTime())) return '';
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const day = d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+  const hm = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return `${day} • ${hm}`;
 }
 
-// Porcelain neutrals (match other screens)
 const HAIRLINE = '#F0E6EF';
-const CHIP_BG  = '#F3EEF6';
 
 const ActionButton = ({
   color,
@@ -60,6 +60,9 @@ export default function RemindersInboxScreen() {
 
   const [pending, setPending] = useState<ReminderDoc[]>([]);
   const [scheduled, setScheduled] = useState<ReminderDoc[]>([]);
+
+  // simple filter tabs
+  const [filter, setFilter] = useState<'all' | 'pending' | 'scheduled'>('all');
 
   const [toast, setToast] = useState<{
     visible: boolean;
@@ -101,6 +104,7 @@ export default function RemindersInboxScreen() {
     await updateReminderStatus(item.id, 'scheduled');
     setToast({ visible: true, msg: 'Scheduled', undo: async () => updateReminderStatus(item.id, 'pending') });
   }
+
   async function onDelete(item: ReminderDoc) {
     const backup = item;
     await removeReminder(item.id);
@@ -113,13 +117,36 @@ export default function RemindersInboxScreen() {
       },
     });
   }
+
   async function onDismiss(item: ReminderDoc) {
     await updateReminderStatus(item.id, 'dismissed');
     setToast({ visible: true, msg: 'Dismissed', undo: async () => updateReminderStatus(item.id, 'scheduled') });
   }
 
+  // bulk helpers to make the screen purposeful
+  async function scheduleAll() {
+    if (!pending.length) return;
+    for (const r of pending) await updateReminderStatus(r.id, 'scheduled');
+    setToast({ visible: true, msg: `Scheduled ${pending.length} reminder${pending.length === 1 ? '' : 's'}` });
+  }
+  async function deleteAll() {
+    if (!pending.length) return;
+    Alert.alert('Delete all pending?', `Remove ${pending.length} reminder${pending.length === 1 ? '' : 's'}?`, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          for (const r of pending) await removeReminder(r.id);
+          setToast({ visible: true, msg: 'Pending reminders deleted' });
+        },
+      },
+    ]);
+  }
+
   const Row = ({ item, isPending }: { item: ReminderDoc; isPending: boolean }) => {
     const swipeRef = useRef<Swipeable>(null);
+    const dot = isPending ? t.colors.primary : '#6B7280';
     return (
       <Swipeable
         ref={swipeRef}
@@ -131,10 +158,11 @@ export default function RemindersInboxScreen() {
       >
         <Card>
           <View style={s.row}>
+            <View style={[s.statusDot, { backgroundColor: dot }]} />
             <View style={{ flex: 1 }}>
               <ThemedText variant="title">{item.title}</ThemedText>
               <ThemedText variant="caption" color={t.colors.textDim}>
-                Due {timeFromISO(item.dueAt)} • {isPending ? 'Pending' : 'Scheduled'}
+                {timeFromISO(item.dueAt)} • {isPending ? 'Pending' : 'Scheduled'}
               </ThemedText>
             </View>
 
@@ -167,12 +195,24 @@ export default function RemindersInboxScreen() {
     );
   };
 
-  const sections = [
-    { title: 'Pending', data: pending, isPending: true },
-    { title: 'Scheduled / Handled', data: scheduled, isPending: false },
-  ];
+  // build sections based on filter
+  const sections = useMemo(() => {
+    const base: { title: string; data: ReminderDoc[]; isPending: boolean }[] = [];
+    const add = (title: string, data: ReminderDoc[], isPending: boolean) => base.push({ title, data, isPending });
+
+    if (filter === 'all') {
+      add('Pending', pending, true);
+      add('Scheduled / Handled', scheduled, false);
+    } else if (filter === 'pending') {
+      add('Pending', pending, true);
+    } else {
+      add('Scheduled / Handled', scheduled, false);
+    }
+    return base;
+  }, [filter, pending, scheduled]);
 
   const empty = !pending.length && !scheduled.length;
+  const counts = { pending: pending.length, scheduled: scheduled.length };
 
   return (
     <Screen scroll={false}>
@@ -192,15 +232,50 @@ export default function RemindersInboxScreen() {
             <ThemedText variant="subtitle" color={t.colors.textDim}>
               Partner reminders for you • Swipe left for actions
             </ThemedText>
+
+            {/* Filter chips */}
+            <View style={s.filterRow}>
+              {([
+                { k: 'all', label: 'All' },
+                { k: 'pending', label: `Pending ${counts.pending ? `(${counts.pending})` : ''}` },
+                { k: 'scheduled', label: `Scheduled ${counts.scheduled ? `(${counts.scheduled})` : ''}` },
+              ] as const).map(({ k, label }) => (
+                <Pressable
+                  key={k}
+                  onPress={() => setFilter(k)}
+                  accessibilityRole="button"
+                  style={[s.chip, filter === k && s.chipActive]}
+                >
+                  <ThemedText variant="label" color={filter === k ? t.colors.text : t.colors.textDim}>
+                    {label}
+                  </ThemedText>
+                </Pressable>
+              ))}
+            </View>
+
+            {/* Bulk actions for pending */}
+            {filter !== 'scheduled' && counts.pending > 0 ? (
+              <View style={s.bulkRow}>
+                <Pressable onPress={scheduleAll} style={[s.bulkBtn, { borderColor: t.colors.border }]}>
+                  <ThemedText variant="button">Schedule all</ThemedText>
+                </Pressable>
+                <Pressable onPress={deleteAll} style={[s.bulkBtn, { borderColor: '#EF4444' }]}>
+                  <ThemedText variant="button" color="#EF4444">Delete all</ThemedText>
+                </Pressable>
+              </View>
+            ) : null}
           </View>
         }
         ListEmptyComponent={
           empty ? (
             <Card>
-              <ThemedText variant="title">Nothing here yet</ThemedText>
-              <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 6 }}>
-                When your partner creates a shared reminder, it will appear here.
-              </ThemedText>
+              <View style={{ paddingVertical: t.spacing.md }}>
+                <ThemedText variant="display">📬</ThemedText>
+                <ThemedText variant="title" style={{ marginTop: 6 }}>Nothing here yet</ThemedText>
+                <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 6 }}>
+                  When your partner creates a shared reminder, it will appear here. You can schedule it, delete it, or dismiss it.
+                </ThemedText>
+              </View>
             </Card>
           ) : null
         }
@@ -225,18 +300,56 @@ const styles = (t: ThemeTokens) =>
       paddingTop: t.spacing.md,
       paddingBottom: t.spacing.s,
     },
+    filterRow: {
+      flexDirection: 'row',
+      gap: 8,
+      marginTop: t.spacing.s,
+    },
+    chip: {
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      borderRadius: 999,
+      backgroundColor: '#FFFFFF',
+      borderWidth: 1,
+      borderColor: HAIRLINE,
+    },
+    chipActive: {
+      backgroundColor: t.colors.card,
+      borderColor: t.colors.border,
+      shadowColor: 'rgba(16,24,40,0.08)',
+      shadowOpacity: 1,
+      shadowRadius: 8,
+      shadowOffset: { width: 0, height: 4 },
+      elevation: 3,
+    },
+    bulkRow: {
+      flexDirection: 'row',
+      gap: 10,
+      marginTop: t.spacing.s,
+    },
+    bulkBtn: {
+      paddingHorizontal: 14,
+      paddingVertical: 10,
+      borderRadius: 12,
+      borderWidth: 1,
+      backgroundColor: '#FFFFFF',
+    },
     section: {
       paddingHorizontal: t.spacing.md,
       marginTop: t.spacing.lg,
       marginBottom: t.spacing.s,
     },
-
     row: {
       flexDirection: 'row',
       alignItems: 'center',
       gap: t.spacing.s,
     },
-
+    statusDot: {
+      width: 10,
+      height: 10,
+      borderRadius: 999,
+      marginRight: 2,
+    },
     // compact in-row buttons that fit cards
     btn: {
       paddingHorizontal: 12,
@@ -254,7 +367,6 @@ const styles = (t: ThemeTokens) =>
     btnGhost: {
       backgroundColor: '#FFFFFF',
     },
-
     actionsRow: {
       width: 180,
       flexDirection: 'row',
@@ -263,7 +375,7 @@ const styles = (t: ThemeTokens) =>
     },
   });
 
-// Styles used only inside ActionButton (static so we can create outside the hook)
+// Styles used only inside ActionButton
 const stylesStatic = StyleSheet.create({
   actionBtn: {
     flex: 1,
