@@ -119,16 +119,24 @@ const RemindersScreen: React.FC = () => {
     });
   }, [scheduled]);
 
+  // Defensive shape handling for Expo notifications trigger
   function triggerToText(trigger: any): string {
     if (!trigger) return 'Scheduled';
+
+    // Some SDKs don’t expose SchedulableTriggerInputTypes; optional-chain safely.
     const CAL  = Notifications.SchedulableTriggerInputTypes?.CALENDAR ?? 'calendar';
     const DATE = Notifications.SchedulableTriggerInputTypes?.DATE ?? 'date';
     const INT  = Notifications.SchedulableTriggerInputTypes?.TIME_INTERVAL ?? 'timeInterval';
-    const t = trigger.type;
+
+    const t = (trigger as any).type ?? (
+      (trigger as any).dateComponents ? CAL :
+      (trigger as any).date ? DATE :
+      undefined
+    );
 
     if (t === CAL || t === 'calendar') {
-      const comps = trigger.dateComponents && typeof trigger.dateComponents === 'object'
-        ? trigger.dateComponents
+      const comps = (trigger as any).dateComponents && typeof (trigger as any).dateComponents === 'object'
+        ? (trigger as any).dateComponents
         : trigger;
       const month  = comps.month  ?? 1;
       const day    = comps.day    ?? 1;
@@ -141,14 +149,16 @@ const RemindersScreen: React.FC = () => {
     }
 
     if (t === DATE || t === 'date') {
-      const d = trigger.date ? new Date(trigger.date) : null;
+      const dVal = (trigger as any).date;
+      const d = dVal ? new Date(dVal) : null;
       return d
         ? `${d.toLocaleDateString()} • ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
         : 'Scheduled date';
     }
 
     if (t === INT || t === 'timeInterval') {
-      const mins = trigger.seconds ? Math.round(trigger.seconds / 60) : 0;
+      const secs = Number((trigger as any).seconds ?? 0);
+      const mins = secs ? Math.round(secs / 60) : 0;
       return mins ? `in ${mins} min${mins === 1 ? '' : 's'}` : 'Time interval';
     }
 
@@ -232,6 +242,18 @@ const RemindersScreen: React.FC = () => {
     timeOnly ? ` at ${formatLocalTime(timeOnly)}` : ''
   }.`;
 
+  // SUPER-SAFE inbox navigation: try local stack first, then parent Tabs
+  function openInbox() {
+    try {
+      // If this screen is inside RemindersStack, this succeeds:
+      navigation.navigate('RemindersInbox' as never);
+    } catch {}
+    // If not, ask the parent Tabs to go to the Reminders tab -> Inbox:
+    try {
+      navigation.getParent?.()?.navigate('Reminders', { screen: 'RemindersInbox' });
+    } catch {}
+  }
+
   return (
     <Screen keyboard>
       {/* Title row + outline inbox button with badge */}
@@ -240,7 +262,7 @@ const RemindersScreen: React.FC = () => {
         <Button
           label={badge ? `Inbox  ${badge}` : 'Inbox'}
           variant="outline"
-          onPress={() => navigation.navigate('RemindersStack')}
+          onPress={openInbox}
         />
       </View>
 

@@ -1,7 +1,7 @@
 // screens/ChallengesScreen.tsx
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import {
   Alert,
   Pressable,
@@ -81,9 +81,9 @@ function withAlpha(hex: string, alpha: number) {
 
 /** Normalise difficulty to our keys (accept strings or 0..3) */
 function normDiff(raw: any): DiffKey | undefined {
-  if (raw === null || raw === undefined) return undefined;
+  if (raw == null) return undefined;
   const n = Number(raw);
-  if (Number.isFinite(n)) return ['easy', 'medium', 'hard', 'pro'][Math.max(0, Math.min(3, n))] as DiffKey;
+  if (Number.isFinite(n)) return (['easy', 'medium', 'hard', 'pro'][Math.max(0, Math.min(3, n))] as DiffKey);
   const v = String(raw).trim().toLowerCase();
   if (!v) return undefined;
   if (v.startsWith('e')) return 'easy';
@@ -125,7 +125,7 @@ function extractCategoryStrict(c: any): CatKey | undefined {
         const key = set[String(s).trim().toLowerCase()];
         if (key) return key;
       }
-    } else if (cand !== undefined && cand !== null) {
+    } else if (cand != null) {
       const key = set[String(cand).trim().toLowerCase()];
       if (key) return key;
     }
@@ -153,7 +153,7 @@ function rowKey(c: any, suffix: 'V' | 'L', index: number): string {
 function mergePreferBase<T extends Record<string, any>>(base: T, patch: Partial<T>): T {
   const out: any = { ...base };
   for (const [k, v] of Object.entries(patch)) {
-    if (v === undefined || v === null) continue;
+    if (v == null) continue;
     if (typeof v === 'string' && v.trim() === '') continue;
     if (Array.isArray(v) && v.length === 0) continue;
     out[k] = v;
@@ -161,6 +161,7 @@ function mergePreferBase<T extends Record<string, any>>(base: T, patch: Partial<
   return out as T;
 }
 
+/** Collapsible long text with robust toggle */
 function Clamp({
   text,
   lines = 4,
@@ -171,11 +172,9 @@ function Clamp({
   dimColor: string;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const [showToggle, setShowToggle] = useState(false);
-  const onTextLayout = (e: any) => {
-    const n = e?.nativeEvent?.lines?.length ?? 0;
-    if (n > lines) setShowToggle(true);
-  };
+  // fallback heuristic so we still show the toggle if onTextLayout doesn't fire in some envs
+  const [showToggle, setShowToggle] = useState<boolean>(text.length > 140);
+
   return (
     <View>
       <ThemedText
@@ -183,7 +182,11 @@ function Clamp({
         color={dimColor}
         style={{ marginTop: 4 }}
         numberOfLines={expanded ? undefined : lines}
-        onTextLayout={onTextLayout}
+        onTextLayout={(e) => {
+          const n = e?.nativeEvent?.lines?.length ?? 0;
+          if (n > lines) setShowToggle(true);
+        }}
+        ellipsizeMode="tail"
       >
         {text}
       </ThemedText>
@@ -248,7 +251,7 @@ export default function ChallengesScreen() {
     const m = new Map<string, any>();
     for (const p of CHALLENGE_POOL) {
       const id = (p as any)?.id;
-      if (id !== undefined && id !== null) m.set(String(id), p);
+      if (id != null) m.set(String(id), p);
     }
     return m;
   }, []);
@@ -276,7 +279,7 @@ export default function ChallengesScreen() {
 
   const allRows = useMemo<Row[]>(() => {
     const decorate = (c: SeedChallenge) => {
-      // decorate strictly by id; never guess by category/difficulty
+      // decorate strictly by id; never infer by category/difficulty
       const id = (c as any)?.id;
       const base = id != null ? POOL_BY_ID.get(String(id)) : undefined;
       if (!base) return c;
@@ -337,7 +340,62 @@ export default function ChallengesScreen() {
     return m;
   }, [allRows]);
 
-  /* ---------- actions ---------- */
+  /* ---------- navigation helpers ---------- */
+
+  const openChallenge = useCallback(
+    (seed: SeedChallenge) => {
+      const params = { challengeId: seed.id, seed };
+
+      // Try current navigator and bubble up one level to handle Tabs-in-Stack setups.
+      const targets = ['ChallengeDetail', 'ChallengeDetailScreen', 'Challenge', 'ChallengeDetails'];
+      const navigators = [nav, nav.getParent?.()].filter(Boolean) as any[];
+
+      const canNavigateTo = (n: any, name: string) => {
+        try {
+          const state = n.getState?.();
+          const names = new Set<string>();
+          const walk = (s: any) => {
+            if (!s) return;
+            if (Array.isArray(s.routes)) {
+              for (const r of s.routes) {
+                if (r?.name) names.add(r.name);
+                if (r?.state) walk(r.state);
+              }
+            }
+          };
+          walk(state);
+          return names.has(name);
+        } catch {
+          return false;
+        }
+      };
+
+      for (const n of navigators) {
+        for (const route of targets) {
+          if (canNavigateTo(n, route)) {
+            try {
+              n.navigate(route as never, params as never);
+              return;
+            } catch {
+              // try next
+            }
+          }
+        }
+      }
+
+      // Fallback: attempt anyway on parent; otherwise show friendly message
+      try {
+        (nav.getParent?.() ?? nav).navigate('ChallengeDetail', params as never);
+      } catch (e) {
+        console.warn('ChallengeDetail route not found.', e);
+        Alert.alert(
+          'Challenge',
+          'Opening the challenge requires a "ChallengeDetail" screen in your navigator.'
+        );
+      }
+    },
+    [nav]
+  );
 
   function buyPremium(plan: 'monthly' | 'yearly') {
     try {
@@ -352,7 +410,7 @@ export default function ChallengesScreen() {
   const Header = (
     <View style={s.header}>
       <ThemedText variant="display">Challenges</ThemedText>
-      <ThemedText variant="subtitle" color={t.colors.textDim}>
+      <ThemedText variant="subtitle" color="textDim">
         Total points: {total}
       </ThemedText>
 
@@ -378,7 +436,7 @@ export default function ChallengesScreen() {
         {(['date','kindness','conversation','surprise','play'] as CatKey[]).map((k) => (
           <View key={k} style={s.legendItem}>
             <View style={[s.legendDot, { backgroundColor: CAT_DOT[k] }]} />
-            <ThemedText variant="caption" color={t.colors.textDim}>
+            <ThemedText variant="caption" color="textDim">
               {CATEGORY_LABEL[k]} {visibleByCat[k] ? `· ${visibleByCat[k]}` : ''}
             </ThemedText>
           </View>
@@ -438,7 +496,7 @@ export default function ChallengesScreen() {
                       <View style={s.metaRow}>
                         {!!catKey && (
                           <View style={s.metaPill}>
-                            <ThemedText variant="caption" color={t.colors.textDim}>
+                            <ThemedText variant="caption" color="textDim">
                               {CATEGORY_LABEL[catKey]}
                             </ThemedText>
                           </View>
@@ -449,13 +507,17 @@ export default function ChallengesScreen() {
                           </ThemedText>
                         </View>
                         {typeof c?.points === 'number' && (
-                          <ThemedText variant="caption" color={t.colors.textDim}>
+                          <ThemedText variant="caption" color="textDim">
                             {` • +${c.points} pts`}
                           </ThemedText>
                         )}
                       </View>
 
-                      <Button label="Start challenge" onPress={() => {}} style={{ marginTop: t.spacing.md }} />
+                      <Button
+                        label="Start challenge"
+                        onPress={() => openChallenge(c as SeedChallenge)}
+                        style={{ marginTop: t.spacing.md }}
+                      />
                     </>
                   ) : (
                     <View style={{ marginTop: t.spacing.s }}>
@@ -468,7 +530,7 @@ export default function ChallengesScreen() {
                         accessibilityRole="button"
                       >
                         <Ionicons name="lock-closed" size={16} color={t.colors.textDim} />
-                        <ThemedText variant="label" color={t.colors.textDim} style={{ marginLeft: 8 }}>
+                        <ThemedText variant="label" color="textDim" style={{ marginLeft: 8 }}>
                           {lockMessage(safePlan, c)}
                         </ThemedText>
                       </Pressable>
@@ -482,7 +544,7 @@ export default function ChallengesScreen() {
         ListEmptyComponent={
           <Card style={{ marginTop: t.spacing.md }}>
             <ThemedText variant="title">No challenges here yet</ThemedText>
-            <ThemedText variant="caption" color={t.colors.textDim}>
+            <ThemedText variant="caption" color="textDim">
               Try another tab or come back later.
             </ThemedText>
           </Card>

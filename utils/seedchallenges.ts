@@ -38,32 +38,50 @@ function isoWeekKey(d: Date = new Date()): string {
   );
   return `${dt.getUTCFullYear()}-${String(week).padStart(2, '0')}`;
 }
-function pickRotate<T extends { id?: any }>(arr: T[], count: number, seedNum: number): T[] {
-  if (!arr.length || count <= 0) return [];
-  const want = Math.min(count, arr.length);
-  const start = seedNum % arr.length;
 
+/** Small deterministic PRNG (Mulberry32) so selections are stable per week+user */
+function rng(seed: number) {
+  let t = seed >>> 0;
+  return () => {
+    t += 0x6D2B79F5;
+    let r = Math.imul(t ^ (t >>> 15), 1 | t);
+    r ^= r + Math.imul(r ^ (r >>> 7), 61 | r);
+    return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Deterministically sample N distinct items */
+function pickDistinct<T extends { id?: string }>(
+  arr: T[],
+  count: number,
+  seedNum: number
+): T[] {
+  if (!arr.length || count <= 0) return [];
+  const rand = rng(seedNum);
+  const idx = arr.map((_, i) => i);
+  // Fisher–Yates partial shuffle
+  for (let i = idx.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [idx[i], idx[j]] = [idx[j], idx[i]];
+  }
+  const take = Math.min(count, idx.length);
   const out: T[] = [];
   const seen = new Set<string>();
-
-  // Walk circularly from the seeded start; ensure uniqueness by id
-  let i = 0;
-  while (out.length < want && i < arr.length * 2) {
-    const item = arr[(start + i) % arr.length];
-    const key =
-      item && (item as any).id != null
-        ? String((item as any).id)
-        : String((start + i) % arr.length);
+  for (let k = 0; k < take; k++) {
+    const item = arr[idx[k]];
+    const key = item?.id ? String(item.id) : String(idx[k]);
     if (!seen.has(key)) {
-      out.push(item);
       seen.add(key);
+      out.push(item);
     }
-    i++;
   }
   return out;
 }
+
 function withTier(c: SeedChallenge, tier: Tier): SeedChallenge {
-  return { ...c, tier };
+  // clone to avoid accidental mutation upstream
+  const { id, title, description, category, difficulty, points } = c;
+  return { id, title, description, category, difficulty, points, tier };
 }
 
 // ---------------------------------------------------------------------------
@@ -340,60 +358,65 @@ export function getWeeklyChallengeSet(opts: {
   const locked: SeedChallenge[] = [];
 
   if (plan === 'free') {
-    // 1 open Easy
-    const e = pickRotate(easy, 1, seed ^ 0x1111);
+    // Always one open Easy
+    const e = pickDistinct(easy, 1, seed ^ 0x1111);
     if (e[0]) visible.push(withTier(e[0], 'base'));
 
-    // 1 teased Hard (locked until 25)
-    const h = pickRotate(hard, 1, seed ^ 0x3333);
+    // One teased Hard (unlocks at 25pts)
+    const h = pickDistinct(hard, 1, seed ^ 0x3333);
     if (h[0]) {
-      const teased = weeklyPoints >= 25 ? withTier(h[0], 'base') : withTier(h[0], '25');
-      (weeklyPoints >= 25 ? visible : locked).push(teased);
+      const item = weeklyPoints >= 25 ? withTier(h[0], 'base') : withTier(h[0], '25');
+      (weeklyPoints >= 25 ? visible : locked).push(item);
     }
 
     return { visible, locked };
   }
 
   // PREMIUM
-  const ePick = pickRotate(easy, 3, seed ^ 0x1111);
-  const mPick = pickRotate(med,  3, seed ^ 0x2222);
-  const hPick = pickRotate(hard, 3, seed ^ 0x3333);
-  const pPick = pickRotate(pro,  3, seed ^ 0x4444);
+  const ePick = pickDistinct(easy, 3, seed ^ 0x1111);
+  const mPick = pickDistinct(med,  3, seed ^ 0x2222);
+  const hPick = pickDistinct(hard, 3, seed ^ 0x3333);
+  const pPick = pickDistinct(pro,  3, seed ^ 0x4444);
 
   // Easy: all 3 open
   visible.push(...ePick.map((c) => withTier(c, 'base')));
 
-  // Medium: 1 open, 2 locked at 10
-  const mGate = mPick.slice(1);
+  // Medium: 1 open, 2 gated at 10
   if (mPick[0]) visible.push(withTier(mPick[0], 'base'));
+  const mGate = mPick.slice(1).map((c) => withTier(c, '10'));
   if (weeklyPoints >= 10) {
     visible.push(...mGate.map((c) => withTier(c, 'base')));
   } else {
-    locked.push(...mGate.map((c) => withTier(c, '10')));
+    locked.push(...mGate);
   }
 
-  // Hard: 1 open, 2 locked at 25
-  const hGate = hPick.slice(1);
+  // Hard: 1 open, 2 gated at 25
   if (hPick[0]) visible.push(withTier(hPick[0], 'base'));
+  const hGate = hPick.slice(1).map((c) => withTier(c, '25'));
   if (weeklyPoints >= 25) {
     visible.push(...hGate.map((c) => withTier(c, 'base')));
   } else {
-    locked.push(...hGate.map((c) => withTier(c, '25')));
+    locked.push(...hGate);
   }
 
-  // Pro: 1 open (if available), 2 locked at 50
-  const pGate = pPick.slice(1);
+  // Pro: 1 open (if available), 2 gated at 50
   if (pPick[0]) visible.push(withTier(pPick[0], 'base'));
+  const pGate = pPick.slice(1).map((c) => withTier(c, '50'));
   if (weeklyPoints >= 50) {
     visible.push(...pGate.map((c) => withTier(c, 'base')));
   } else {
-    locked.push(...pGate.map((c) => withTier(c, '50')));
+    locked.push(...pGate);
   }
 
-  // Ensure no duplicates across visible/locked (by id)
+  // Defensive de-dupe across both buckets
   const seen = new Set<string>();
   const dedupe = (arr: SeedChallenge[]) =>
-    arr.filter((c) => (c?.id ? !seen.has(c.id) && (seen.add(c.id), true) : true));
+    arr.filter((c) => {
+      const key = c.id ?? `${c.title}|${c.category}|${c.difficulty}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 
   return { visible: dedupe(visible), locked: dedupe(locked) };
 }
@@ -459,9 +482,11 @@ export function sanityCheckChallenges() {
       const eOpen = visible.filter(c => c.difficulty === 'easy').length;
       const mOpen = visible.filter(c => c.difficulty === 'medium').length;
       const hOpen = visible.filter(c => c.difficulty === 'hard').length;
+      const pOpen = visible.filter(c => c.difficulty === 'pro').length;
       console.assert(eOpen >= 3, `[${label}] premium should open 3 easy, got ${eOpen}`);
       console.assert(mOpen >= 1, `[${label}] premium should open ≥1 medium`);
       console.assert(hOpen >= 1, `[${label}] premium should open ≥1 hard`);
+      console.assert(pOpen >= 1, `[${label}] premium should open ≥1 pro`);
     }
 
     console.log(`[sanity] ${label}: visible=${visible.length}, locked=${locked.length}`);
