@@ -22,7 +22,7 @@ import Card from '../components/Card';
 import Input from '../components/Input';
 import sharedStyles from '../components/sharedStyles';
 import ThemedText from '../components/ThemedText';
-import { useTokens } from '../components/ThemeProvider'; // ✅ use theme (instead of raw tokens)
+import { useTokens } from '../components/ThemeProvider';
 
 import { auth, db } from '../firebaseConfig';
 
@@ -35,17 +35,16 @@ async function ensureUserDoc(
   const ref = doc(db, 'users', uid);
   const snap = await getDoc(ref);
   if (!snap.exists()) {
-    // Defaults that guarantee FREE plan for brand-new users
+    // Free, by default — do NOT set any premium flag here
     await setDoc(ref, {
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
       email: data.email ?? null,
       displayName: data.displayName ?? null,
       pairId: null,
-      // ↓ add whatever your paywall hook reads — these values are safe no-premium defaults
-      isPremium: false,
-      premiumUntil: null,
-      planTier: 'free',
+      plan: 'free',          // optional, used by usePlan.ts
+      isPremium: false,      // safe default for older code paths
+      premiumUntil: null,    // safe default for older code paths
     });
   }
 }
@@ -54,31 +53,32 @@ function normalizeEmail(v: string) {
   return v.trim().toLowerCase();
 }
 
+function friendlyAuth(code?: string): string {
+  switch (code) {
+    case 'auth/invalid-login-credentials':
+    case 'auth/invalid-credential':
+    case 'auth/wrong-password':
+      return 'Email or password is incorrect.';
+    case 'auth/user-not-found':
+      return 'No account found with that email.';
+    case 'auth/email-already-in-use':
+      return 'That email is already registered. Try signing in instead.';
+    case 'auth/weak-password':
+      return 'Please choose a stronger password (at least 6 characters).';
+    default:
+      return 'Please try again.';
+  }
+}
+
 const LoginScreen: React.FC = () => {
   const t = useTokens();
+
   const [mode, setMode] = useState<Mode>('login');
   const [email, setEmail] = useState('');
   const [pass, setPass] = useState('');
   const [loading, setLoading] = useState(false);
   const [demoLoading, setDemoLoading] = useState(false);
   const [sendingReset, setSendingReset] = useState(false);
-
-  function prettyAuthError(code?: string) {
-    switch (code) {
-      case 'auth/invalid-login-credentials':
-      case 'auth/invalid-credential':
-      case 'auth/wrong-password':
-        return 'Email or password is incorrect.';
-      case 'auth/user-not-found':
-        return 'No account found with that email.';
-      case 'auth/email-already-in-use':
-        return 'That email is already registered. Try signing in instead.';
-      case 'auth/weak-password':
-        return 'Please choose a stronger password (at least 6 characters).';
-      default:
-        return 'Please try again.';
-    }
-  }
 
   async function onPrimary() {
     const em = normalizeEmail(email);
@@ -106,8 +106,7 @@ const LoginScreen: React.FC = () => {
         });
       }
     } catch (e: any) {
-      const msg = prettyAuthError(e?.code);
-      Alert.alert('Authentication failed', msg);
+      Alert.alert('Authentication failed', friendlyAuth(e?.code));
     } finally {
       setLoading(false);
     }
@@ -116,15 +115,15 @@ const LoginScreen: React.FC = () => {
   async function onForgotPassword() {
     const em = normalizeEmail(email);
     if (!em) {
-      Alert.alert('Enter your email', 'Type your email above and try again.');
+      Alert.alert('Enter your email', 'Type your email first so we can send a reset link.');
       return;
     }
     setSendingReset(true);
     try {
       await sendPasswordResetEmail(auth, em);
-      Alert.alert('Check your email', 'We sent a password reset link.');
+      Alert.alert('Check your inbox', 'We sent you a password reset link.');
     } catch (e: any) {
-      Alert.alert('Couldn’t send reset email', prettyAuthError(e?.code));
+      Alert.alert('Couldn’t send reset', friendlyAuth(e?.code));
     } finally {
       setSendingReset(false);
     }
@@ -136,7 +135,12 @@ const LoginScreen: React.FC = () => {
       const cred = await signInAnonymously(auth);
       await ensureUserDoc(cred.user.uid, { email: null, displayName: 'Guest' });
     } catch (e: any) {
-      Alert.alert('Demo sign-in failed', 'Please try again.');
+      const code = e?.code as string | undefined;
+      const msg =
+        code === 'auth/operation-not-allowed'
+          ? 'Demo is disabled. In Firebase Console → Authentication → Sign-in method, enable Anonymous.'
+          : friendlyAuth(code);
+      Alert.alert('Demo sign-in failed', msg);
     } finally {
       setDemoLoading(false);
     }
@@ -144,7 +148,7 @@ const LoginScreen: React.FC = () => {
 
   return (
     <KeyboardAvoidingView
-      style={[sharedStyles.screen, { backgroundColor: t.colors.bg }]}  // ✅ themed background
+      style={[sharedStyles.screen, { backgroundColor: t.colors.bg }]}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
       <View style={[styles.center, { padding: t.spacing.md }]}>
@@ -158,7 +162,7 @@ const LoginScreen: React.FC = () => {
         <Card style={{ marginTop: t.spacing.lg, width: '100%' }}>
           <Input
             value={email}
-            onChangeText={(v) => setEmail(v)}
+            onChangeText={setEmail}
             keyboardType="email-address"
             autoCapitalize="none"
             autoCorrect={false}
@@ -190,10 +194,7 @@ const LoginScreen: React.FC = () => {
             disabled={loading}
           />
 
-          <Pressable
-            onPress={onForgotPassword}
-            style={{ alignSelf: 'center', marginTop: t.spacing.s }}
-          >
+          <Pressable onPress={onForgotPassword} style={{ alignSelf: 'center', marginTop: t.spacing.s }}>
             <ThemedText variant="button" color={t.colors.primary}>
               {sendingReset ? 'Sending reset…' : 'Forgot password?'}
             </ThemedText>
@@ -213,19 +214,14 @@ const LoginScreen: React.FC = () => {
 
         <View style={{ height: t.spacing.lg }} />
 
-        {/* was `secondary` -> invalid; use `outline` to match your Button variants */}
+        {/* Use a supported variant */}
         <Button
           variant="outline"
           label={demoLoading ? 'Starting demo…' : 'Continue with Demo'}
           onPress={onDemo}
           disabled={demoLoading}
         />
-        <ThemedText
-          variant="caption"
-          color={t.colors.textDim}
-          style={{ marginTop: t.spacing.xs }}
-          center
-        >
+        <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: t.spacing.xs }} center>
           Demo uses an anonymous account. You can pair later in Settings.
         </ThemedText>
       </View>

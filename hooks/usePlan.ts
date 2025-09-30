@@ -1,31 +1,78 @@
 // hooks/usePlan.ts
 import { doc, onSnapshot } from 'firebase/firestore';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { db } from '../firebaseConfig';
 
 export type Plan = 'free' | 'premium';
 
 export type UsePlanResult = {
   plan: Plan;
-  /** Derived convenience boolean so callers don't have to compare strings */
   isPremium: boolean;
-  /** True until the first snapshot resolves (or we decide there's no uid) */
   loading: boolean;
 };
 
+/** Robustly convert a Firestore Timestamp / millis / ISO to ms (or null). */
+function toMillis(v: any): number | null {
+  if (!v) return null;
+  if (typeof v === 'number') return v;
+  if (typeof v === 'string') {
+    const ms = Date.parse(v);
+    return Number.isFinite(ms) ? ms : null;
+  }
+  if (typeof v === 'object') {
+    if (typeof v.toMillis === 'function') {
+      try {
+        return v.toMillis();
+      } catch {}
+    }
+    if (typeof v.seconds === 'number') return Math.round(v.seconds * 1000);
+  }
+  return null;
+}
+
+/** Decide whether premium is active based on doc fields. */
+function derivePremiumFromDoc(d: any): { plan: Plan; isPremium: boolean; premiumUntilMs: number | null } {
+  const rawPlan = (d?.plan as Plan | undefined) ?? undefined;
+  const legacyBool = d?.isPremium as boolean | undefined;
+  const untilMs = toMillis(d?.premiumUntil);
+
+  // If an expiry exists, it always wins.
+  if (untilMs != null) {
+    const active = untilMs > Date.now();
+    return { plan: active ? 'premium' : 'free', isPremium: active, premiumUntilMs: untilMs };
+  }
+
+  // Otherwise fall back to explicit flags.
+  if (rawPlan === 'premium' || legacyBool === true) {
+    return { plan: 'premium', isPremium: true, premiumUntilMs: null };
+  }
+
+  return { plan: 'free', isPremium: false, premiumUntilMs: null };
+}
+
 /**
- * Rich plan hook that exposes the raw `plan`, a derived `isPremium` boolean and a `loading` flag.
- * This keeps old code working (via the default export below) while giving newer screens
- * a nicer API without creating another hook file.
+ * Rich plan hook that:
+ *  - treats users without any plan fields as FREE,
+ *  - respects `premiumUntil` for auto-expiry,
+ *  - updates live when the timestamp passes (no reload needed).
  */
 export function usePlanPlus(uid?: string | null): UsePlanResult {
   const [plan, setPlan] = useState<Plan>('free');
-  const [loading, setLoading] = useState<boolean>(true);
+  const [loading, setLoading] = useState(true);
+  const [isPremium, setIsPremium] = useState(false);
+
+  const expiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    // No user → default to free and resolve loading immediately.
+    // Clear any running timer whenever uid changes/unmounts
+    if (expiryTimerRef.current) {
+      clearTimeout(expiryTimerRef.current);
+      expiryTimerRef.current = null;
+    }
+
     if (!uid) {
       setPlan('free');
+      setIsPremium(false);
       setLoading(false);
       return;
     }
@@ -34,28 +81,46 @@ export function usePlanPlus(uid?: string | null): UsePlanResult {
     const off = onSnapshot(
       ref,
       (snap) => {
-        const p = (snap.exists() ? (snap.data() as any)?.plan : null) as Plan | null;
-        setPlan(p === 'premium' ? 'premium' : 'free');
+        const data = snap.exists() ? snap.data() : null;
+        const derived = derivePremiumFromDoc(data);
+
+        setPlan(derived.plan);
+        setIsPremium(derived.isPremium);
         setLoading(false);
+
+        // If we have a future expiry, set a one-shot timer to flip the UI exactly at expiry.
+        if (expiryTimerRef.current) {
+          clearTimeout(expiryTimerRef.current);
+          expiryTimerRef.current = null;
+        }
+        if (derived.premiumUntilMs && derived.premiumUntilMs > Date.now()) {
+          expiryTimerRef.current = setTimeout(() => {
+            setPlan('free');
+            setIsPremium(false);
+          }, derived.premiumUntilMs - Date.now());
+        }
       },
-      (err) => {
-        // Fail safe: never block UI if Firestore throws (offline, perms, etc.)
-        console.warn('[usePlan] onSnapshot error', err);
+      () => {
+        // Fail safe: never block UI if Firestore throws (offline/perms/etc.)
         setPlan('free');
+        setIsPremium(false);
         setLoading(false);
       }
     );
 
-    return () => off();
+    return () => {
+      off();
+      if (expiryTimerRef.current) {
+        clearTimeout(expiryTimerRef.current);
+        expiryTimerRef.current = null;
+      }
+    };
   }, [uid]);
 
-  return { plan, isPremium: plan === 'premium', loading };
+  return { plan, isPremium, loading };
 }
 
-/**
- * Backwards-compatible hook that returns only the string plan.
- * Existing imports keep working: `const plan = usePlan(uid)`
- */
+/** Back-compat shim: old code imports the string plan only. */
 export default function usePlan(uid?: string | null): Plan {
   return usePlanPlus(uid).plan;
 }
