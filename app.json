@@ -8,8 +8,9 @@
     "userInterfaceStyle": "automatic",
     "icon": "./assets/icon.png",
 
+  
     "splash": {
-      "image": "./assets/splash.png",
+      "image": "./assets/splash-fullbleed.png",
       "resizeMode": "cover",
       "backgroundColor": "#F9FAFB"
     },
@@ -27,7 +28,7 @@
         "ITSAppUsesNonExemptEncryption": false
       },
       "splash": {
-        "image": "./assets/splash.png",
+        "image": "./assets/splash-fullbleed.png",
         "resizeMode": "cover",
         "backgroundColor": "#F9FAFB"
       }
@@ -45,7 +46,7 @@
         "android.permission.RECORD_AUDIO"
       ],
       "splash": {
-        "image": "./assets/splash.png",
+        "image": "./assets/splash-fullbleed.png",
         "resizeMode": "cover",
         "backgroundColor": "#F9FAFB"
       }
