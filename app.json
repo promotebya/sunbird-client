@@ -6,13 +6,13 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
+
     "icon": "./assets/icon.png",
 
-  
     "splash": {
-      "image": "./assets/splash-fullbleed.png",
+      "image": "./assets/splash.png",
       "resizeMode": "cover",
-      "backgroundColor": "#F9FAFB"
+      "backgroundColor": "#F5EFE9"
     },
 
     "assetBundlePatterns": ["**/*"],
@@ -20,23 +20,18 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.promotebya.LovePointsApp",
-      "buildNumber": "1.0.0",
+      "buildNumber": "1.0.1",               
       "infoPlist": {
         "NSPhotoLibraryUsageDescription": "We need access to your photos to add memories.",
         "NSCameraUsageDescription": "We use your camera to capture memory photos and scan QR codes.",
         "NSMicrophoneUsageDescription": "We use the microphone for video capture.",
         "ITSAppUsesNonExemptEncryption": false
-      },
-      "splash": {
-        "image": "./assets/splash-fullbleed.png",
-        "resizeMode": "cover",
-        "backgroundColor": "#F9FAFB"
       }
     },
 
     "android": {
       "package": "com.promotebya.lovepoints",
-      "versionCode": 1,
+      "versionCode": 2,                     
       "adaptiveIcon": {
         "foregroundImage": "./assets/icon.png",
         "backgroundColor": "#FFFFFF"
@@ -44,18 +39,10 @@
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO"
-      ],
-      "splash": {
-        "image": "./assets/splash-fullbleed.png",
-        "resizeMode": "cover",
-        "backgroundColor": "#F9FAFB"
-      }
+      ]
     },
 
-    "notification": {
-      "icon": "./assets/icon.png",
-      "color": "#FF4F8B"
-    },
+    "notification": { "icon": "./assets/icon.png", "color": "#FF4F8B" },
 
     "plugins": [
       [
@@ -75,16 +62,14 @@
       "expo-notifications"
     ],
 
-    "extra": {
-      "eas": {
-        "projectId": "d791c6d2-2f30-4b8e-b5b6-0f52eb421bf3"
-      }
-    },
+    "extra": { "eas": { "projectId": "d791c6d2-2f30-4b8e-b5b6-0f52eb421bf3" } },
 
     "runtimeVersion": { "policy": "appVersion" },
     "jsEngine": "hermes",
     "updates": {
-      "url": "https://u.expo.dev/d791c6d2-2f30-4b8e-b5b6-0f52eb421bf3"
+      "url": "https://u.expo.dev/d791c6d2-2f30-4b8e-b5b6-0f52eb421bf3",
+      "fallbackToCacheTimeout": 0,
+      "checkAutomatically": "ON_ERROR_RECOVERY"
     }
   }
 }
