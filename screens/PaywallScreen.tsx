@@ -1,3 +1,4 @@
+// screens/PaywallScreen.tsx
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useEffect, useMemo, useState } from 'react';
@@ -8,6 +9,8 @@ import Card from '../components/Card';
 import ThemedText from '../components/ThemedText';
 import { useTokens, type ThemeTokens } from '../components/ThemeProvider';
 
+import { doc, setDoc } from 'firebase/firestore';
+import { db } from '../firebaseConfig';
 import useAuthListener from '../hooks/useAuthListener';
 import { usePlanPlus } from '../hooks/usePlan';
 import { purchase, restore, usePro } from '../utils/subscriptions';
@@ -16,7 +19,7 @@ type Plan = 'monthly' | 'yearly';
 
 function withAlpha(hex: string, alpha: number) {
   const h = hex.replace('#', '');
-  const full = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
+  const full = h.length === 3 ? h.split('').map((c) => c + c).join('') : h;
   const a = Math.round(alpha * 255).toString(16).padStart(2, '0');
   return `#${full}${a}`;
 }
@@ -31,13 +34,15 @@ export default function PaywallScreen() {
   const [plan, setPlan] = useState<Plan>(initialPlan);
   const [busy, setBusy] = useState(false);
 
-  // RevenueCat (prices + entitlement)
-  const { hasPro, offerings, loading: rcLoading } = usePro();
+  // Current user
+  const { user } = useAuthListener();
+
+  // Mock store (scoped by uid inside usePro)
+  const { hasPro, offerings, loading: rcLoading } = usePro(user?.uid);
   const annual = offerings?.annual;
   const monthly = offerings?.monthly;
 
   // Firestore plan (app source of truth)
-  const { user } = useAuthListener();
   const { isPremium, loading: planLoading } = usePlanPlus(user?.uid);
 
   const effectivePremium = !!(isPremium || hasPro);
@@ -59,8 +64,21 @@ export default function PaywallScreen() {
     );
   }
 
-  const yearlyPrice  = annual?.priceString  ?? '€19.99';
+  const yearlyPrice = annual?.priceString ?? '€19.99';
   const monthlyPrice = monthly?.priceString ?? '€2.99';
+
+  async function markUserPremium() {
+    if (!user?.uid) return;
+    try {
+      await setDoc(
+        doc(db, 'users', user.uid),
+        { plan: 'premium' },
+        { merge: true }
+      );
+    } catch (e) {
+      console.warn('[Paywall] failed to mark user premium', e);
+    }
+  }
 
   async function handleBuy(p: Plan) {
     try {
@@ -71,10 +89,13 @@ export default function PaywallScreen() {
       }
       setBusy(true);
       const ok = await purchase(pkg);
-      if (!ok) {
+      if (ok) {
+        // Reflect Premium in Firestore so the rest of the app unlocks.
+        await markUserPremium();
+        // Don’t goBack here; the effect above will close once hooks reflect it.
+      } else {
         Alert.alert('Purchase canceled');
       }
-      // Do NOT goBack here; we wait for entitlement/plan to flip.
     } catch (e: any) {
       Alert.alert('Purchase failed', e?.message ?? 'Please try again.');
     } finally {
@@ -86,10 +107,11 @@ export default function PaywallScreen() {
     try {
       setBusy(true);
       const ok = await restore();
-      if (!ok) {
+      if (ok) {
+        await markUserPremium();
+      } else {
         Alert.alert('Nothing to restore', 'No active purchases found for this Apple ID.');
       }
-      // Wait for entitlement to reflect.
     } catch (e: any) {
       Alert.alert('Restore failed', e?.message ?? 'Please try again.');
     } finally {
@@ -219,8 +241,9 @@ const styles = (t: ThemeTokens) =>
       borderRadius: 999,
       backgroundColor: t.colors.primary,
     },
-    benefitRow: { flexDirection: 'row', alignItems: 'flex-start', marginVertical: 6 },
-    benefitIcon: { marginTop: 3 },
+    // Bullet alignment (icon vertically centered with multi-line text)
+    benefitRow: { flexDirection: 'row', alignItems: 'center', marginVertical: 6 },
+    benefitIcon: { marginTop: 0 },
     benefitText: { marginLeft: 8, lineHeight: 22, flex: 1 },
 
     planToggle: {
@@ -241,6 +264,7 @@ const styles = (t: ThemeTokens) =>
     },
     planChipActive: { backgroundColor: t.colors.primary },
 
+    // “Best value” shown *under* the €19.99/yr text
     valueTagBelow: {
       marginTop: 6,
       paddingHorizontal: 8,

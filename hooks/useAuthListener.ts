@@ -4,14 +4,12 @@ import { onAuthStateChanged } from 'firebase/auth';
 import { useEffect, useRef, useState } from 'react';
 
 import { auth } from '../firebaseConfig';
+import { setCurrentSubscriptionsUser } from '../utils/subscriptions';
 import { ensureUserDoc } from '../utils/users';
 
 /**
  * Subscribes to Firebase Auth state and ensures a /users/{uid} doc exists
- * whenever someone signs in.
- *
- * Usage:
- *   const { user, loading } = useAuthListener();
+ * whenever someone signs in. Also scopes the mock subscription layer to this UID.
  */
 export default function useAuthListener() {
   const [user, setUser] = useState<User | null>(null);
@@ -24,6 +22,9 @@ export default function useAuthListener() {
     const unsub = onAuthStateChanged(auth, async (u) => {
       setUser(u);
       setLoading(false);
+
+      // Scope mock subscriptions to the current uid so entitlements are per-account
+      await setCurrentSubscriptionsUser(u?.uid ?? null);
 
       if (u && ensuredRef.current !== u.uid) {
         ensuredRef.current = u.uid;

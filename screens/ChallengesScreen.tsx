@@ -1,3 +1,4 @@
+// screens/ChallengesScreen.tsx
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { useCallback, useMemo, useState } from 'react';
@@ -428,7 +429,7 @@ export default function ChallengesScreen() {
         challenges you’ll actually look forward to.
       </ThemedText>
 
-      {/* bullets */}
+      {/* bullets (match Paywall) */}
       <View style={{ marginTop: 12 }}>
         {[
           'Unlock 12 curated challenges every week',
@@ -437,7 +438,12 @@ export default function ChallengesScreen() {
           'One subscription covers both partners',
         ].map((line) => (
           <View key={line} style={s.bulletRow}>
-            <Ionicons name="checkmark-circle" size={16} color={t.colors.primary} style={s.bulletIcon} />
+            <Ionicons
+              name="checkmark-circle"
+              size={16}
+              color={t.colors.primary}
+              style={s.bulletIcon}
+            />
             <ThemedText variant="body" style={s.bulletText}>
               {line}
             </ThemedText>
@@ -482,7 +488,8 @@ export default function ChallengesScreen() {
         flex: 1,
         backgroundColor: t.colors.bg,
         paddingTop: insets.top + t.spacing.md,
-        paddingBottom: insets.bottom + 12,
+        // IMPORTANT: no bottom padding here -> prevents the visible bar under the tab bar
+        paddingBottom: 0,
         paddingHorizontal: t.spacing.lg,
       }}
     >
@@ -499,7 +506,8 @@ export default function ChallengesScreen() {
         ItemSeparatorComponent={() => <View style={{ height: t.spacing.s }} />}
         SectionSeparatorComponent={() => <View style={{ height: t.spacing.s }} />}
         stickySectionHeadersEnabled={false}
-        contentContainerStyle={{ paddingBottom: t.spacing.xl }}
+        // Push bottom spacing into the list content instead of the root container
+        contentContainerStyle={{ paddingBottom: insets.bottom + t.spacing.xl }}
         showsVerticalScrollIndicator={false}
         renderItem={({ item }) => {
           const c: any = item.c;
@@ -684,7 +692,7 @@ const styles = (t: ThemeTokens) =>
       backgroundColor: t.colors.primary,
     },
 
-    // Bullets like Paywall: left-aligned, icon centered to first text line
+    // Bullets exactly like Paywall: left-aligned text, icon aligned to first line
     bulletRow: {
       flexDirection: 'row',
       alignItems: 'flex-start',
