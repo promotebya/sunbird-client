@@ -11,32 +11,39 @@ export type UsePlanResult = {
   loading: boolean;
 };
 
-function toMillis(v: any): number | null {
-  if (!v) return null;
-  if (typeof v === 'number') return v;
-  if (typeof v === 'string') {
-    const t = Date.parse(v);
-    return Number.isNaN(t) ? null : t;
+// Accept Firestore Timestamp, Date, number (ms), or ISO string
+function isFuture(d: any): boolean {
+  if (!d) return false;
+  try {
+    const t =
+      typeof d?.toDate === 'function' ? d.toDate().getTime()
+      : d instanceof Date                  ? d.getTime()
+      : typeof d === 'number'              ? d
+      : typeof d === 'string'              ? new Date(d).getTime()
+      : NaN;
+    return Number.isFinite(t) && t > Date.now();
+  } catch {
+    return false;
   }
-  if (typeof v?.toMillis === 'function') return v.toMillis();
-  return null;
 }
 
 /**
- * Defaults to FREE. Becomes PREMIUM only if:
- * - premiumUntil is in the future, OR
- * - plan === 'premium', OR
- * - isPremium === true
- * (premiumUntil takes precedence; if it's present but expired, we treat as FREE)
+ * Authoritative plan resolver:
+ * - Defaults to FREE.
+ * - PREMIUM if any of:
+ *   - users/{uid}.plan === 'premium'
+ *   - users/{uid}.isPremium === true (legacy support)
+ *   - users/{uid}.premiumUntil is in the future (timestamp/ISO/date/number)
  */
 export function usePlanPlus(uid?: string | null): UsePlanResult {
-  const [plan, setPlan] = useState<Plan>('free');
-  const [loading, setLoading] = useState(true);
+  const [state, setState] = useState<{ plan: Plan; loading: boolean }>({
+    plan: 'free',
+    loading: !!uid,
+  });
 
   useEffect(() => {
     if (!uid) {
-      setPlan('free');
-      setLoading(false);
+      setState({ plan: 'free', loading: false });
       return;
     }
 
@@ -44,32 +51,27 @@ export function usePlanPlus(uid?: string | null): UsePlanResult {
     const off = onSnapshot(
       ref,
       (snap) => {
-        const data = snap.exists() ? (snap.data() as any) : {};
-        const untilMs = toMillis(data?.premiumUntil);
-        const now = Date.now();
-        const activeByUntil = untilMs != null && untilMs > now;
-
-        // If premiumUntil exists but is expired -> force FREE regardless of other flags
-        let premium = false;
-        if (untilMs != null) {
-          premium = activeByUntil;
-        } else {
-          premium = data?.plan === 'premium' || data?.isPremium === true;
-        }
-
-        setPlan(premium ? 'premium' : 'free');
-        setLoading(false);
+        const data = snap.exists() ? (snap.data() as any) : null;
+        const premium =
+          data?.plan === 'premium' ||
+          data?.isPremium === true ||
+          isFuture(data?.premiumUntil);
+        setState({ plan: premium ? 'premium' : 'free', loading: false });
       },
-      (_err) => {
-        // Fail safe: never block UI
-        setPlan('free');
-        setLoading(false);
+      () => {
+        // Fail safe: never block UI if Firestore throws (offline, perms, etc.)
+        setState({ plan: 'free', loading: false });
       }
     );
+
     return () => off();
   }, [uid]);
 
-  return { plan, isPremium: plan === 'premium', loading };
+  return {
+    plan: state.plan,
+    isPremium: state.plan === 'premium',
+    loading: state.loading,
+  };
 }
 
 /** Back-compat shim (old imports expect just the string) */

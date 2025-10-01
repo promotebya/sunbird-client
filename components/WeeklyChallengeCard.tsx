@@ -1,23 +1,26 @@
-import tokens from 'components/tokens';
+// components/WeeklyChallengeCard.tsx
 import { useEffect, useState } from 'react';
 import { Pressable, Text, View } from 'react-native';
-import type { PairDoc, Plan } from 'types/models';
-import { claimWeeklyReward, ensureWeekly } from 'utils/challenges';
-import { listenPair } from 'utils/pairs';
+import { useTokens } from '../components/ThemeProvider';
+import type { Plan } from '../hooks/usePlan';
+import type { PairDoc } from '../types/models';
+import { claimWeeklyReward, ensureWeekly } from '../utils/challenges';
+import { listenPair } from '../utils/pairs';
 
 type Props = {
   pairId: string;
   tzOffsetMinutes: number;
-  plan: Plan; // 'free' | 'pro'
+  plan: Plan; // 'free' | 'premium'
 };
 
 export default function WeeklyChallengeCard({ pairId, tzOffsetMinutes, plan }: Props) {
+  const t = useTokens();
+
   const [progress, setProgress] = useState(0);
   const [target, setTarget] = useState(50);
   const [status, setStatus] = useState<'active' | 'completed' | 'missed'>('active');
 
   useEffect(() => {
-    // Ensure the doc exists/updated this week
     ensureWeekly(pairId, 50, tzOffsetMinutes).catch(console.warn);
     const unsub = listenPair(pairId, (p: (PairDoc & { id: string }) | null) => {
       const w = p?.weekly;
@@ -32,42 +35,40 @@ export default function WeeklyChallengeCard({ pairId, tzOffsetMinutes, plan }: P
   const pct = Math.min(100, Math.round((progress / Math.max(1, target)) * 100));
 
   const onClaim = async () => {
-    const rewardId = 'AUTO_PICK'; // TODO: wire to your picker
+    const rewardId = 'AUTO_PICK';
     await claimWeeklyReward(pairId, rewardId, tzOffsetMinutes);
   };
 
   return (
     <View
       style={{
-        backgroundColor: '#fff',
-        borderRadius: (tokens.radius?.lg ?? tokens.r?.lg ?? 16),
-        padding: (tokens.spacing?.lg ?? tokens.s?.lg ?? 16),
+        backgroundColor: t.colors.card,
+        borderRadius: t.radius.lg,
+        padding: t.spacing.lg,
         shadowColor: '#000',
         shadowOpacity: 0.06,
         shadowRadius: 8,
-        elevation: 2
+        elevation: 2,
       }}
     >
-      <Text style={{ fontSize: 18, fontWeight: '700', color: tokens.colors?.text ?? '#222' }}>
-        Weekly Challenge
-      </Text>
-      <Text style={{ marginTop: 6 }}>
+      <Text style={{ fontSize: 18, fontWeight: '700', color: t.colors.text }}>Weekly Challenge</Text>
+      <Text style={{ marginTop: 6, color: t.colors.textDim }}>
         {progress} / {target} points • {pct}%
       </Text>
 
-      <View style={{ height: 8, backgroundColor: '#eee', borderRadius: 999, marginTop: 8 }}>
+      <View style={{ height: 8, backgroundColor: t.colors.border, borderRadius: 999, marginTop: 8 }}>
         <View
           style={{
             width: `${pct}%`,
             height: 8,
             borderRadius: 999,
-            backgroundColor: tokens.colors?.primary ?? '#FF4F8B'
+            backgroundColor: t.colors.primary,
           }}
         />
       </View>
 
       {status !== 'completed' && pct >= 80 && (
-        <Text style={{ marginTop: 8 }}>🔥 Almost there! Plan your date idea.</Text>
+        <Text style={{ marginTop: 8, color: t.colors.text }}>🔥 Almost there! Plan your date idea.</Text>
       )}
 
       {status === 'active' && pct >= 100 && (
@@ -78,14 +79,16 @@ export default function WeeklyChallengeCard({ pairId, tzOffsetMinutes, plan }: P
             paddingVertical: 10,
             alignItems: 'center',
             borderRadius: 12,
-            backgroundColor: tokens.colors?.primary ?? '#FF4F8B'
+            backgroundColor: t.colors.primary,
           }}
         >
           <Text style={{ color: '#fff', fontWeight: '700' }}>Claim Reward</Text>
         </Pressable>
       )}
 
-      {status === 'completed' && <Text style={{ marginTop: 8 }}>✅ Completed — enjoy your date!</Text>}
+      {status === 'completed' && (
+        <Text style={{ marginTop: 8, color: t.colors.text }}>✅ Completed — enjoy your date!</Text>
+      )}
     </View>
   );
 }

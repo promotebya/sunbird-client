@@ -1,4 +1,3 @@
-// screens/ChallengesScreen.tsx
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { useCallback, useMemo, useState } from 'react';
@@ -18,7 +17,7 @@ import ThemedText from '../components/ThemedText';
 import { useTokens, type ThemeTokens } from '../components/ThemeProvider';
 
 import useAuthListener from '../hooks/useAuthListener';
-import usePlan from '../hooks/usePlan';
+import { usePlanPlus } from '../hooks/usePlan';
 import usePointsTotal from '../hooks/usePointsTotal';
 import {
   CHALLENGE_POOL,
@@ -79,13 +78,11 @@ function withAlpha(hex: string, alpha: number) {
   return `#${full}${a}`;
 }
 
-/** Normalise difficulty to our keys (accept strings or 0..3) */
 function normDiff(raw: any): DiffKey | undefined {
   if (raw == null) return undefined;
   const n = Number(raw);
   if (Number.isFinite(n)) return (['easy', 'medium', 'hard', 'pro'][Math.max(0, Math.min(3, n))] as DiffKey);
   const v = String(raw).trim().toLowerCase();
-  if (!v) return undefined;
   if (v.startsWith('e')) return 'easy';
   if (v.startsWith('m')) return 'medium';
   if (v.startsWith('h')) return 'hard';
@@ -101,13 +98,11 @@ function extractDiffStrict(c: any): DiffKey | undefined {
   }
   return undefined;
 }
+const extractTitleStrict = (c: any) =>
+  c?.title ?? c?.name ?? c?.heading ?? c?.prompt ?? c?.text ?? undefined;
+const extractDescriptionStrict = (c: any) =>
+  c?.description ?? c?.summary ?? c?.body ?? c?.details ?? undefined;
 
-function extractTitleStrict(c: any): string | undefined {
-  return c?.title ?? c?.name ?? c?.heading ?? c?.prompt ?? c?.text ?? undefined;
-}
-function extractDescriptionStrict(c: any): string | undefined {
-  return c?.description ?? c?.summary ?? c?.body ?? c?.details ?? undefined;
-}
 function extractCategoryStrict(c: any): CatKey | undefined {
   const candidates: Array<string | string[]> = [
     c?.category, c?.cat, c?.type, c?.topic, c?.tag, c?.tags, c?.labels, c?.categories,
@@ -133,23 +128,15 @@ function extractCategoryStrict(c: any): CatKey | undefined {
   return undefined;
 }
 
-function safeTitle(c: any): string {
-  return extractTitleStrict(c) ?? 'Challenge';
-}
-function safeDescription(c: any): string | undefined {
-  return extractDescriptionStrict(c);
-}
-function safeCategory(c: any): CatKey | undefined {
-  return extractCategoryStrict(c);
-}
+const safeTitle = (c: any) => extractTitleStrict(c) ?? 'Challenge';
+const safeDescription = (c: any) => extractDescriptionStrict(c);
+const safeCategory = (c: any) => extractCategoryStrict(c);
 
-/** Build a stable, unique row key */
 function rowKey(c: any, suffix: 'V' | 'L', index: number): string {
   const base = c?.id ?? c?.slug ?? `${safeTitle(c)}|${safeCategory(c) ?? 'na'}|${extractDiffStrict(c) ?? 'na'}`;
   return `${String(base)}__${suffix}_${index}`;
 }
 
-/** Merge where empty values from patch DO NOT overwrite base */
 function mergePreferBase<T extends Record<string, any>>(base: T, patch: Partial<T>): T {
   const out: any = { ...base };
   for (const [k, v] of Object.entries(patch)) {
@@ -161,7 +148,7 @@ function mergePreferBase<T extends Record<string, any>>(base: T, patch: Partial<
   return out as T;
 }
 
-/** Collapsible long text with robust toggle */
+/** Collapsible long text */
 function Clamp({
   text,
   lines = 4,
@@ -172,7 +159,6 @@ function Clamp({
   dimColor: string;
 }) {
   const [expanded, setExpanded] = useState(false);
-  // fallback heuristic so we still show the toggle if onTextLayout doesn't fire in some envs
   const [showToggle, setShowToggle] = useState<boolean>(text.length > 140);
 
   return (
@@ -226,11 +212,12 @@ export default function ChallengesScreen() {
   const s = useMemo(() => styles(t), [t]);
 
   const { user } = useAuthListener();
-  const planFromHook = usePlan(user?.uid);
-  const { total, weekly } = usePointsTotal(user?.uid);
+  const { isPremium } = usePlanPlus(user?.uid);
   const { hasPro } = usePro();
+  const { total, weekly } = usePointsTotal(user?.uid);
 
-  const safePlan: 'free' | 'premium' = hasPro || planFromHook === 'premium' ? 'premium' : 'free';
+  const effectivePremium = !!(isPremium || hasPro);
+  const safePlan: 'free' | 'premium' = effectivePremium ? 'premium' : 'free';
   const weeklySafe = Number.isFinite(weekly as any) ? Number(weekly) : 0;
 
   const [tab, setTab] = useState<DiffTabKey>('all');
@@ -246,7 +233,6 @@ export default function ChallengesScreen() {
     [safePlan, weeklySafe, user?.uid]
   );
 
-  // Index the pool by id for decoration.
   const POOL_BY_ID = useMemo(() => {
     const m = new Map<string, any>();
     for (const p of CHALLENGE_POOL) {
@@ -256,7 +242,6 @@ export default function ChallengesScreen() {
     return m;
   }, []);
 
-  // Fallback if selector produced nothing
   const selectionSafe = useMemo(() => {
     const totalCount = selection.visible.length + selection.locked.length;
     if (totalCount > 0) return selection;
@@ -279,18 +264,15 @@ export default function ChallengesScreen() {
 
   const allRows = useMemo<Row[]>(() => {
     const decorate = (c: SeedChallenge) => {
-      // decorate strictly by id; never infer by category/difficulty
       const id = (c as any)?.id;
       const base = id != null ? POOL_BY_ID.get(String(id)) : undefined;
       if (!base) return c;
 
       const merged = mergePreferBase(base, c as any);
-
       (merged as any).difficulty  = extractDiffStrict(c) ?? extractDiffStrict(base);
       (merged as any).title       = extractTitleStrict(c) ?? extractTitleStrict(base);
       (merged as any).description = extractDescriptionStrict(c) ?? extractDescriptionStrict(base);
       (merged as any).category    = extractCategoryStrict(c) ?? extractCategoryStrict(base);
-
       return merged as SeedChallenge;
     };
 
@@ -327,8 +309,6 @@ export default function ChallengesScreen() {
       .filter((sec) => sec.data.length > 0);
   }, [rowsByDiff, tab]);
 
-  /* ---------- legend (visible only) ---------- */
-
   const visibleByCat = useMemo(() => {
     const m: Record<CatKey, number> = { date: 0, kindness: 0, conversation: 0, surprise: 0, play: 0 };
     for (const r of allRows) {
@@ -342,13 +322,12 @@ export default function ChallengesScreen() {
 
   /* ---------- navigation helpers ---------- */
 
+  const navRef = useNavigation<any>();
   const openChallenge = useCallback(
     (seed: SeedChallenge) => {
       const params = { challengeId: seed.id, seed };
-
-      // Try current navigator and bubble up one level to handle Tabs-in-Stack setups.
       const targets = ['ChallengeDetail', 'ChallengeDetailScreen', 'Challenge', 'ChallengeDetails'];
-      const navigators = [nav, nav.getParent?.()].filter(Boolean) as any[];
+      const navigators = [navRef, navRef.getParent?.()].filter(Boolean) as any[];
 
       const canNavigateTo = (n: any, name: string) => {
         try {
@@ -376,34 +355,20 @@ export default function ChallengesScreen() {
             try {
               n.navigate(route as never, params as never);
               return;
-            } catch {
-              // try next
-            }
+            } catch {}
           }
         }
       }
 
-      // Fallback: attempt anyway on parent; otherwise show friendly message
       try {
-        (nav.getParent?.() ?? nav).navigate('ChallengeDetail', params as never);
+        (navRef.getParent?.() ?? navRef).navigate('ChallengeDetail', params as never);
       } catch (e) {
         console.warn('ChallengeDetail route not found.', e);
-        Alert.alert(
-          'Challenge',
-          'Opening the challenge requires a "ChallengeDetail" screen in your navigator.'
-        );
+        Alert.alert('Challenge', 'Opening the challenge requires a "ChallengeDetail" screen in your navigator.');
       }
     },
-    [nav]
+    [navRef]
   );
-
-  function buyPremium(plan: 'monthly' | 'yearly') {
-    try {
-      (nav.getParent?.() ?? nav).navigate('Paywall', { plan });
-    } catch {
-      Alert.alert('Premium', 'Purchases are coming soon ✨');
-    }
-  }
 
   /* ---------- header ---------- */
 
@@ -445,6 +410,70 @@ export default function ChallengesScreen() {
     </View>
   );
 
+  /* ---------- footer upsell (only for non-premium) ---------- */
+
+  const UpsellFooter = !effectivePremium ? (
+    <Card style={[s.upsellCard, { marginTop: t.spacing.lg, marginBottom: insets.bottom + 8 }]}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+        <View style={s.upsellBadge}>
+          <Ionicons name="sparkles" size={18} color="#fff" />
+        </View>
+        <ThemedText variant="title" style={{ marginLeft: 10 }}>
+          Bring your relationship to the next level
+        </ThemedText>
+      </View>
+
+      <ThemedText variant="body" color="textDim">
+        Go Premium to turn date night into a weekly adventure. Fresh, expert-curated
+        challenges you’ll actually look forward to.
+      </ThemedText>
+
+      {/* bullets */}
+      <View style={{ marginTop: 12 }}>
+        {[
+          'Unlock 12 curated challenges every week',
+          'New every week — always fun, romantic or surprising',
+          'Explore 200+ romantic, playful & competitive challenges',
+          'One subscription covers both partners',
+        ].map((line) => (
+          <View key={line} style={s.bulletRow}>
+            <Ionicons name="checkmark-circle" size={16} color={t.colors.primary} style={s.bulletIcon} />
+            <ThemedText variant="body" style={s.bulletText}>
+              {line}
+            </ThemedText>
+          </View>
+        ))}
+      </View>
+
+      <ThemedText variant="caption" color="textDim" style={{ marginTop: 12 }}>
+        Upgrade now and instantly unlock +5 more challenges today.
+      </ThemedText>
+      <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}>
+        <Ionicons name="lock-closed" size={14} color="#6B7280" />
+        <ThemedText variant="caption" color="textDim" style={{ marginLeft: 6 }}>
+          First look: Urban Photo Essay (date)
+        </ThemedText>
+      </View>
+
+      {/* themed CTA */}
+      <Pressable
+        onPress={() => {
+          try {
+            (nav.getParent?.() ?? nav).navigate('Paywall', { plan: 'monthly' });
+          } catch {
+            Alert.alert('Premium', 'Purchases are coming soon ✨');
+          }
+        }}
+        accessibilityRole="button"
+        style={s.tryPremiumBtn}
+      >
+        <ThemedText variant="button" color="#fff">
+          Try Premium
+        </ThemedText>
+      </Pressable>
+    </Card>
+  ) : null;
+
   /* ---------- render ---------- */
 
   return (
@@ -461,6 +490,7 @@ export default function ChallengesScreen() {
         sections={sections}
         keyExtractor={(item) => item.id}
         ListHeaderComponent={Header}
+        ListFooterComponent={UpsellFooter}
         renderSectionHeader={({ section }) => (
           <View style={s.sectionHeader}>
             <ThemedText variant="h2">{section.title}</ThemedText>
@@ -473,12 +503,14 @@ export default function ChallengesScreen() {
         showsVerticalScrollIndicator={false}
         renderItem={({ item }) => {
           const c: any = item.c;
-          const locked = item.locked;
           const dKey = extractDiffStrict(c) ?? 'easy';
           const diffLabel = DIFF_LABEL[dKey];
           const catKey = safeCategory(c);
           const title = safeTitle(c);
           const desc = safeDescription(c);
+
+          const lockedForPlan = safePlan === 'free' && dKey !== 'easy';
+          const finalLocked = item.locked || lockedForPlan;
 
           return (
             <Card style={s.card}>
@@ -489,9 +521,9 @@ export default function ChallengesScreen() {
                 <View style={{ flex: 1 }}>
                   <ThemedText variant="title">{title}</ThemedText>
 
-                  {!locked ? (
+                  {!finalLocked ? (
                     <>
-                      {!!desc && <Clamp text={desc} lines={4} dimColor={t.colors.textDim} />}
+                      {!!desc && <Clamp text={desc!} lines={4} dimColor={t.colors.textDim} />}
 
                       <View style={s.metaRow}>
                         {!!catKey && (
@@ -524,7 +556,13 @@ export default function ChallengesScreen() {
                       <Pressable
                         onPress={() => {
                           const msg = lockMessage(safePlan, c);
-                          if (msg.includes('Premium')) buyPremium('monthly');
+                          if (msg.includes('Premium')) {
+                            try {
+                              (nav.getParent?.() ?? nav).navigate('Paywall', { plan: 'monthly' });
+                            } catch {
+                              Alert.alert('Premium', 'Purchases are coming soon ✨');
+                            }
+                          }
                         }}
                         style={s.lockBtn}
                         accessibilityRole="button"
@@ -551,7 +589,7 @@ export default function ChallengesScreen() {
         }
       />
 
-      {hasPro ? (
+      {effectivePremium ? (
         <View style={[s.premiumBanner, { bottom: insets.bottom + 10 }]}>
           <Ionicons name="sparkles" size={14} color="#fff" />
           <ThemedText variant="label" color="#fff" style={{ marginLeft: 6 }}>
@@ -589,10 +627,7 @@ const styles = (t: ThemeTokens) =>
     legendItem: { flexDirection: 'row', alignItems: 'center', marginRight: 12, marginBottom: 6 },
     legendDot: { width: 8, height: 8, borderRadius: 999, marginRight: 6 },
 
-    sectionHeader: {
-      marginTop: t.spacing.md,
-      marginBottom: t.spacing.xs,
-    },
+    sectionHeader: { marginTop: t.spacing.md, marginBottom: t.spacing.xs },
 
     card: { marginTop: t.spacing.s },
     row: { flexDirection: 'row' },
@@ -632,6 +667,45 @@ const styles = (t: ThemeTokens) =>
       borderColor: t.colors.border,
       flexDirection: 'row',
       alignItems: 'center',
+    },
+
+    /* Upsell */
+    upsellCard: {
+      backgroundColor: withAlpha(t.colors.primary, 0.08),
+      borderColor: withAlpha(t.colors.primary, 0.18),
+      borderWidth: 1,
+    },
+    upsellBadge: {
+      width: 32,
+      height: 32,
+      borderRadius: 10,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: t.colors.primary,
+    },
+
+    // Bullets like Paywall: left-aligned, icon centered to first text line
+    bulletRow: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      marginTop: 10,
+    },
+    bulletIcon: { marginTop: 3 },
+    bulletText: {
+      marginLeft: 8,
+      lineHeight: 22,
+      textAlign: 'left',
+      flex: 1,
+    },
+
+    tryPremiumBtn: {
+      marginTop: 12,
+      alignSelf: 'stretch',
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingVertical: 12,
+      borderRadius: t.radius.lg,
+      backgroundColor: t.colors.primary,
     },
 
     premiumBanner: {

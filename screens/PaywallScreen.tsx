@@ -8,6 +8,8 @@ import Card from '../components/Card';
 import ThemedText from '../components/ThemedText';
 import { useTokens, type ThemeTokens } from '../components/ThemeProvider';
 
+import useAuthListener from '../hooks/useAuthListener';
+import { usePlanPlus } from '../hooks/usePlan';
 import { purchase, restore, usePro } from '../utils/subscriptions';
 
 type Plan = 'monthly' | 'yearly';
@@ -29,16 +31,23 @@ export default function PaywallScreen() {
   const [plan, setPlan] = useState<Plan>(initialPlan);
   const [busy, setBusy] = useState(false);
 
-  const { hasPro, offerings, loading } = usePro();
+  // RevenueCat (prices + entitlement)
+  const { hasPro, offerings, loading: rcLoading } = usePro();
   const annual = offerings?.annual;
   const monthly = offerings?.monthly;
 
-  // Close automatically once Pro becomes active
-  useEffect(() => {
-    if (hasPro) nav.goBack();
-  }, [hasPro, nav]);
+  // Firestore plan (app source of truth)
+  const { user } = useAuthListener();
+  const { isPremium, loading: planLoading } = usePlanPlus(user?.uid);
 
-  if (hasPro) {
+  const effectivePremium = !!(isPremium || hasPro);
+
+  // Close once either RC entitlement OR Firestore plan is active
+  useEffect(() => {
+    if (!planLoading && effectivePremium) nav.goBack();
+  }, [effectivePremium, planLoading, nav]);
+
+  if (!planLoading && effectivePremium) {
     return (
       <View style={s.center}>
         <Ionicons name="sparkles" size={22} color={t.colors.primary} />
@@ -62,8 +71,10 @@ export default function PaywallScreen() {
       }
       setBusy(true);
       const ok = await purchase(pkg);
-      if (!ok) Alert.alert('Purchase canceled');
-      // on success, effect will close view
+      if (!ok) {
+        Alert.alert('Purchase canceled');
+      }
+      // Do NOT goBack here; we wait for entitlement/plan to flip.
     } catch (e: any) {
       Alert.alert('Purchase failed', e?.message ?? 'Please try again.');
     } finally {
@@ -75,7 +86,10 @@ export default function PaywallScreen() {
     try {
       setBusy(true);
       const ok = await restore();
-      if (!ok) Alert.alert('Nothing to restore', 'No active purchases found for this Apple ID.');
+      if (!ok) {
+        Alert.alert('Nothing to restore', 'No active purchases found for this Apple ID.');
+      }
+      // Wait for entitlement to reflect.
     } catch (e: any) {
       Alert.alert('Restore failed', e?.message ?? 'Please try again.');
     } finally {
@@ -114,8 +128,8 @@ export default function PaywallScreen() {
           'One subscription covers both partners',
         ].map((x) => (
           <View key={x} style={s.benefitRow}>
-            <Ionicons name="checkmark-circle" size={16} color={t.colors.primary} />
-            <ThemedText variant="body" style={{ marginLeft: 8 }}>{x}</ThemedText>
+            <Ionicons name="checkmark-circle" size={16} color={t.colors.primary} style={s.benefitIcon} />
+            <ThemedText variant="body" style={s.benefitText}>{x}</ThemedText>
           </View>
         ))}
 
@@ -143,12 +157,18 @@ export default function PaywallScreen() {
             <ThemedText variant="label" color={plan === 'yearly' ? '#fff' : t.colors.text}>
               Yearly
             </ThemedText>
-            <View style={s.valuePill}>
-              <ThemedText variant="caption" color="#fff">Best value</ThemedText>
-            </View>
-            <ThemedText variant="caption" color={plan === 'yearly' ? '#fff' : t.colors.textDim} style={{ marginTop: 2 }}>
+            <ThemedText
+              variant="caption"
+              color={plan === 'yearly' ? '#fff' : t.colors.textDim}
+              style={{ marginTop: 2 }}
+            >
               {yearlyPrice}/yr
             </ThemedText>
+            <View style={s.valueTagBelow}>
+              <ThemedText variant="caption" color={plan === 'yearly' ? t.colors.primary : '#fff'}>
+                Best value
+              </ThemedText>
+            </View>
           </Pressable>
         </View>
 
@@ -160,7 +180,7 @@ export default function PaywallScreen() {
               : plan === 'yearly' ? `${yearlyPrice}/year` : `${monthlyPrice}/month`
           }
           onPress={() => handleBuy(plan)}
-          disabled={busy || loading || (!annual && !monthly)}
+          disabled={busy || rcLoading || (!annual && !monthly)}
           style={{ marginTop: t.spacing.s }}
         />
 
@@ -199,7 +219,10 @@ const styles = (t: ThemeTokens) =>
       borderRadius: 999,
       backgroundColor: t.colors.primary,
     },
-    benefitRow: { flexDirection: 'row', alignItems: 'center', marginVertical: 6 },
+    benefitRow: { flexDirection: 'row', alignItems: 'flex-start', marginVertical: 6 },
+    benefitIcon: { marginTop: 3 },
+    benefitText: { marginLeft: 8, lineHeight: 22, flex: 1 },
+
     planToggle: {
       flexDirection: 'row',
       backgroundColor: t.colors.card,
@@ -217,11 +240,12 @@ const styles = (t: ThemeTokens) =>
       borderRadius: t.radius.pill,
     },
     planChipActive: { backgroundColor: t.colors.primary },
-    valuePill: {
+
+    valueTagBelow: {
       marginTop: 6,
       paddingHorizontal: 8,
       paddingVertical: 2,
       borderRadius: t.radius.pill,
-      backgroundColor: withAlpha('#000', 0.25),
+      backgroundColor: withAlpha('#000', 0.18),
     },
   });
