@@ -10,7 +10,8 @@ import {
   where,
 } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Pressable, StyleSheet, View } from 'react-native';
+import { Pressable, StyleSheet, View, useWindowDimensions } from 'react-native'; // ⟵ useWindowDimensions
+import { useSafeAreaInsets } from 'react-native-safe-area-context'; // ⟵ insets for tab targets
 
 import Button from '../components/Button';
 import Card from '../components/Card';
@@ -19,6 +20,8 @@ import RedeemModal from '../components/RedeemModal';
 import Screen from '../components/Screen';
 import ThemedText from '../components/ThemedText';
 import { useTokens, type ThemeTokens } from '../components/ThemeProvider';
+
+import { SpotlightAutoStarter, SpotlightTarget, type SpotlightStep } from '../components/spotlight';
 
 import { db } from '../firebaseConfig';
 import useAuthListener from '../hooks/useAuthListener';
@@ -42,6 +45,31 @@ const IDEAS = [
   'Cook their favorite',
   'Board game best-of-3',
   'Go for a walk',
+];
+
+// First-run spotlight steps
+const FIRST_RUN_STEPS: SpotlightStep[] = [
+  {
+    id: 'welcome',
+    targetId: null,
+    title: 'Welcome to LovePoints 💖',
+    text: 'Quick tour to get you started?',
+    placement: 'bottom',           // intro sits safely above the home bar
+    allowBackdropTapToNext: true,
+  },
+  { id: 'link',    targetId: 'home-link-partner', title: 'Pair up',     text: 'Link with your partner to sync points and memories.' },
+  { id: 'log',     targetId: 'home-log-task',     title: 'Log a task',  text: 'Track a kind action and earn LovePoints.' },
+  { id: 'reward',  targetId: 'home-add-reward',   title: 'Rewards',     text: 'Add a reward you can redeem with points.' },
+  { id: 'ideas',   targetId: 'home-ideas',        title: 'Ideas for today', text: 'Quick suggestions for easy wins.' },
+  { id: 'settings',targetId: 'home-settings',     title: 'Settings',    text: 'Manage your profile, pairing, and notifications.' },
+
+  // Tabs mini-tour — force 'top' so the card is fully on-screen on all devices
+  { id: 'tab-home',       targetId: 'tab-home',       title: 'Home',         text: 'Overview, goals, ideas, and quick actions.', placement: 'top',  padding: 12 },
+  { id: 'tab-memories',   targetId: 'tab-memories',   title: 'Memories',     text: 'Save sweet moments with text & photos.',     placement: 'top',  padding: 12 },
+  { id: 'tab-reminders',  targetId: 'tab-reminders',  title: 'Reminders',    text: 'Set gentle nudges for future you.',          placement: 'top',  padding: 12 },
+  { id: 'tab-love',       targetId: 'tab-love',       title: 'Love Notes 💌', text: 'Send quick notes; we’ll nudge your partner.', placement: 'top',  padding: 12 },
+  { id: 'tab-tasks',      targetId: 'tab-tasks',      title: 'Tasks',        text: 'Shared to-dos; finishing can award points.', placement: 'top',  padding: 12 },
+  { id: 'tab-challenges', targetId: 'tab-challenges', title: 'Challenges',   text: 'Tiny prompts to spark connection.',          placement: 'top',  padding: 12 },
 ];
 
 type PointsItem = {
@@ -112,6 +140,18 @@ export default function HomeScreen() {
   const [recent, setRecent] = useState<PointsItem[]>([]);
   const [showAddReward, setShowAddReward] = useState(false);
   const [hideLinkBanner, setHideLinkBanner] = useState(false);
+
+  // ⟵ tab phantom target geometry
+  const { width: W } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const TAB_COUNT = 6;
+  const SEG = W / TAB_COUNT;
+
+  // Make the spotlight holes smaller and centered inside each segment
+  const TAB_ITEM_W = Math.min(64, SEG - 16);
+  const TAB_H = 64;                              // slightly shorter
+  const TAB_BOTTOM = insets.bottom + 10;         // safe-area offset
+  const tabLeft = (i: number) => i * SEG + (SEG - TAB_ITEM_W) / 2;
 
   // Pair info
   useEffect(() => {
@@ -222,37 +262,41 @@ export default function HomeScreen() {
           </View>
 
           {/* Outline so it doesn’t compete with CTAs */}
-          <Button
-            label="Settings"
-            variant="outline"
-            onPress={() => nav.navigate('Settings')}
-          />
+          <SpotlightTarget id="home-settings">
+            <Button
+              label="Settings"
+              variant="outline"
+              onPress={() => nav.navigate('Settings')}
+            />
+          </SpotlightTarget>
         </View>
       </View>
 
       {/* Partner (Action card) */}
       {!pairId && !hideLinkBanner && (
-        <Card style={{ marginBottom: 12, paddingVertical: 12, borderWidth: 1, borderColor: HAIRLINE }}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-            <View
-              style={{
-                width: 36, height: 36, borderRadius: 10,
-                backgroundColor: withAlpha(t.colors.primary, 0.08),
-                alignItems: 'center', justifyContent: 'center',
-              }}
-            >
-              <Ionicons name="link" size={18} color={t.colors.primary} />
+        <SpotlightTarget id="home-link-partner">
+          <Card style={{ marginBottom: 12, paddingVertical: 12, borderWidth: 1, borderColor: HAIRLINE }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+              <View
+                style={{
+                  width: 36, height: 36, borderRadius: 10,
+                  backgroundColor: withAlpha(t.colors.primary, 0.08),
+                  alignItems: 'center', justifyContent: 'center',
+                }}
+              >
+                <Ionicons name="link" size={18} color={t.colors.primary} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <ThemedText variant="title">Link with your partner</ThemedText>
+                <ThemedText variant="caption" color={t.colors.textDim}>Share points and memories together.</ThemedText>
+              </View>
             </View>
-            <View style={{ flex: 1 }}>
-              <ThemedText variant="title">Link with your partner</ThemedText>
-              <ThemedText variant="caption" color={t.colors.textDim}>Share points and memories together.</ThemedText>
+            <View style={{ flexDirection: 'row', gap: 12, marginTop: 10 }}>
+              <Button label="Link now" onPress={() => nav.navigate('Pairing')} />
+              <Button label="Later" variant="ghost" onPress={() => setHideLinkBanner(true)} />
             </View>
-          </View>
-          <View style={{ flexDirection: 'row', gap: 12, marginTop: 10 }}>
-            <Button label="Link now" onPress={() => nav.navigate('Pairing')} />
-            <Button label="Later" variant="ghost" onPress={() => setHideLinkBanner(true)} />
-          </View>
-        </Card>
+          </Card>
+        </SpotlightTarget>
       )}
 
       {/* Weekly goal (Progress card) — also hosts the Add reward CTA when none exist */}
@@ -283,38 +327,43 @@ export default function HomeScreen() {
         </View>
 
         <View style={{ marginTop: 12, flexDirection: 'row', gap: 12 }}>
-          {/* “Do it now” stays solid; extra action is outline */}
-          <Button label="Log a task" onPress={() => nav.navigate('Tasks')} />
-          <Button
-            label={rewards.length ? 'Add reward' : 'Add first reward'}
-            variant="outline"
-            onPress={() => setShowAddReward(true)}
-          />
+          <SpotlightTarget id="home-log-task">
+            <Button label="Log a task" onPress={() => nav.navigate('Tasks')} />
+          </SpotlightTarget>
+          <SpotlightTarget id="home-add-reward">
+            <Button
+              label={rewards.length ? 'Add reward' : 'Add first reward'}
+              variant="outline"
+              onPress={() => setShowAddReward(true)}
+            />
+          </SpotlightTarget>
         </View>
       </Card>
 
       {/* Ideas (Navigation block) */}
-      <Card style={{ marginBottom: 12, borderWidth: 1, borderColor: HAIRLINE }}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
-          <ThemedText variant="subtitle" style={{ flex: 1 }}>Ideas for today</ThemedText>
-          <Pressable onPress={() => nav.navigate('Discover')} accessibilityRole="link">
-            <ThemedText variant="label" color={t.colors.primary}>See more →</ThemedText>
-          </Pressable>
-          <View style={{ width: 12 }} />
-          <Pressable onPress={() => setKey((k) => k + 1)} accessibilityRole="button">
-            <ThemedText variant="label" color={t.colors.primary}>🔀 Shuffle</ThemedText>
-          </Pressable>
-        </View>
-
-        <View style={s.tagWrap}>
-          {ideas.map((txt) => (
-            <Pressable key={txt} onPress={() => onIdea(txt)} style={s.chip} accessibilityRole="button">
-              <Ionicons name="sparkles" size={14} color={t.colors.textDim} />
-              <ThemedText variant="label" style={{ marginLeft: 6 }}>{txt}</ThemedText>
+      <SpotlightTarget id="home-ideas">
+        <Card style={{ marginBottom: 12, borderWidth: 1, borderColor: HAIRLINE }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+            <ThemedText variant="subtitle" style={{ flex: 1 }}>Ideas for today</ThemedText>
+            <Pressable onPress={() => nav.navigate('Discover')} accessibilityRole="link">
+              <ThemedText variant="label" color={t.colors.primary}>See more →</ThemedText>
             </Pressable>
-          ))}
-        </View>
-      </Card>
+            <View style={{ width: 12 }} />
+            <Pressable onPress={() => setKey((k) => k + 1)} accessibilityRole="button">
+              <ThemedText variant="label" color={t.colors.primary}>🔀 Shuffle</ThemedText>
+            </Pressable>
+          </View>
+
+          <View style={s.tagWrap}>
+            {ideas.map((txt) => (
+              <Pressable key={txt} onPress={() => onIdea(txt)} style={s.chip} accessibilityRole="button">
+                <Ionicons name="sparkles" size={14} color={t.colors.textDim} />
+                <ThemedText variant="label" style={{ marginLeft: 6 }}>{txt}</ThemedText>
+              </Pressable>
+            ))}
+          </View>
+        </Card>
+      </SpotlightTarget>
 
       {/* Rewards list (only when you actually have rewards) */}
       {rewards.length > 0 && (
@@ -378,6 +427,17 @@ export default function HomeScreen() {
         onClose={() => setShowAddReward(false)}
         onCreate={onCreateReward}
       />
+
+      {/* Phantom targets over the tab bar (invisible, non-blocking) */}
+      <SpotlightTarget id="tab-home"       style={{ position:'absolute', left: tabLeft(0), bottom: TAB_BOTTOM, width: TAB_ITEM_W, height: TAB_H, pointerEvents: 'none' }}><View /></SpotlightTarget>
+      <SpotlightTarget id="tab-memories"   style={{ position:'absolute', left: tabLeft(1), bottom: TAB_BOTTOM, width: TAB_ITEM_W, height: TAB_H, pointerEvents: 'none' }}><View /></SpotlightTarget>
+      <SpotlightTarget id="tab-reminders"  style={{ position:'absolute', left: tabLeft(2), bottom: TAB_BOTTOM, width: TAB_ITEM_W, height: TAB_H, pointerEvents: 'none' }}><View /></SpotlightTarget>
+      <SpotlightTarget id="tab-love"       style={{ position:'absolute', left: tabLeft(3), bottom: TAB_BOTTOM, width: TAB_ITEM_W, height: TAB_H, pointerEvents: 'none' }}><View /></SpotlightTarget>
+      <SpotlightTarget id="tab-tasks"      style={{ position:'absolute', left: tabLeft(4), bottom: TAB_BOTTOM, width: TAB_ITEM_W, height: TAB_H, pointerEvents: 'none' }}><View /></SpotlightTarget>
+      <SpotlightTarget id="tab-challenges" style={{ position:'absolute', left: tabLeft(5), bottom: TAB_BOTTOM, width: TAB_ITEM_W, height: TAB_H, pointerEvents: 'none' }}><View /></SpotlightTarget>
+
+      {/* 🔥 Start the tutorial once per user */}
+      <SpotlightAutoStarter uid={user?.uid ?? null} steps={FIRST_RUN_STEPS} />
     </Screen>
   );
 }
@@ -427,7 +487,7 @@ const styles = (t: ThemeTokens) =>
       paddingTop: 10,
     },
     redeemBtn: {
-      backgroundColor: t.colors.primary, // the one solid CTA on screen
+      backgroundColor: t.colors.primary,
       paddingHorizontal: 16,
       paddingVertical: 10,
       borderRadius: 14,

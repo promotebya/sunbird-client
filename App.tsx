@@ -5,8 +5,10 @@ import * as Notifications from 'expo-notifications';
 import { useEffect } from 'react';
 import { Platform } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { ThemeProvider } from './components/ThemeProvider';
+import { SpotlightProvider } from './components/spotlight'; // ⟵ NEW
 import useAuthListener from './hooks/useAuthListener';
 import usePartnerReminderListener from './hooks/usePartnerReminderListener';
 import AppNavigator from './navigation/AppNavigator';
@@ -15,11 +17,9 @@ import AuthNavigator from './navigation/AuthNavigator';
 // Show alerts when a notification fires in foreground
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
-    // Base behavior
     shouldShowAlert: true,
     shouldPlaySound: false,
     shouldSetBadge: false,
-    // Newer iOS fields required by NotificationBehavior
     shouldShowBanner: true,
     shouldShowList: true,
   }),
@@ -116,9 +116,8 @@ function useKindnessNudgesScheduler(userId: string | null | undefined) {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      if (!Device.isDevice) return; // no notifications on web/simulator sometimes
-      // You can choose to only schedule when logged in:
-      // if (!userId) return;
+      if (!Device.isDevice) return;
+      // if (!userId) return; // enable if you only want nudges when logged in
 
       // Ask permission if needed
       const perms = await Notifications.getPermissionsAsync();
@@ -129,7 +128,6 @@ function useKindnessNudgesScheduler(userId: string | null | undefined) {
 
       // Android channel
       if (Platform.OS === 'android') {
-        // Use the default channel so we don't need to attach a channelId per-trigger
         await Notifications.setNotificationChannelAsync('default', {
           name: 'Kindness nudges',
           importance: Notifications.AndroidImportance.DEFAULT
@@ -147,15 +145,12 @@ function useKindnessNudgesScheduler(userId: string | null | undefined) {
       const times = makeRandomWeeklyTriggers(toAdd);
       for (const when of times) {
         const prompt = NUDGE_PROMPTS[randInt(0, NUDGE_PROMPTS.length - 1)];
-        // Use a typed Date trigger object so TS is happy
-        const trigger: Notifications.DateTriggerInput = { type: Notifications.SchedulableTriggerInputTypes.DATE, date: when };
-
+        const trigger: Notifications.DateTriggerInput = {
+          type: Notifications.SchedulableTriggerInputTypes.DATE,
+          date: when
+        };
         await Notifications.scheduleNotificationAsync({
-          content: {
-            title: 'Make their day 💖',
-            body: prompt,
-            sound: false
-          },
+          content: { title: 'Make their day 💖', body: prompt, sound: false },
           trigger
         });
         if (cancelled) return;
@@ -171,16 +166,21 @@ export default function App() {
   // existing hook
   usePartnerReminderListener(user?.uid ?? null);
 
-  // NEW: schedule/tops-up the kindness nudges
+  // schedule/tops-up the kindness nudges
   useKindnessNudgesScheduler(user?.uid ?? null);
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      <ThemeProvider>
-        <NavigationContainer>
-          {user ? <AppNavigator /> : <AuthNavigator />}
-        </NavigationContainer>
-      </ThemeProvider>
+      <SafeAreaProvider>
+        <ThemeProvider>
+          {/* Spotlight overlay needs to sit above everything */}
+          <SpotlightProvider>
+            <NavigationContainer>
+              {user ? <AppNavigator /> : <AuthNavigator />}
+            </NavigationContainer>
+          </SpotlightProvider>
+        </ThemeProvider>
+      </SafeAreaProvider>
     </GestureHandlerRootView>
   );
 }
