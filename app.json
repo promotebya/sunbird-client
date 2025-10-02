@@ -11,7 +11,7 @@
 
     "splash": {
       "image": "./assets/splash.png",
-      "resizeMode": "cover",
+      "resizeMode": "contain",
       "backgroundColor": "#F5EFE9"
     },
 
@@ -20,7 +20,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.promotebya.LovePointsApp",
-      "buildNumber": "1.0.1",               
+      "buildNumber": "1.0.2",
       "infoPlist": {
         "NSPhotoLibraryUsageDescription": "We need access to your photos to add memories.",
         "NSCameraUsageDescription": "We use your camera to capture memory photos and scan QR codes.",
@@ -31,7 +31,7 @@
 
     "android": {
       "package": "com.promotebya.lovepoints",
-      "versionCode": 2,                     
+      "versionCode": 3,
       "adaptiveIcon": {
         "foregroundImage": "./assets/icon.png",
         "backgroundColor": "#FFFFFF"
