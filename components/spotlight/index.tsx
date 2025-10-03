@@ -3,25 +3,25 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, {
-    createContext,
-    useCallback,
-    useContext,
-    useEffect,
-    useMemo,
-    useRef,
-    useState,
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
 } from 'react';
 import {
-    Animated,
-    Dimensions,
-    Easing,
-    Pressable,
-    StyleProp,
-    StyleSheet,
-    Text,
-    TouchableOpacity,
-    View,
-    ViewStyle,
+  Animated,
+  Dimensions,
+  Easing,
+  Pressable,
+  StyleProp,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+  ViewStyle,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Mask, Rect, Svg } from 'react-native-svg';
@@ -82,10 +82,14 @@ export const SpotlightProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [steps, setSteps] = useState<SpotlightStep[] | null>(null);
   const [options, setOptions] = useState<SpotlightOptions | undefined>(undefined);
   const [index, setIndex] = useState(0);
-  const [totalSteps, setTotalSteps] = useState(0); // ← stable total for correct "x/N"
+
+  // Stable total — never depends on a possibly changing steps.length
+  const totalRef = useRef(0);
+  const [totalSteps, setTotalSteps] = useState(0);
+
   const opacity = useRef(new Animated.Value(0)).current;
 
-  const isActive = !!steps && index >= 0 && index < (steps?.length ?? 0);
+  const isActive = totalSteps > 0 && index >= 0 && index < totalSteps;
 
   const registerTarget = useCallback((id: string, rect: SpotlightRect) => {
     setTargets(prev => ({ ...prev, [id]: rect }));
@@ -106,33 +110,34 @@ export const SpotlightProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       setSteps(null);
       setIndex(0);
       setOptions(undefined);
+      totalRef.current = 0;
       setTotalSteps(0);
     });
   }, [opacity, options]);
 
   const next = useCallback(() => {
-    if (!steps) return;
-    // we rely on our own index; do not depend on steps.length for bounds anymore
     setIndex(i => i + 1);
-    // If we advanced past last, finish
-    setTimeout(() => {
-      if (index + 1 >= totalSteps) {
-        const key = options?.persistKey;
-        if (key) AsyncStorage.setItem(`spotlight:${key}:done`, '1').catch(() => {});
-        options?.onFinish?.();
-        stop();
-      }
-    }, 0);
-  }, [index, totalSteps, options, steps, stop]);
+  }, []);
 
   const prev = useCallback(() => {
     setIndex(i => Math.max(0, i - 1));
   }, []);
 
+  // Finish when we step past the end (uses the stable total)
+  useEffect(() => {
+    if (totalSteps > 0 && index >= totalSteps) {
+      const key = options?.persistKey;
+      if (key) AsyncStorage.setItem(`spotlight:${key}:done`, '1').catch(() => {});
+      options?.onFinish?.();
+      stop();
+    }
+  }, [index, totalSteps, options, stop]);
+
   const start = useCallback(
     (s: SpotlightStep[], opt?: SpotlightOptions) => {
       setSteps(s);
-      setTotalSteps(s.length); // ← capture total once
+      totalRef.current = s.length;
+      setTotalSteps(s.length);
       setOptions(opt);
       setIndex(0);
       Animated.timing(opacity, {
@@ -265,7 +270,10 @@ const SpotlightOverlay: React.FC<OverlayProps> = ({
   const { width: W, height: H } = Dimensions.get('window');
 
   if (!isActive) return null;
-  const step = steps[Math.min(index, steps.length - 1)]; // guard if steps swap momentarily
+
+  // Guard: if steps swapped momentarily, clamp to last available
+  const safeIdx = steps.length ? Math.min(index, steps.length - 1) : 0;
+  const step = steps[safeIdx];
   if (!step) return null;
 
   const wantsTarget = !!step.targetId;
@@ -320,10 +328,12 @@ const SpotlightOverlay: React.FC<OverlayProps> = ({
   const arrowTop = cardY - 8;
 
   const backdropPress = step.allowBackdropTapToNext === false ? undefined : onNext;
-  const displayTotal = Math.max(totalSteps, steps.length);
+
+  // Stable total for display
+  const displayTotal = totalSteps > 0 ? totalSteps : steps.length || 1;
 
   return (
-    <Animated.View style={[StyleSheet.absoluteFill, { opacity }]}>
+    <Animated.View style={[StyleSheet.absoluteFill, { opacity }]} pointerEvents="box-none">
       {/* Dimmer with punched hole (doesn't intercept touches) */}
       <Svg width={W} height={H} style={StyleSheet.absoluteFill as any} pointerEvents="none">
         <Mask id="mask">
@@ -336,60 +346,36 @@ const SpotlightOverlay: React.FC<OverlayProps> = ({
       </Svg>
 
       {/* Tap-capture panes outside the hole — hole passes touches through */}
-      {/* TOP */}
-      <Pressable
-        onPress={backdropPress}
-        style={{ position: 'absolute', left: 0, top: 0, width: W, height: hole ? hole.y : H }}
-      />
-      {/* LEFT */}
+      <Pressable onPress={backdropPress} style={{ position: 'absolute', left: 0, top: 0, width: W, height: hole ? hole.y : H }} />
       {hole ? (
-        <Pressable
-          onPress={backdropPress}
-          style={{ position: 'absolute', left: 0, top: hole.y, width: hole.x, height: hole.height }}
-        />
-      ) : null}
-      {/* RIGHT */}
-      {hole ? (
-        <Pressable
-          onPress={backdropPress}
-          style={{
-            position: 'absolute',
-            left: hole.x + hole.width,
-            top: hole.y,
-            width: Math.max(0, W - (hole.x + hole.width)),
-            height: hole.height,
-          }}
-        />
-      ) : null}
-      {/* BOTTOM */}
-      {hole ? (
-        <Pressable
-          onPress={backdropPress}
-          style={{
-            position: 'absolute',
-            left: 0,
-            top: hole.y + hole.height,
-            width: W,
-            height: Math.max(0, H - (hole.y + hole.height)),
-          }}
-        />
+        <>
+          <Pressable onPress={backdropPress} style={{ position: 'absolute', left: 0, top: hole.y, width: hole.x, height: hole.height }} />
+          <Pressable
+            onPress={backdropPress}
+            style={{
+              position: 'absolute',
+              left: hole.x + hole.width,
+              top: hole.y,
+              width: Math.max(0, W - (hole.x + hole.width)),
+              height: hole.height,
+            }}
+          />
+          <Pressable
+            onPress={backdropPress}
+            style={{
+              position: 'absolute',
+              left: 0,
+              top: hole.y + hole.height,
+              width: W,
+              height: Math.max(0, H - (hole.y + hole.height)),
+            }}
+          />
+        </>
       ) : null}
 
-      {/* subtle light ring */}
-      {hole ? (
-        <Svg width={W} height={H} style={StyleSheet.absoluteFill as any} pointerEvents="none">
-          <Rect
-            x={hole.x - 3}
-            y={hole.y - 3}
-            width={hole.width + 6}
-            height={hole.height + 6}
-            rx={radius + 4}
-            ry={radius + 4}
-            fill="none"
-            stroke="rgba(255,255,255,0.9)"
-            strokeWidth={1.5}
-          />
-        </Svg>
+      {/* Arrow (below card in z-order) */}
+      {showArrow ? (
+        <View style={[styles.arrow, { left: arrowCenterX - 8, top: arrowTop, transform: [{ rotate: '225deg' }] }]} />
       ) : null}
 
       {/* Tooltip card */}
@@ -406,14 +392,16 @@ const SpotlightOverlay: React.FC<OverlayProps> = ({
           <Text style={styles.progress}>
             {Math.min(index + 1, displayTotal)}/{displayTotal}
           </Text>
+
+          {/* explicit margins instead of `gap` (avoids Android clipping) */}
           <View style={styles.actions}>
             {index > 0 && (
-              <TouchableOpacity onPress={onPrev} style={[styles.btn, styles.btnGhost]}>
-                <Text style={[styles.btnText, { color: BRAND.textSecondary }]}>Back</Text>
+              <TouchableOpacity onPress={onPrev} style={[styles.btn, styles.btnGhost, { marginRight: 8 }]}>
+                <Text style={styles.btnText}>Back</Text>
               </TouchableOpacity>
             )}
-            <TouchableOpacity onPress={onSkip} style={[styles.btn, styles.btnGhost]}>
-              <Text style={[styles.btnText, { color: BRAND.textSecondary }]}>Skip</Text>
+            <TouchableOpacity onPress={onSkip} style={[styles.btn, styles.btnGhost, { marginRight: 8 }]}>
+              <Text style={styles.btnText}>Skip</Text>
             </TouchableOpacity>
             <TouchableOpacity onPress={onNext} style={[styles.btn, styles.btnPrimary]}>
               <Text style={[styles.btnText, { color: '#FFFFFF' }]}>
@@ -423,11 +411,6 @@ const SpotlightOverlay: React.FC<OverlayProps> = ({
           </View>
         </View>
       </View>
-
-      {/* Arrow (only when card is under the hole) */}
-      {showArrow ? (
-        <View style={[styles.arrow, { left: arrowCenterX - 8, top: cardY - 8, transform: [{ rotate: '225deg' }] }]} />
-      ) : null}
     </Animated.View>
   );
 };
@@ -473,7 +456,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     backgroundColor: BRAND.bgCard,
     borderRadius: 16,
-    paddingHorizontal: 14,
+    paddingHorizontal: 16,   // a bit more inner space prevents clipping
     paddingVertical: 12,
     shadowColor: '#000',
     shadowOpacity: 0.35,
@@ -485,10 +468,11 @@ const styles = StyleSheet.create({
   text: { fontSize: 14, color: BRAND.textSecondary },
   progress: { fontSize: 13, color: 'rgba(255,255,255,0.55)', paddingVertical: 10 },
   rowBetween: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 },
-  actions: { flexDirection: 'row', gap: 8, alignItems: 'center' },
+  actions: { flexDirection: 'row', alignItems: 'center' }, // no 'gap' (Android-safe)
   btn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999 },
   btnGhost: { backgroundColor: 'transparent' },
   btnPrimary: { backgroundColor: BRAND.pink },
-  btnText: { fontSize: 14, fontWeight: '700' },
+  // Slight right padding avoids last-glyph clipping on some Androids
+  btnText: { fontSize: 14, fontWeight: '700', color: BRAND.textSecondary, paddingRight: 2 },
   arrow: { position: 'absolute', width: 16, height: 16, backgroundColor: BRAND.bgCard, borderRadius: 2 },
 });
