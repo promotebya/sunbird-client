@@ -10,8 +10,7 @@ import {
   where,
 } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Platform, Pressable, StyleSheet, View, useWindowDimensions } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Pressable, StyleSheet, View } from 'react-native';
 
 import Button from '../components/Button';
 import Card from '../components/Card';
@@ -61,12 +60,12 @@ const FIRST_RUN_STEPS: SpotlightStep[] = [
   { id: 'log',     targetId: 'home-log-task',     title: 'Log a task',  text: 'Track a kind action and earn LovePoints.' },
   { id: 'reward',  targetId: 'home-add-reward',   title: 'Rewards',     text: 'Add a reward you can redeem with points.' },
 
-  // ⬇️ Spotlight target wraps header + first-row chips only (keeps nav out of the hole)
+  // Anchor wraps header + first-row chips only (keeps nav out of the hole)
   { id: 'ideas', targetId: 'home-ideas-anchor', title: 'Ideas for today', text: 'Quick suggestions for easy wins.', placement: 'top', padding: 6 },
 
   { id: 'settings',targetId: 'home-settings',     title: 'Settings',    text: 'Manage your profile, pairing, and notifications.' },
 
-  // Tabs mini-tour — narrower phantom targets so labels/neighbor tabs aren’t included
+  // Tabs — these will wrap the REAL tab buttons via tabBarButton (see Tabs.tsx)
   { id: 'tab-home',       targetId: 'tab-home',       title: 'Home',         text: 'Overview, goals, ideas, and quick actions.', placement: 'top',  padding: 8 },
   { id: 'tab-memories',   targetId: 'tab-memories',   title: 'Memories',     text: 'Save sweet moments with text & photos.',     placement: 'top',  padding: 8 },
   { id: 'tab-reminders',  targetId: 'tab-reminders',  title: 'Reminders',    text: 'Set gentle nudges for future you.',          placement: 'top',  padding: 8 },
@@ -143,18 +142,6 @@ export default function HomeScreen() {
   const [recent, setRecent] = useState<PointsItem[]>([]);
   const [showAddReward, setShowAddReward] = useState(false);
   const [hideLinkBanner, setHideLinkBanner] = useState(false);
-
-  // ▶ Tab phantom target geometry (narrower & lifted so adjacent text like “m” isn’t included)
-  const { width: W } = useWindowDimensions();
-  const insets = useSafeAreaInsets();
-  const TAB_COUNT = 6;
-  const SEG = W / TAB_COUNT;
-
-  // Tighter, icon-focused phantom holes:
-  const TAB_ITEM_W = Math.min(44, SEG - 28);                // narrower width
-  const TAB_H = Platform.select({ ios: 56, android: 52 });  // shorter height
-  const TAB_BOTTOM = (insets.bottom || 0) + 34;             // slightly higher above the bar
-  const tabLeft = (i: number) => i * SEG + (SEG - TAB_ITEM_W) / 2;
 
   // Pair info
   useEffect(() => {
@@ -441,14 +428,6 @@ export default function HomeScreen() {
         onClose={() => setShowAddReward(false)}
         onCreate={onCreateReward}
       />
-
-      {/* Phantom targets over the tab bar (invisible, non-blocking) */}
-      <SpotlightTarget id="tab-home"       style={{ position:'absolute', left: tabLeft(0), bottom: TAB_BOTTOM, width: TAB_ITEM_W, height: TAB_H, pointerEvents: 'none' }}><View /></SpotlightTarget>
-      <SpotlightTarget id="tab-memories"   style={{ position:'absolute', left: tabLeft(1), bottom: TAB_BOTTOM, width: TAB_ITEM_W, height: TAB_H, pointerEvents: 'none' }}><View /></SpotlightTarget>
-      <SpotlightTarget id="tab-reminders"  style={{ position:'absolute', left: tabLeft(2), bottom: TAB_BOTTOM, width: TAB_ITEM_W, height: TAB_H, pointerEvents: 'none' }}><View /></SpotlightTarget>
-      <SpotlightTarget id="tab-love"       style={{ position:'absolute', left: tabLeft(3), bottom: TAB_BOTTOM, width: TAB_ITEM_W, height: TAB_H, pointerEvents: 'none' }}><View /></SpotlightTarget>
-      <SpotlightTarget id="tab-tasks"      style={{ position:'absolute', left: tabLeft(4), bottom: TAB_BOTTOM, width: TAB_ITEM_W, height: TAB_H, pointerEvents: 'none' }}><View /></SpotlightTarget>
-      <SpotlightTarget id="tab-challenges" style={{ position:'absolute', left: tabLeft(5), bottom: TAB_BOTTOM, width: TAB_ITEM_W, height: TAB_H, pointerEvents: 'none' }}><View /></SpotlightTarget>
 
       {/* 🔥 Start the tutorial once per user */}
       <SpotlightAutoStarter uid={user?.uid ?? null} steps={FIRST_RUN_STEPS} />

@@ -1,4 +1,3 @@
-// screens/RemindersScreen.tsx
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import * as Notifications from 'expo-notifications';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -77,8 +76,6 @@ const REMINDERS_TOUR_STEPS: SpotlightStep[] = [
   { id: 'rem-title',  targetId: 'rem-title',  title: 'Title', text: 'Pick a title or use a preset.' },
   { id: 'rem-date',   targetId: 'rem-date',   title: 'Date',  text: 'Choose the day and month.' },
   { id: 'rem-time',   targetId: 'rem-time',   title: 'Time',  text: 'Pick when the reminder should appear.' },
-
-  // Toggle is part of the tour so users discover it
   {
     id: 'rem-toggle',
     targetId: 'rem-toggle',
@@ -86,11 +83,10 @@ const REMINDERS_TOUR_STEPS: SpotlightStep[] = [
     text: 'Switch this on to also add the reminder to your partner’s screen.',
     placement: 'top',
   },
-
   { id: 'rem-inbox',  targetId: 'rem-inbox',  title: 'Inbox', text: 'See pending partner items and your upcoming reminders here.' },
 ];
 
-// Neutral porcelain tones (match Home/Memories)
+// Neutral porcelain tones
 const HAIRLINE = '#F0E6EF';
 const CHIP_BG = '#F3EEF6';
 
@@ -102,32 +98,28 @@ const RemindersScreen: React.FC = () => {
 
   // --- Spotlight scroll helpers ---
   const scrollRef = React.useRef<ScrollView>(null);
-  // use `any` for robustness across RN versions (ref typing differs across platforms)
   const toggleRef = React.useRef<any>(null);
   const saveRef = React.useRef<any>(null);
   const [scrollY, setScrollY] = useState(0);
 
-  // Read spotlight state directly from context (no optional call)
   const { steps: activeSteps, stepIndex, isActive } = useSpotlight();
   const currentStepId = isActive && activeSteps?.[stepIndex]?.id ? activeSteps![stepIndex]!.id : null;
 
-  // Helper to ensure a ref is visible in the scroll view
   function ensureVisible(ref: React.RefObject<View>) {
     const node = ref.current as any;
     if (!node || !scrollRef.current) return;
     node.measureInWindow((x: number, y: number, w: number, h: number) => {
       const H = Dimensions.get('window').height;
-      const topMargin = 140;      // keep card comfortably on-screen
-      const bottomMargin = 280;   // leave room for tooltip above tabs
+      const topMargin = 140;
+      const bottomMargin = 280;
       let nextY = scrollY;
       if (y < topMargin) nextY = Math.max(0, scrollY - (topMargin - y));
       else if (y + h > H - bottomMargin) nextY = scrollY + ((y + h) - (H - bottomMargin));
-      else return; // already visible
+      else return;
       scrollRef.current?.scrollTo({ y: nextY, animated: true });
     });
   }
 
-  // Effect: auto-scroll to spotlight step if needed
   useEffect(() => {
     if (!currentStepId) return;
     const map: Record<string, React.RefObject<View>> = {
@@ -196,7 +188,6 @@ const RemindersScreen: React.FC = () => {
         const ta = a.content?.title ?? '';
         const tb = b.content?.title ?? '';
         if (ta !== tb) return ta.localeCompare(tb);
-        // use safe trigger text (can’t throw)
         const sa = triggerToText((a as any).trigger);
         const sb = triggerToText((b as any).trigger);
         return sa.localeCompare(sb);
@@ -210,19 +201,21 @@ const RemindersScreen: React.FC = () => {
   useEffect(() => { loadScheduled(); }, [loadScheduled]);
   useFocusEffect(useCallback(() => { loadScheduled(); }, [loadScheduled]));
 
-  // Only show “on the day” yearly/date entries here (hide nudges, timeInterval, warnings)
+  // Only show non-nudge calendar/date entries, hide 1-day/1-week warnings, and de-duplicate
   const visibleScheduled = useMemo((): SavedReq[] => {
-    return scheduled.filter((req) => {
-      if (isGentleNudge(req)) return false;
+    const unique = new Map<string, SavedReq>();
+    for (const req of scheduled) {
+      if (isGentleNudge(req)) continue;
       const ttype = getTriggerType((req as any).trigger);
-      if (ttype === 'timeInterval') return false;
+      if (ttype === 'timeInterval') continue;
 
-      // In this summary we only show the same-day entry (exclude 1-day/1-week warnings)
       const body = (req.content?.body ?? '') as string;
-      if (/one week/i.test(body) || /tomorrow/i.test(body)) return false;
+      if (/one week/i.test(body) || /tomorrow/i.test(body)) continue;
 
-      return true;
-    });
+      const key = `${req.content?.title ?? ''}||${triggerToText((req as any).trigger)}`;
+      if (!unique.has(key)) unique.set(key, req);
+    }
+    return Array.from(unique.values());
   }, [scheduled]);
 
   // Defensive shape handling for Expo notifications trigger (never throws)
@@ -230,7 +223,6 @@ const RemindersScreen: React.FC = () => {
     try {
       if (!trigger) return 'Scheduled';
 
-      // Optional constants — some SDKs don’t expose this object
       const CAL  = Notifications.SchedulableTriggerInputTypes?.CALENDAR ?? 'calendar';
       const DATE = Notifications.SchedulableTriggerInputTypes?.DATE ?? 'date';
       const INT  = Notifications.SchedulableTriggerInputTypes?.TIME_INTERVAL ?? 'timeInterval';
@@ -366,14 +358,9 @@ const RemindersScreen: React.FC = () => {
     timeOnly ? ` at ${formatLocalTime(timeOnly)}` : ''
   }.`;
 
-  // SUPER-SAFE inbox navigation: try local stack first, then parent Tabs
   function openInbox() {
-    try {
-      navigation.navigate('RemindersInbox' as never);
-    } catch {}
-    try {
-      navigation.getParent?.()?.navigate('Reminders', { screen: 'RemindersInbox' });
-    } catch {}
+    try { navigation.navigate('RemindersInbox' as never); } catch {}
+    try { navigation.getParent?.()?.navigate('Reminders', { screen: 'RemindersInbox' }); } catch {}
   }
 
   return (
@@ -450,12 +437,12 @@ const RemindersScreen: React.FC = () => {
             </Pressable>
           </SpotlightTarget>
 
-          {/* Summary moved directly under Time */}
+          {/* Summary */}
           <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: t.spacing.s }}>
             {fixedSummary}
           </ThemedText>
 
-          {/* Toggle sits right under the summary (far from the home indicator) */}
+          {/* Toggle */}
           <View ref={toggleRef}>
             <SpotlightTarget id="rem-toggle">
               <View style={[s.toggleRow, { marginTop: t.spacing.md }]}>
@@ -482,7 +469,7 @@ const RemindersScreen: React.FC = () => {
           </View>
         </Card>
 
-        {/* Saved reminders (anchor only) */}
+        {/* Saved reminders */}
         <Card style={{ marginTop: t.spacing.md }}>
           <View style={s.savedHeader}>
             <ThemedText variant="h2">Saved reminders</ThemedText>

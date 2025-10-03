@@ -1,4 +1,3 @@
-// components/Button.tsx
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useMemo, useRef } from 'react';
@@ -128,13 +127,19 @@ export default function Button({
       onPressOut={isClickable ? onPressOut : undefined}
       disabled={!isClickable}
       accessibilityRole="button"
+      accessibilityState={{ disabled: !isClickable }}
       testID={testID}
-      android_ripple={Platform.OS === 'android' ? { color: 'rgba(0,0,0,0.06)', radius: 240 } : undefined}
+      android_ripple={
+        Platform.OS === 'android'
+          ? { color: withAlpha(t.colors.primary, 0.12), radius: 240, borderless: false }
+          : undefined
+      }
       style={({ pressed }) => [
         styles.hit,
-        Platform.OS === 'android' ? { overflow: 'hidden' } : null,
+        Platform.OS === 'android' ? { overflow: 'hidden' } : null, // keep ripple inside radius
         style,
         isGhost && { paddingHorizontal: 4, paddingVertical: 6 }, // lighter footprint for links
+        (!isClickable || loading) && { opacity: 0.6 },
       ]}
     >
       <Animated.View
