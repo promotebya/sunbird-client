@@ -25,6 +25,13 @@ import ThemedText from '../components/ThemedText';
 import { useTokens, type ThemeTokens } from '../components/ThemeProvider';
 import ToastUndo from '../components/ToastUndo';
 
+// 👇 Spotlight
+import {
+  SpotlightAutoStarter,
+  SpotlightTarget,
+  type SpotlightStep,
+} from '../components/spotlight';
+
 import {
   addDoc,
   collection,
@@ -261,14 +268,106 @@ const TasksScreen: React.FC = () => {
     }
   }
 
-  const renderItem = ({ item }: { item: TaskDoc }) => {
+  // ---- Spotlight steps (dynamic; only anchor things that exist) ----
+  const TASKS_TOUR_STEPS: SpotlightStep[] = useMemo(() => {
+    const steps: SpotlightStep[] = [
+      {
+        id: 'tsk-welcome',
+        targetId: null,
+        title: 'Tasks',
+        text: 'Shared to-dos; finishing can award points.',
+        placement: 'bottom',
+        allowBackdropTapToNext: true,
+      },
+      {
+        id: 'tsk-tabs',
+        targetId: 'ts-tabs',
+        title: 'Personal vs Shared',
+        text: 'Switch between your own tasks and shared ones.',
+      },
+    ];
+
+    if (tab === 'shared' && !pairId) {
+      steps.push({
+        id: 'tsk-link',
+        targetId: 'ts-link',
+        title: 'Link to share',
+        text: 'Connect with your partner to track shared tasks.',
+      });
+    }
+
+    if (streak && ((): boolean => {
+      const thisWeek = isoWeekStr(new Date());
+      const alreadyUsedThisWeek  = streak.catchupWeekISO === thisWeek;
+      const alreadyArmedThisWeek = streak.catchupIntentWeekISO === thisWeek;
+      const pending = !!streak.catchupPending;
+      return !alreadyUsedThisWeek && !alreadyArmedThisWeek && !pending;
+    })()) {
+      steps.push({
+        id: 'tsk-catchup',
+        targetId: 'ts-catchup',
+        title: 'Catch-up day',
+        text: 'Missed yesterday? Do two today to keep your streak.',
+        placement: 'bottom',
+      });
+    }
+
+    steps.push(
+      {
+        id: 'tsk-input',
+        targetId: 'ts-input',
+        title: 'Add a task',
+        text: 'Type a small, kind action.',
+      },
+      {
+        id: 'tsk-add',
+        targetId: 'ts-add',
+        title: 'Save it',
+        text: 'Tap Add to put it on the list.',
+        placement: 'top',
+      },
+      {
+        id: 'tsk-suggestions',
+        targetId: 'ts-suggestions',
+        title: 'Ideas',
+        text: 'Tap a suggestion to prefill.',
+      },
+    );
+
+    if (data.length > 0) {
+      steps.push(
+        { id: 'tsk-done',   targetId: 'ts-done',   title: 'Mark complete', text: 'Tap the box when you’re done.' },
+        { id: 'tsk-award',  targetId: 'ts-award',  title: 'Give a point',  text: 'Reward effort with +1.', placement: 'top' },
+        { id: 'tsk-delete', targetId: 'ts-delete', title: 'Delete',        text: 'Remove things you don’t need.', placement: 'top' },
+      );
+    }
+    return steps;
+  }, [pairId, tab, data.length, streak]);
+
+  const renderItem = ({ item, index }: { item: TaskDoc; index: number }) => {
     const done = !!item.done;
+    const isFirst = index === 0;
+
+    const Checkbox = (
+      <View style={[s.checkbox, done && { backgroundColor: t.colors.primary, borderColor: t.colors.primary }]}>
+        {done ? <Ionicons name="checkmark" size={16} color="#fff" /> : null}
+      </View>
+    );
+    const AwardBtn = (
+      <Pressable onPress={() => handleAwardPoint(item)} style={s.awardBtn} hitSlop={8} accessibilityLabel="Add point">
+        <Ionicons name="add-circle" size={20} color={t.colors.primary} />
+      </Pressable>
+    );
+    const DeleteBtn = (
+      <Pressable onPress={() => handleDelete(item)} style={s.deleteBtn} hitSlop={8} accessibilityLabel="Delete task">
+        <Ionicons name="trash-outline" size={20} color="#EF4444" />
+      </Pressable>
+    );
+
     return (
       <Card style={s.itemCard}>
         <Pressable onPress={() => handleToggleDone(item)} style={s.itemRow} accessibilityRole="button">
-          <View style={[s.checkbox, done && { backgroundColor: t.colors.primary, borderColor: t.colors.primary }]}>
-            {done ? <Ionicons name="checkmark" size={16} color="#fff" /> : null}
-          </View>
+          {isFirst ? <SpotlightTarget id="ts-done">{Checkbox}</SpotlightTarget> : Checkbox}
 
           <View style={{ flex: 1 }}>
             <ThemedText variant="title" color={done ? t.colors.textDim : t.colors.text}>
@@ -287,13 +386,8 @@ const TasksScreen: React.FC = () => {
             </View>
           </View>
 
-          <Pressable onPress={() => handleAwardPoint(item)} style={s.awardBtn} hitSlop={8} accessibilityLabel="Add point">
-            <Ionicons name="add-circle" size={20} color={t.colors.primary} />
-          </Pressable>
-
-          <Pressable onPress={() => handleDelete(item)} style={s.deleteBtn} hitSlop={8} accessibilityLabel="Delete task">
-            <Ionicons name="trash-outline" size={20} color="#EF4444" />
-          </Pressable>
+          {isFirst ? <SpotlightTarget id="ts-award">{AwardBtn}</SpotlightTarget> : AwardBtn}
+          {isFirst ? <SpotlightTarget id="ts-delete">{DeleteBtn}</SpotlightTarget> : DeleteBtn}
         </Pressable>
       </Card>
     );
@@ -322,24 +416,26 @@ const TasksScreen: React.FC = () => {
         </View>
 
         {/* Segmented tabs (counts) */}
-        <View style={s.segmented}>
-          {(['personal', 'shared'] as const).map((k) => {
-            const active = tab === k;
-            const count = k === 'personal' ? personalCount : sharedCount;
-            return (
-              <Pressable
-                key={k}
-                onPress={() => setTab(k)}
-                accessibilityRole="button"
-                style={[s.segment, active && s.segmentActive]}
-              >
-                <ThemedText variant="label" color={active ? t.colors.text : t.colors.textDim}>
-                  {k === 'personal' ? 'Personal' : 'Shared'}{count ? ` (${count})` : ''}
-                </ThemedText>
-              </Pressable>
-            );
-          })}
-        </View>
+        <SpotlightTarget id="ts-tabs">
+          <View style={s.segmented}>
+            {(['personal', 'shared'] as const).map((k) => {
+              const active = tab === k;
+              const count = k === 'personal' ? personalCount : sharedCount;
+              return (
+                <Pressable
+                  key={k}
+                  onPress={() => setTab(k)}
+                  accessibilityRole="button"
+                  style={[s.segment, active && s.segmentActive]}
+                >
+                  <ThemedText variant="label" color={active ? t.colors.text : t.colors.textDim}>
+                    {k === 'personal' ? 'Personal' : 'Shared'}{count ? ` (${count})` : ''}
+                  </ThemedText>
+                </Pressable>
+              );
+            })}
+          </View>
+        </SpotlightTarget>
 
         {/* Shared tab link banner */}
         {tab === 'shared' && !pairId && (
@@ -360,7 +456,9 @@ const TasksScreen: React.FC = () => {
               </View>
             </View>
             <View style={{ flexDirection: 'row', gap: 12, marginTop: 10 }}>
-              <Button label="Link now" onPress={() => nav.navigate('Pairing')} />
+              <SpotlightTarget id="ts-link">
+                <Button label="Link now" onPress={() => nav.navigate('Pairing')} />
+              </SpotlightTarget>
               <Button label="Later" variant="ghost" />
             </View>
           </Card>
@@ -369,19 +467,21 @@ const TasksScreen: React.FC = () => {
         {/* Catch-up helper */}
         {showCatchupChip && (
           <View style={{ paddingHorizontal: t.spacing.md, marginBottom: t.spacing.s }}>
-            <Pressable
-              onPress={async () => {
-                if (!user) return;
-                await activateCatchup(user.uid);
-                showUndo('Catch-up armed for this week');
-              }}
-              style={s.catchupChip}
-            >
-              <Ionicons name="sparkles" size={14} color={t.colors.primary} />
-              <ThemedText variant="label" color={t.colors.primary} style={{ marginLeft: 6 }}>
-                Catch-up day
-              </ThemedText>
-            </Pressable>
+            <SpotlightTarget id="ts-catchup">
+              <Pressable
+                onPress={async () => {
+                  if (!user) return;
+                  await activateCatchup(user.uid);
+                  showUndo('Catch-up armed for this week');
+                }}
+                style={s.catchupChip}
+              >
+                <Ionicons name="sparkles" size={14} color={t.colors.primary} />
+                <ThemedText variant="label" color={t.colors.primary} style={{ marginLeft: 6 }}>
+                  Catch-up day
+                </ThemedText>
+              </Pressable>
+            </SpotlightTarget>
             <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 4 }}>
               Missed yesterday? Complete 2 tasks today to keep your streak.
             </ThemedText>
@@ -391,33 +491,39 @@ const TasksScreen: React.FC = () => {
         {/* Composer */}
         <Card style={{ marginBottom: t.spacing.md }}>
           <View style={s.inputRow}>
-            <Input
-              ref={inputRef}
-              value={title}
-              onChangeText={(val) => {
-                setTitle(val);
-                if (titleError) setTitleError(undefined);
-              }}
-              placeholder="New task…"
-              containerStyle={{ flex: 1, marginRight: t.spacing.s }}
-              errorText={titleError}
-              returnKeyType="done"
-              onSubmitEditing={handleAddTask}
-            />
-            <Button label="Add" onPress={handleAddTask} disabled={!title.trim()} />
+            <SpotlightTarget id="ts-input">
+              <Input
+                ref={inputRef}
+                value={title}
+                onChangeText={(val) => {
+                  setTitle(val);
+                  if (titleError) setTitleError(undefined);
+                }}
+                placeholder="New task…"
+                containerStyle={{ flex: 1, marginRight: t.spacing.s }}
+                errorText={titleError}
+                returnKeyType="done"
+                onSubmitEditing={handleAddTask}
+              />
+            </SpotlightTarget>
+            <SpotlightTarget id="ts-add">
+              <Button label="Add" onPress={handleAddTask} disabled={!title.trim()} />
+            </SpotlightTarget>
           </View>
 
           {/* Quick ideas */}
           <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: t.spacing.s }}>
             Tap to add to your list.
           </ThemedText>
-          <View style={s.suggestWrap}>
-            {['Plan a mini date', 'Write a love note', 'Make coffee', 'Do the dishes', 'Book a walk', 'Bring a snack'].map((txt) => (
-              <Pressable key={txt} onPress={() => setTitle(txt)} style={s.suggestChip} accessibilityRole="button">
-                <ThemedText variant="label">{txt}</ThemedText>
-              </Pressable>
-            ))}
-          </View>
+          <SpotlightTarget id="ts-suggestions">
+            <View style={s.suggestWrap}>
+              {['Plan a mini date', 'Write a love note', 'Make coffee', 'Do the dishes', 'Share a song', 'Bring a snack'].map((txt) => (
+                <Pressable key={txt} onPress={() => setTitle(txt)} style={s.suggestChip} accessibilityRole="button">
+                  <ThemedText variant="label">{txt}</ThemedText>
+                </Pressable>
+              ))}
+            </View>
+          </SpotlightTarget>
         </Card>
 
         {/* List */}
@@ -451,6 +557,9 @@ const TasksScreen: React.FC = () => {
           onAction={toast.undo}
           onHide={() => setToast({ visible: false, msg: '' })}
         />
+
+        {/* Auto-start tutorial */}
+        <SpotlightAutoStarter uid={user?.uid ?? null} steps={TASKS_TOUR_STEPS} persistKey="tour-tasks" />
       </KeyboardAvoidingView>
     </SafeAreaView>
   );

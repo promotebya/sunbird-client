@@ -27,6 +27,13 @@ import { db } from '../firebaseConfig';
 import useAuthListener from '../hooks/useAuthListener';
 import { getPairId } from '../utils/partner';
 
+// 👇 Spotlight imports
+import {
+  SpotlightAutoStarter,
+  SpotlightTarget,
+  type SpotlightStep,
+} from '../components/spotlight';
+
 const SUGGESTIONS = [
   'Thanks for today 💞',
   'Proud of you!',
@@ -105,6 +112,79 @@ const LoveNotesScreen: React.FC = () => {
     } catch {}
   }
 
+  // ---- Spotlight steps (depend on link state) ----
+  const STEPS: SpotlightStep[] = useMemo(() => {
+    if (!pairId) {
+      // Not linked
+      return [
+        {
+          id: 'ln-welcome',
+          targetId: null,
+          title: 'Love Notes 💌',
+          text: 'Send quick notes; we’ll nudge your partner.',
+          placement: 'bottom',
+          allowBackdropTapToNext: true,
+        },
+        {
+          id: 'ln-link',
+          targetId: 'ln-link',
+          title: 'Link with your partner',
+          text: 'Connect accounts to send and receive notes in-app.',
+        },
+        {
+          id: 'ln-suggestions',
+          targetId: 'ln-suggestions',
+          title: 'Need a spark?',
+          text: 'Tap a suggestion to copy the text.',
+        },
+        {
+          id: 'ln-share',
+          targetId: 'ln-share',
+          title: 'Send via Messages',
+          text: 'Prefer SMS? Share it from here.',
+          placement: 'top',
+        },
+      ];
+    }
+    // Linked
+    return [
+      {
+        id: 'ln-welcome',
+        targetId: null,
+        title: 'Love Notes 💌',
+        text: 'Send quick notes; we’ll nudge your partner.',
+        placement: 'bottom',
+        allowBackdropTapToNext: true,
+      },
+      {
+        id: 'ln-input',
+        targetId: 'ln-input',
+        title: 'Write here',
+        text: 'Type a short note for your partner.',
+      },
+      {
+        id: 'ln-send',
+        targetId: 'ln-send',
+        title: 'Send',
+        text: 'Deliver instantly and notify your partner.',
+        placement: 'top',
+      },
+      {
+        id: 'ln-suggestions',
+        targetId: 'ln-suggestions',
+        title: 'Need a spark?',
+        text: 'Tap to prefill your note.',
+      },
+      {
+        id: 'ln-share',
+        targetId: 'ln-share',
+        title: 'Send via Messages',
+        text: 'Prefer SMS? Share it from here.',
+        placement: 'top',
+      },
+    ];
+  }, [pairId]);
+
   const NotLinkedCard = () => (
     <Card>
       <View style={s.linkRow}>
@@ -120,8 +200,12 @@ const LoveNotesScreen: React.FC = () => {
       </View>
 
       <View style={{ flexDirection: 'row', gap: 12, marginTop: 12 }}>
-        <Button label="Link now" onPress={() => nav.navigate('Settings')} />
-        <Button label="Send via Messages…" variant="outline" onPress={shareViaMessages} />
+        <SpotlightTarget id="ln-link">
+          <Button label="Link now" onPress={() => nav.navigate('Settings')} />
+        </SpotlightTarget>
+        <SpotlightTarget id="ln-share">
+          <Button label="Send via Messages…" variant="outline" onPress={shareViaMessages} />
+        </SpotlightTarget>
       </View>
     </Card>
   );
@@ -145,17 +229,24 @@ const LoveNotesScreen: React.FC = () => {
           <NotLinkedCard />
         ) : (
           <Card>
-            <Input
-              ref={inputRef}
-              value={text}
-              onChangeText={setText}
-              placeholder="Write something for both of you…"
-              returnKeyType="send"
-              onSubmitEditing={sendNote}
-            />
+            <SpotlightTarget id="ln-input">
+              <Input
+                ref={inputRef}
+                value={text}
+                onChangeText={setText}
+                placeholder="Write something for both of you…"
+                returnKeyType="send"
+                onSubmitEditing={sendNote}
+              />
+            </SpotlightTarget>
+
             <View style={{ flexDirection: 'row', gap: 12, marginTop: t.spacing.md }}>
-              <Button label="Send" onPress={sendNote} disabled={!text.trim()} />
-              <Button label="Send via Messages…" variant="outline" onPress={shareViaMessages} />
+              <SpotlightTarget id="ln-send">
+                <Button label="Send" onPress={sendNote} disabled={!text.trim()} />
+              </SpotlightTarget>
+              <SpotlightTarget id="ln-share">
+                <Button label="Send via Messages…" variant="outline" onPress={shareViaMessages} />
+              </SpotlightTarget>
             </View>
           </Card>
         )}
@@ -166,19 +257,22 @@ const LoveNotesScreen: React.FC = () => {
           <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 4 }}>
             Tap to {pairId ? 'fill your note' : 'copy to clipboard'}.
           </ThemedText>
-          <View style={s.suggestWrap}>
-            {SUGGESTIONS.map((sug) => (
-              <Pressable
-                key={sug}
-                onPress={() => onPickSuggestion(sug)}
-                style={s.suggestChip}
-                accessibilityRole="button"
-                accessibilityLabel={`Suggestion: ${sug}`}
-              >
-                <ThemedText variant="label">{sug}</ThemedText>
-              </Pressable>
-            ))}
-          </View>
+
+          <SpotlightTarget id="ln-suggestions">
+            <View style={s.suggestWrap}>
+              {SUGGESTIONS.map((sug) => (
+                <Pressable
+                  key={sug}
+                  onPress={() => onPickSuggestion(sug)}
+                  style={s.suggestChip}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Suggestion: ${sug}`}
+                >
+                  <ThemedText variant="label">{sug}</ThemedText>
+                </Pressable>
+              ))}
+            </View>
+          </SpotlightTarget>
         </Card>
 
         {/* Spacer list to respect bottom inset */}
@@ -188,6 +282,9 @@ const LoveNotesScreen: React.FC = () => {
           ListHeaderComponent={<View />}
           contentContainerStyle={{ paddingBottom: insets.bottom + t.spacing.xl }}
         />
+
+        {/* Auto-start the tutorial (once per user & screen) */}
+        <SpotlightAutoStarter uid={user?.uid ?? null} steps={STEPS} persistKey="tour-love-notes" />
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -214,7 +311,7 @@ const styles = (t: ThemeTokens) =>
       marginTop: t.spacing.md,
     },
 
-    // ✅ theme-safe neutral chip (replaces hard-coded pink/gray)
+    // theme-safe neutral chip
     suggestChip: {
       paddingHorizontal: t.spacing.md,
       paddingVertical: 10,

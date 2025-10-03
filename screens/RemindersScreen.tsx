@@ -4,8 +4,10 @@ import * as Notifications from 'expo-notifications';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert,
+  Dimensions,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Switch,
   TextInput,
@@ -16,6 +18,7 @@ import DateTimePickerModal from 'react-native-modal-datetime-picker';
 import Button from '../components/Button';
 import Card from '../components/Card';
 import Screen from '../components/Screen';
+import { SpotlightAutoStarter, SpotlightTarget, useSpotlight, type SpotlightStep } from '../components/spotlight';
 import ThemedText from '../components/ThemedText';
 import { useTokens, type ThemeTokens } from '../components/ThemeProvider';
 
@@ -32,6 +35,51 @@ import {
 
 type SavedReq = Notifications.NotificationRequest;
 
+// Helpers to classify notifications (keeps Saved reminders focused on yearly/date items)
+const GENTLE_KIND = 'lp:nudge';
+function isGentleNudge(req: SavedReq): boolean {
+  try {
+    return (req?.content as any)?.data?.kind === GENTLE_KIND;
+  } catch {
+    return false;
+  }
+}
+function getTriggerType(trigger: any): 'calendar' | 'date' | 'timeInterval' | 'unknown' {
+  try {
+    if (!trigger) return 'unknown';
+    const CAL  = Notifications.SchedulableTriggerInputTypes?.CALENDAR ?? 'calendar';
+    const DATE = Notifications.SchedulableTriggerInputTypes?.DATE ?? 'date';
+    const INT  = Notifications.SchedulableTriggerInputTypes?.TIME_INTERVAL ?? 'timeInterval';
+    const t = (trigger as any).type ?? (
+      (trigger as any).dateComponents ? CAL :
+      (trigger as any).date ? DATE :
+      'unknown'
+    );
+    if (t === CAL || t === 'calendar') return 'calendar';
+    if (t === DATE || t === 'date') return 'date';
+    if (t === INT || t === 'timeInterval') return 'timeInterval';
+    return 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+// ---- Spotlight tutorial (Reminders)
+const REMINDERS_TOUR_STEPS: SpotlightStep[] = [
+  {
+    id: 'rem-welcome',
+    targetId: null,
+    title: 'Reminders',
+    text: 'Set yearly dates and we\'ll handle the nudges for you.',
+    placement: 'bottom',
+    allowBackdropTapToNext: true,
+  },
+  { id: 'rem-title',  targetId: 'rem-title',  title: 'Title', text: 'Pick a title or use a preset.' },
+  { id: 'rem-date',   targetId: 'rem-date',   title: 'Date',  text: 'Choose the day and month.' },
+  { id: 'rem-time',   targetId: 'rem-time',   title: 'Time',  text: 'Pick when the reminder should appear.' },
+  { id: 'rem-inbox',  targetId: 'rem-inbox',  title: 'Inbox', text: 'See your scheduled and pending reminders here.' },
+];
+
 // Neutral porcelain tones (match Home/Memories)
 const HAIRLINE = '#F0E6EF';
 const CHIP_BG = '#F3EEF6';
@@ -41,6 +89,43 @@ const RemindersScreen: React.FC = () => {
   const s = useMemo(() => styles(t), [t]);
   const navigation = useNavigation<any>();
   const { user } = useAuthListener();
+
+  // --- Spotlight scroll helpers ---
+  const scrollRef = React.useRef<ScrollView>(null);
+  // use `any` for robustness across RN versions (ref typing differs across platforms)
+  const toggleRef = React.useRef<any>(null);
+  const saveRef = React.useRef<any>(null);
+  const [scrollY, setScrollY] = useState(0);
+
+  // Read spotlight state directly from context (no optional call)
+  const { steps: activeSteps, stepIndex, isActive } = useSpotlight();
+  const currentStepId = isActive && activeSteps?.[stepIndex]?.id ? activeSteps![stepIndex]!.id : null;
+  // Helper to ensure a ref is visible in the scroll view
+  function ensureVisible(ref: React.RefObject<View>) {
+    const node = ref.current as any;
+    if (!node || !scrollRef.current) return;
+    node.measureInWindow((x: number, y: number, w: number, h: number) => {
+      const H = Dimensions.get('window').height;
+      const topMargin = 140;      // keep card comfortably on-screen
+      const bottomMargin = 280;   // leave room for tooltip above tabs
+      let nextY = scrollY;
+      if (y < topMargin) nextY = Math.max(0, scrollY - (topMargin - y));
+      else if (y + h > H - bottomMargin) nextY = scrollY + ((y + h) - (H - bottomMargin));
+      else return; // already visible
+      scrollRef.current?.scrollTo({ y: nextY, animated: true });
+    });
+  }
+
+  // Effect: auto-scroll to spotlight step if needed
+  useEffect(() => {
+    if (!currentStepId) return;
+    const map: Record<string, React.RefObject<View>> = {
+      'rem-toggle': toggleRef,
+      'rem-save': saveRef,
+    };
+    const r = map[currentStepId];
+    if (r) setTimeout(() => ensureVisible(r), 50);
+  }, [currentStepId]);
 
   const [pairId, setPairId] = useState<string | null>(null);
   const [partnerUid, setPartnerUid] = useState<string | null>(null);
@@ -114,11 +199,19 @@ const RemindersScreen: React.FC = () => {
   useEffect(() => { loadScheduled(); }, [loadScheduled]);
   useFocusEffect(useCallback(() => { loadScheduled(); }, [loadScheduled]));
 
-  // Only show “on the day” entries here
-  const visibleScheduled = useMemo(() => {
+  // Only show “on the day” yearly/date entries here (hide nudges, timeInterval, warnings)
+  const visibleScheduled = useMemo((): SavedReq[] => {
     return scheduled.filter((req) => {
+      // Hide background gentle nudges and any time-interval notifications
+      if (isGentleNudge(req)) return false;
+      const ttype = getTriggerType((req as any).trigger);
+      if (ttype === 'timeInterval') return false;
+
+      // In this summary we only show the same‑day entry (exclude 1‑day/1‑week warnings)
       const body = (req.content?.body ?? '') as string;
-      return !/one week/i.test(body) && !/tomorrow/i.test(body);
+      if (/one week/i.test(body) || /tomorrow/i.test(body)) return false;
+
+      return true;
     });
   }, [scheduled]);
 
@@ -275,145 +368,169 @@ const RemindersScreen: React.FC = () => {
 
   return (
     <Screen keyboard>
-      {/* Title row + outline inbox button with badge */}
-      <View style={s.headerRow}>
-        <ThemedText variant="display">Anniversary</ThemedText>
-        <Button
-          label={badge ? `Inbox  ${badge}` : 'Inbox'}
-          variant="outline"
-          onPress={openInbox}
-        />
-      </View>
-
-      <ThemedText variant="subtitle" color={t.colors.textDim} style={{ marginBottom: t.spacing.md }}>
-        Yearly reminders—set once, we’ll take care of the nudges.
-      </ThemedText>
-
-      {/* Title + quick presets */}
-      <Card>
-        <ThemedText variant="h2" style={{ marginBottom: t.spacing.s }}>Title</ThemedText>
-        <TextInput
-          value={title}
-          onChangeText={setTitle}
-          placeholder="Anniversary"
-          placeholderTextColor={t.colors.textDim}
-          style={s.input}
-          onFocus={ensureHasDefaults}
-        />
-        <View style={s.rowWrap}>
-          {['Anniversary', 'First Date', 'Engagement Day', 'Wedding Day'].map((name) => (
-            <Pressable key={name} onPress={() => setTitle(name)} accessibilityRole="button" style={s.pill}>
-              <ThemedText variant="label">{name}</ThemedText>
-            </Pressable>
-          ))}
+      <ScrollView
+        ref={scrollRef}
+        onScroll={(e) => setScrollY(e.nativeEvent.contentOffset.y)}
+        scrollEventThrottle={16}
+        contentContainerStyle={{ paddingBottom: 32 }}
+      >
+        {/* Title row + outline inbox button with badge */}
+        <View style={s.headerRow}>
+          <ThemedText variant="display">Anniversary</ThemedText>
+          <SpotlightTarget id="rem-inbox">
+            <Button
+              label={badge ? `Inbox  ${badge}` : 'Inbox'}
+              variant="outline"
+              onPress={openInbox}
+            />
+          </SpotlightTarget>
         </View>
-      </Card>
 
-      {/* Date / Time + fixed info + partner toggle */}
-      <Card style={{ marginTop: t.spacing.md }}>
-        <ThemedText variant="h2">Date</ThemedText>
-        <Pressable
-          onPress={() => { ensureHasDefaults(); setShowDatePicker(true); }}
-          style={s.input}
-          accessibilityRole="button"
-        >
-          <ThemedText variant="body" color={dateOnly ? t.colors.text : t.colors.textDim}>
-            {dateLabel}
-          </ThemedText>
-        </Pressable>
-
-        <ThemedText variant="h2" style={{ marginTop: t.spacing.md }}>Time</ThemedText>
-        <Pressable
-          onPress={() => { ensureHasDefaults(); setShowTimePicker(true); }}
-          style={s.input}
-          accessibilityRole="button"
-        >
-          <ThemedText variant="body" color={timeOnly ? t.colors.text : t.colors.textDim}>
-            {timeLabel}
-          </ThemedText>
-        </Pressable>
-
-        <View style={s.rowDivider} />
-
-        <ThemedText variant="caption" color={t.colors.textDim}>
-          {fixedSummary}
+        <ThemedText variant="subtitle" color={t.colors.textDim} style={{ marginBottom: t.spacing.md }}>
+          Yearly reminders—set once, we’ll take care of the nudges.
         </ThemedText>
 
-        <View style={s.rowDivider} />
-
-        <View style={s.toggleRow}>
-          <ThemedText variant="body">Also create for partner</ThemedText>
-          <Switch
-            value={forBoth}
-            onValueChange={setForBoth}
-            disabled={!canCreateForBoth}
-            trackColor={{ true: '#FF9FBE', false: '#D1D5DB' }}
-            thumbColor={forBoth ? t.colors.primary : '#f4f3f4'}
-          />
-        </View>
-
-        <View style={{ marginTop: t.spacing.lg }}>
-          <Button label={saving ? 'Saving…' : 'Save reminders'} onPress={onSave} disabled={saving} />
-        </View>
-      </Card>
-
-      {/* Saved reminders (anchor only) */}
-      <Card style={{ marginTop: t.spacing.md }}>
-        <View style={s.savedHeader}>
-          <ThemedText variant="h2">Saved reminders</ThemedText>
-          <Button
-            label={loadingScheduled ? 'Loading…' : 'Refresh'}
-            variant="outline"
-            onPress={loadScheduled}
-          />
-        </View>
-
-        {visibleScheduled.length === 0 ? (
-          <ThemedText variant="caption" color={t.colors.textDim}>
-            No local reminders yet.
-          </ThemedText>
-        ) : (
-          <View style={{ rowGap: 10 }}>
-            {visibleScheduled.map((req) => (
-              <View key={req.identifier} style={s.savedRow}>
-                <View style={{ flex: 1 }}>
-                  <ThemedText variant="title">{req.content?.title ?? 'Reminder'}</ThemedText>
-                  <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 2 }}>
-                    {triggerToText((req as any).trigger)}
-                  </ThemedText>
-                </View>
-                <Pressable onPress={() => onCancel(req.identifier)} style={s.cancelBtn} accessibilityRole="button">
-                  <ThemedText variant="label" color="#fff">Cancel</ThemedText>
-                </Pressable>
-              </View>
+        {/* Title + quick presets */}
+        <Card>
+          <ThemedText variant="h2" style={{ marginBottom: t.spacing.s }}>Title</ThemedText>
+          <SpotlightTarget id="rem-title">
+            <TextInput
+              value={title}
+              onChangeText={setTitle}
+              placeholder="Anniversary"
+              placeholderTextColor={t.colors.textDim}
+              style={s.input}
+              onFocus={ensureHasDefaults}
+            />
+          </SpotlightTarget>
+          <View style={s.rowWrap}>
+            {['Anniversary', 'First Date', 'Engagement Day', 'Wedding Day'].map((name) => (
+              <Pressable key={name} onPress={() => setTitle(name)} accessibilityRole="button" style={s.pill}>
+                <ThemedText variant="label">{name}</ThemedText>
+              </Pressable>
             ))}
           </View>
-        )}
-      </Card>
+        </Card>
 
-      {/* Pickers */}
-      <DateTimePickerModal
-        isVisible={showDatePicker}
-        mode="date"
-        display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-        date={dateOnly ?? new Date()}
-        onConfirm={(d: Date) => { setDateOnly(d); setShowDatePicker(false); }}
-        onCancel={() => setShowDatePicker(false)}
-      />
-      <DateTimePickerModal
-        isVisible={showTimePicker}
-        mode="time"
-        display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-        date={timeOnly ?? new Date(2000, 0, 1, 9, 0)}
-        onConfirm={(d: Date) => { setTimeOnly(d); setShowTimePicker(false); }}
-        onCancel={() => setShowTimePicker(false)}
-      />
+        {/* Date / Time + fixed info + partner toggle */}
+        <Card style={{ marginTop: t.spacing.md }}>
+          <ThemedText variant="h2">Date</ThemedText>
+          <SpotlightTarget id="rem-date">
+            <Pressable
+              onPress={() => { ensureHasDefaults(); setShowDatePicker(true); }}
+              style={s.input}
+              accessibilityRole="button"
+            >
+              <ThemedText variant="body" color={dateOnly ? t.colors.text : t.colors.textDim}>
+                {dateLabel}
+              </ThemedText>
+            </Pressable>
+          </SpotlightTarget>
 
-      {banner ? (
-        <View style={s.toast}>
-          <ThemedText variant="button" color="#fff" center>{banner}</ThemedText>
-        </View>
-      ) : null}
+          <ThemedText variant="h2" style={{ marginTop: t.spacing.md }}>Time</ThemedText>
+          <SpotlightTarget id="rem-time">
+            <Pressable
+              onPress={() => { ensureHasDefaults(); setShowTimePicker(true); }}
+              style={s.input}
+              accessibilityRole="button"
+            >
+              <ThemedText variant="body" color={timeOnly ? t.colors.text : t.colors.textDim}>
+                {timeLabel}
+              </ThemedText>
+            </Pressable>
+          </SpotlightTarget>
+
+          <View style={s.rowDivider} />
+
+          <ThemedText variant="caption" color={t.colors.textDim}>
+            {fixedSummary}
+          </ThemedText>
+
+          <View style={s.rowDivider} />
+
+          <View ref={toggleRef}>
+            <SpotlightTarget id="rem-toggle">
+              <View style={s.toggleRow}>
+                <ThemedText variant="body">Also create for partner</ThemedText>
+                <Switch
+                  value={forBoth}
+                  onValueChange={setForBoth}
+                  disabled={!canCreateForBoth}
+                  trackColor={{ true: '#FF9FBE', false: '#D1D5DB' }}
+                  thumbColor={forBoth ? t.colors.primary : '#f4f3f4'}
+                />
+              </View>
+            </SpotlightTarget>
+          </View>
+
+          <View ref={saveRef} style={{ marginTop: t.spacing.lg }}>
+            <SpotlightTarget id="rem-save">
+              <View>
+                <Button label={saving ? 'Saving…' : 'Save reminders'} onPress={onSave} disabled={saving} />
+              </View>
+            </SpotlightTarget>
+          </View>
+        </Card>
+
+        {/* Saved reminders (anchor only) */}
+        <Card style={{ marginTop: t.spacing.md }}>
+          <View style={s.savedHeader}>
+            <ThemedText variant="h2">Saved reminders</ThemedText>
+            <Button
+              label={loadingScheduled ? 'Loading…' : 'Refresh'}
+              variant="outline"
+              onPress={loadScheduled}
+            />
+          </View>
+
+          {visibleScheduled.length === 0 ? (
+            <ThemedText variant="caption" color={t.colors.textDim}>
+              No local reminders yet.
+            </ThemedText>
+          ) : (
+            <View style={{ rowGap: 10 }}>
+              {visibleScheduled.map((req) => (
+                <View key={req.identifier} style={s.savedRow}>
+                  <View style={{ flex: 1 }}>
+                    <ThemedText variant="title">{req.content?.title ?? 'Reminder'}</ThemedText>
+                    <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 2 }}>
+                      {triggerToText((req as any).trigger)}
+                    </ThemedText>
+                  </View>
+                  <Pressable onPress={() => onCancel(req.identifier)} style={s.cancelBtn} accessibilityRole="button">
+                    <ThemedText variant="label" color="#fff">Cancel</ThemedText>
+                  </Pressable>
+                </View>
+              ))}
+            </View>
+          )}
+        </Card>
+
+        {/* Pickers */}
+        <DateTimePickerModal
+          isVisible={showDatePicker}
+          mode="date"
+          display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+          date={dateOnly ?? new Date()}
+          onConfirm={(d: Date) => { setDateOnly(d); setShowDatePicker(false); }}
+          onCancel={() => setShowDatePicker(false)}
+        />
+        <DateTimePickerModal
+          isVisible={showTimePicker}
+          mode="time"
+          display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+          date={timeOnly ?? new Date(2000, 0, 1, 9, 0)}
+          onConfirm={(d: Date) => { setTimeOnly(d); setShowTimePicker(false); }}
+          onCancel={() => setShowTimePicker(false)}
+        />
+
+        {banner ? (
+          <View style={s.toast}>
+            <ThemedText variant="button" color="#fff" center>{banner}</ThemedText>
+          </View>
+        ) : null}
+        <SpotlightAutoStarter uid={user?.uid ?? null} steps={REMINDERS_TOUR_STEPS} persistKey="tour-reminders" />
+      </ScrollView>
     </Screen>
   );
 };

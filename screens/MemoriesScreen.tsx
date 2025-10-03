@@ -12,7 +12,11 @@ import {
   StyleSheet,
   TextInput,
   View,
+  useWindowDimensions,
 } from 'react-native';
+
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { SpotlightAutoStarter, SpotlightTarget, type SpotlightStep } from '../components/spotlight';
 
 import Button from '../components/Button';
 import Card from '../components/Card';
@@ -44,6 +48,8 @@ const PROMPTS = [
 const QUICK_TAGS = ['Walk', 'Coffee', 'Cozy night', 'Movie', 'Homemade meal', 'Sunset'];
 const GOAL = 3;
 
+// (tour steps now computed dynamically below based on layout/state)
+
 // Porcelain neutrals (harmonize with Home)
 const HAIRLINE = '#F0E6EF';
 const CHIP_BG = '#F3EEF6';
@@ -57,6 +63,13 @@ const MemoriesScreen: React.FC = () => {
   const s = useMemo(() => styles(t), [t]);
   const nav = useNavigation<any>();
   const { user } = useAuthListener();
+
+  const { width: W } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  // Phantom target layout
+  const FAB_SIZE = 56;
+  const HEADER_Y = insets.top + 58; // slightly below the header
+  const ROW_H = 40;
 
   const [tab, setTab] = useState<Tab>('text');
   const [pairId, setPairId] = useState<string | null>(null);
@@ -257,7 +270,7 @@ const MemoriesScreen: React.FC = () => {
   }
 
   // Timeline row
-  const renderItem = ({ item }: { item: MemoryDoc }) => (
+  const renderItem = ({ item, index }: { item: MemoryDoc; index: number }) => (
     <>
       <View style={s.itemHeader}>
         <View
@@ -276,15 +289,43 @@ const MemoriesScreen: React.FC = () => {
         </ThemedText>
       </View>
 
-      <Card>
-        <MemoryShareCard
-          title={item.title ?? undefined}
-          note={item.note ?? undefined}
-          photoURL={item.photoURL ?? undefined}
-        />
-      </Card>
+      {index === 0 ? (
+        <SpotlightTarget id="mem-first-card">
+          <Card>
+            <MemoryShareCard
+              title={item.title ?? undefined}
+              note={item.note ?? undefined}
+              photoURL={item.photoURL ?? undefined}
+            />
+          </Card>
+        </SpotlightTarget>
+      ) : (
+          <Card>
+            <MemoryShareCard
+              title={item.title ?? undefined}
+              note={item.note ?? undefined}
+              photoURL={item.photoURL ?? undefined}
+            />
+          </Card>
+      )}
     </>
   );
+
+  // Compute dynamic tour steps
+  const tourSteps = useMemo<SpotlightStep[]>(() => {
+    const base: SpotlightStep[] = [
+      { id: 'mem-welcome', targetId: null, title: 'Memories 📸', text: 'Save sweet moments as photos or notes. Quick 20-second tour?', placement: 'bottom', allowBackdropTapToNext: true },
+      { id: 'mem-prompt', targetId: 'mem-prompt-card', title: 'Today’s prompt', text: 'Use these ideas to quickly capture a moment.', placement: 'top', padding: 10 },
+      { id: 'mem-shuffle-step', targetId: 'mem-shuffle', title: 'Shuffle', text: 'Tap to get a different idea.', placement: 'top', padding: 10 },
+      { id: 'mem-add', targetId: 'mem-add-section', title: 'Add memory', text: 'Create a new memory with a photo or a quick note.', placement: 'top', padding: 12 },
+    ];
+    if (items.length > 0) {
+      base.push({ id: 'mem-card', targetId: 'mem-first-card', title: 'Memory card', text: 'Tap to view details. Long-press for quick actions.', placement: 'top', padding: 12 });
+    } else {
+      base.push({ id: 'mem-empty-tip', targetId: 'mem-empty', title: 'Your timeline', text: 'New memories will appear here after you add one.', placement: 'top', padding: 12 });
+    }
+    return base;
+  }, [items.length]);
 
   return (
     <Screen keyboard scroll={false}>
@@ -325,151 +366,161 @@ const MemoriesScreen: React.FC = () => {
             </View>
 
             {/* Prompt + quick tags + weekly goal */}
-            <Card style={{ marginBottom: t.spacing.md }}>
-              <View style={s.rowBetween}>
-                <ThemedText variant="subtitle">Today’s prompt</ThemedText>
-
-                {/* 🎲 Shuffle pill with a11y + long-press hint */}
-                <Pressable
-                  onPress={() => setPromptIdx((i) => (i + 1) % PROMPTS.length)}
-                  onLongPress={() =>
-                    Alert.alert('Shuffle prompts', 'Tap “Shuffle” to get a different idea.')
-                  }
-                  accessibilityRole="button"
-                  accessibilityLabel="Shuffle prompt"
-                  accessibilityHint="Tap to get another prompt"
-                  style={s.shufflePill}
-                >
-                  <ThemedText variant="label" style={{ marginRight: 6 }}>
-                    🎲
-                  </ThemedText>
-                  <ThemedText variant="label" color={t.colors.textDim}>
-                    Shuffle
-                  </ThemedText>
-                </Pressable>
-              </View>
-
-              <ThemedText variant="title" style={{ marginTop: 6 }}>
-                {PROMPTS[promptIdx]}
-              </ThemedText>
-
-              <View style={s.tagWrap}>
-                {QUICK_TAGS.map((tag) => (
-                  <Pressable
-                    key={tag}
-                    onPress={() => setTitle((prev) => (prev ? `${prev} · ${tag}` : tag))}
-                    style={s.tag}
-                  >
-                    <ThemedText variant="label">{tag}</ThemedText>
-                  </Pressable>
-                ))}
-              </View>
-
-              <View style={{ marginTop: 12 }}>
+            <SpotlightTarget id="mem-prompt-card">
+              <Card style={{ marginBottom: t.spacing.md }}>
                 <View style={s.rowBetween}>
-                  <ThemedText variant="caption" color={t.colors.textDim}>
-                    Weekly goal
-                  </ThemedText>
-                  <ThemedText variant="caption" color={t.colors.textDim}>
-                    {weekCount} / {GOAL} · {Math.max(0, GOAL - weekCount)} to go
-                  </ThemedText>
+                  <ThemedText variant="subtitle">Today’s prompt</ThemedText>
+
+                  {/* 🎲 Shuffle pill with a11y + long-press hint */}
+                  <SpotlightTarget id="mem-shuffle">
+                    <Pressable
+                      onPress={() => setPromptIdx((i) => (i + 1) % PROMPTS.length)}
+                      onLongPress={() =>
+                        Alert.alert('Shuffle prompts', 'Tap “Shuffle” to get a different idea.')
+                      }
+                      accessibilityRole="button"
+                      accessibilityLabel="Shuffle prompt"
+                      accessibilityHint="Tap to get another prompt"
+                      style={s.shufflePill}
+                    >
+                      <ThemedText variant="label" style={{ marginRight: 6 }}>
+                        🎲
+                      </ThemedText>
+                      <ThemedText variant="label" color={t.colors.textDim}>
+                        Shuffle
+                      </ThemedText>
+                    </Pressable>
+                  </SpotlightTarget>
                 </View>
-                <ProgressBar value={weekCount} max={GOAL} height={8} trackColor="#EDEAF1" />
-              </View>
-            </Card>
+
+                <ThemedText variant="title" style={{ marginTop: 6 }}>
+                  {PROMPTS[promptIdx]}
+                </ThemedText>
+
+                <View style={s.tagWrap}>
+                  {QUICK_TAGS.map((tag) => (
+                    <Pressable
+                      key={tag}
+                      onPress={() => setTitle((prev) => (prev ? `${prev} · ${tag}` : tag))}
+                      style={s.tag}
+                    >
+                      <ThemedText variant="label">{tag}</ThemedText>
+                    </Pressable>
+                  ))}
+                </View>
+
+                <View style={{ marginTop: 12 }}>
+                  <View style={s.rowBetween}>
+                    <ThemedText variant="caption" color={t.colors.textDim}>
+                      Weekly goal
+                    </ThemedText>
+                    <ThemedText variant="caption" color={t.colors.textDim}>
+                      {weekCount} / {GOAL} · {Math.max(0, GOAL - weekCount)} to go
+                    </ThemedText>
+                  </View>
+                  <ProgressBar value={weekCount} max={GOAL} height={8} trackColor="#EDEAF1" />
+                </View>
+              </Card>
+            </SpotlightTarget>
 
             {/* Add memory */}
-            <Card>
-              {!pairId ? (
-                <>
-                  <ThemedText variant="title">Share memories together</ThemedText>
-                  <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 6 }}>
-                    Link with your partner to create a shared timeline.
-                  </ThemedText>
-                  <View style={{ marginTop: 10 }}>
-                    <Button label="Link now" onPress={() => nav.navigate('Pairing')} />
-                  </View>
-                </>
-              ) : tab === 'photo' ? (
-                <>
-                  {imageUri ? (
-                    <Image source={{ uri: imageUri }} style={s.preview} />
-                  ) : (
-                    <View style={s.photoPickRow}>
-                      <Button label="Pick from library" variant="outline" onPress={pickImage} />
-                      <Button label="Use camera" variant="outline" onPress={captureImage} />
+            <SpotlightTarget id="mem-add-section">
+              <Card>
+                {!pairId ? (
+                  <>
+                    <ThemedText variant="title">Share memories together</ThemedText>
+                    <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 6 }}>
+                      Link with your partner to create a shared timeline.
+                    </ThemedText>
+                    <View style={{ marginTop: 10 }}>
+                      <Button label="Link now" onPress={() => nav.navigate('Pairing')} />
                     </View>
-                  )}
+                  </>
+                ) : tab === 'photo' ? (
+                  <>
+                    {imageUri ? (
+                      <Image source={{ uri: imageUri }} style={s.preview} />
+                    ) : (
+                      <View style={s.photoPickRow}>
+                        <Button label="Pick from library" variant="outline" onPress={pickImage} />
+                        <Button label="Use camera" variant="outline" onPress={captureImage} />
+                      </View>
+                    )}
 
-                  {uploadProgress > 0 && uploadProgress < 1 && (
-                    <View style={s.progressRow}>
-                      <ActivityIndicator />
-                      <ThemedText variant="caption" style={{ marginLeft: t.spacing.xs }}>
-                        Uploading… {Math.round(uploadProgress * 100)}%
-                      </ThemedText>
-                    </View>
-                  )}
+                    {uploadProgress > 0 && uploadProgress < 1 && (
+                      <View style={s.progressRow}>
+                        <ActivityIndicator />
+                        <ThemedText variant="caption" style={{ marginLeft: t.spacing.xs }}>
+                          Uploading… {Math.round(uploadProgress * 100)}%
+                        </ThemedText>
+                      </View>
+                    )}
 
-                  <TextInput
-                    value={title}
-                    onChangeText={setTitle}
-                    placeholder="Title (optional)"
-                    placeholderTextColor={t.colors.textDim}
-                    style={[s.input, { marginTop: t.spacing.s }]}
-                  />
-                  <TextInput
-                    value={note}
-                    onChangeText={setNote}
-                    placeholder="Note (optional)"
-                    placeholderTextColor={t.colors.textDim}
-                    style={[s.input, { marginTop: t.spacing.s }]}
-                  />
-                  <Button
-                    label={saving ? 'Saving…' : 'Add'}
-                    onPress={onAdd}
-                    style={{ marginTop: t.spacing.md }}
-                    disabled={!canAdd || saving}
-                  />
-                </>
-              ) : (
-                <>
-                  <TextInput
-                    value={title}
-                    onChangeText={setTitle}
-                    placeholder={tab === 'text' ? 'Title' : 'Milestone title'}
-                    placeholderTextColor={t.colors.textDim}
-                    style={s.input}
-                    editable={!!pairId}
-                  />
-                  <TextInput
-                    value={note}
-                    onChangeText={setNote}
-                    placeholder="Add a note (optional)"
-                    placeholderTextColor={t.colors.textDim}
-                    style={[s.input, { marginTop: t.spacing.s }]}
-                    multiline
-                    editable={!!pairId}
-                  />
-                  <Button
-                    label={saving ? 'Saving…' : 'Add'}
-                    onPress={onAdd}
-                    style={{ marginTop: t.spacing.md }}
-                    disabled={!canAdd || saving}
-                  />
-                </>
-              )}
-            </Card>
+                    <TextInput
+                      value={title}
+                      onChangeText={setTitle}
+                      placeholder="Title (optional)"
+                      placeholderTextColor={t.colors.textDim}
+                      style={[s.input, { marginTop: t.spacing.s }]}
+                    />
+                    <TextInput
+                      value={note}
+                      onChangeText={setNote}
+                      placeholder="Note (optional)"
+                      placeholderTextColor={t.colors.textDim}
+                      style={[s.input, { marginTop: t.spacing.s }]}
+                    />
+                    <Button
+                      label={saving ? 'Saving…' : 'Add'}
+                      onPress={onAdd}
+                      style={{ marginTop: t.spacing.md }}
+                      disabled={!canAdd || saving}
+                    />
+                  </>
+                ) : (
+                  <>
+                    <TextInput
+                      value={title}
+                      onChangeText={setTitle}
+                      placeholder={tab === 'text' ? 'Title' : 'Milestone title'}
+                      placeholderTextColor={t.colors.textDim}
+                      style={s.input}
+                      editable={!!pairId}
+                    />
+                    <TextInput
+                      value={note}
+                      onChangeText={setNote}
+                      placeholder="Add a note (optional)"
+                      placeholderTextColor={t.colors.textDim}
+                      style={[s.input, { marginTop: t.spacing.s }]}
+                      multiline
+                      editable={!!pairId}
+                    />
+                    <Button
+                      label={saving ? 'Saving…' : 'Add'}
+                      onPress={onAdd}
+                      style={{ marginTop: t.spacing.md }}
+                      disabled={!canAdd || saving}
+                    />
+                  </>
+                )}
+              </Card>
+            </SpotlightTarget>
           </>
         }
         ListEmptyComponent={
-          <View style={s.empty}>
-            <ThemedText variant="title">No memories yet</ThemedText>
-            <ThemedText variant="subtitle" style={{ marginTop: t.spacing.xs }}>
-              Capture something small from today.
-            </ThemedText>
-          </View>
+          <SpotlightTarget id="mem-empty">
+            <View style={s.empty}>
+              <ThemedText variant="title">No memories yet</ThemedText>
+              <ThemedText variant="subtitle" style={{ marginTop: t.spacing.xs }}>
+                Capture something small from today.
+              </ThemedText>
+            </View>
+          </SpotlightTarget>
         }
       />
+      {/* Start the Memories tutorial once per user */}
+      <SpotlightAutoStarter uid={user?.uid ?? null} steps={tourSteps} persistKey="memories-first-run" />
     </Screen>
   );
 };

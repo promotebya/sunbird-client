@@ -3,12 +3,25 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, {
-    createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
+    createContext,
+    useCallback,
+    useContext,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
 } from 'react';
 import {
-    Animated, Dimensions, Easing,
+    Animated,
+    Dimensions,
+    Easing,
     Pressable,
-    StyleProp, StyleSheet, Text, TouchableOpacity, View, ViewStyle
+    StyleProp,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View,
+    ViewStyle,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Mask, Rect, Svg } from 'react-native-svg';
@@ -43,6 +56,7 @@ const BRAND = {
 
 type TargetMap = Record<string, SpotlightRect | undefined>;
 
+// Expose steps + stepIndex so screens can react (e.g., to auto-scroll if desired)
 type Ctx = {
   registerTarget: (id: string, rect: SpotlightRect) => void;
   unregisterTarget: (id: string) => void;
@@ -51,6 +65,8 @@ type Ctx = {
   next: () => void;
   prev: () => void;
   isActive: boolean;
+  steps: SpotlightStep[] | null;
+  stepIndex: number;
 };
 
 const SpotlightCtx = createContext<Ctx | null>(null);
@@ -72,11 +88,11 @@ export const SpotlightProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const isActive = !!steps && index >= 0 && index < (steps?.length ?? 0);
 
   const registerTarget = useCallback((id: string, rect: SpotlightRect) => {
-    setTargets((prev) => ({ ...prev, [id]: rect }));
+    setTargets(prev => ({ ...prev, [id]: rect }));
   }, []);
 
   const unregisterTarget = useCallback((id: string) => {
-    setTargets((prev) => {
+    setTargets(prev => {
       const copy = { ...prev };
       delete copy[id];
       return copy;
@@ -93,7 +109,7 @@ export const SpotlightProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const next = useCallback(() => {
     if (!steps) return;
-    if (index < steps.length - 1) setIndex((i) => i + 1);
+    if (index < steps.length - 1) setIndex(i => i + 1);
     else {
       const key = options?.persistKey;
       if (key) AsyncStorage.setItem(`spotlight:${key}:done`, '1').catch(() => {});
@@ -104,24 +120,37 @@ export const SpotlightProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const prev = useCallback(() => {
     if (!steps) return;
-    setIndex((i) => Math.max(0, i - 1));
+    setIndex(i => Math.max(0, i - 1));
   }, [steps]);
 
-  const start = useCallback((s: SpotlightStep[], opt?: SpotlightOptions) => {
-    setSteps(s);
-    setOptions(opt);
-    setIndex(0);
-    Animated.timing(opacity, {
-      toValue: 1,
-      duration: 180,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
-    }).start();
-  }, [opacity]);
+  const start = useCallback(
+    (s: SpotlightStep[], opt?: SpotlightOptions) => {
+      setSteps(s);
+      setOptions(opt);
+      setIndex(0);
+      Animated.timing(opacity, {
+        toValue: 1,
+        duration: 180,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }).start();
+    },
+    [opacity],
+  );
 
   const value = useMemo(
-    () => ({ registerTarget, unregisterTarget, start, stop, next, prev, isActive }),
-    [registerTarget, unregisterTarget, start, stop, next, prev, isActive],
+    () => ({
+      registerTarget,
+      unregisterTarget,
+      start,
+      stop,
+      next,
+      prev,
+      isActive,
+      steps,
+      stepIndex: index,
+    }),
+    [registerTarget, unregisterTarget, start, stop, next, prev, isActive, steps, index],
   );
 
   return (
@@ -156,9 +185,20 @@ export const SpotlightTarget: React.FC<TargetProps> = ({ id, children, style }) 
     });
   }, [id, registerTarget]);
 
+  // Measure on mount + layout, and a few extra RAFs to catch late layouts (e.g., tab bar)
   useEffect(() => {
-    const t = setTimeout(measure, 50);
-    return () => { clearTimeout(t); unregisterTarget(id); };
+    let raf: number | null = null;
+    let tries = 0;
+    const loop = () => {
+      tries += 1;
+      measure();
+      if (tries < 12) raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      unregisterTarget(id);
+    };
   }, [id, measure, unregisterTarget]);
 
   return (
@@ -183,7 +223,14 @@ type OverlayProps = {
 const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
 
 const SpotlightOverlay: React.FC<OverlayProps> = ({
-  isActive, steps, index, targets, opacity, onNext, onPrev, onSkip,
+  isActive,
+  steps,
+  index,
+  targets,
+  opacity,
+  onNext,
+  onPrev,
+  onSkip,
 }) => {
   const insets = useSafeAreaInsets();
   const { width: W, height: H } = Dimensions.get('window');
@@ -191,31 +238,43 @@ const SpotlightOverlay: React.FC<OverlayProps> = ({
   if (!isActive) return null;
   const step = steps[index];
 
-  const rectRaw = step.targetId ? targets[step.targetId] : undefined;
+  const wantsTarget = !!step.targetId;
+  const rectRaw = wantsTarget ? targets[step.targetId!] : undefined;
   const hasTarget = !!(rectRaw && rectRaw.width > 0 && rectRaw.height > 0);
+
+  // ▶ Important: if a step expects a target but it hasn't measured yet,
+  // don't render the floating card — wait until we have the target.
+  if (wantsTarget && !hasTarget) return null;
+
   const padding = step.padding ?? 8;
   const radius = step.radius ?? 16;
 
-  // Keep the hole FULLY on-screen (fixes tab-bar cutouts)
-  const hole = hasTarget ? (() => {
-    const wantW = rectRaw!.width + padding * 2;
-    const wantH = rectRaw!.height + padding * 2;
-    const width  = clamp(wantW, 16, W - 16);
-    const height = clamp(wantH, 16, H - 16);
-    const x = clamp(rectRaw!.x - padding, 8, W - 8 - width);
-    const y = clamp(rectRaw!.y - padding, 8, H - 8 - height);
-    return { x, y, width, height };
-  })() : null;
+  // Keep the hole fully on-screen
+  const hole = hasTarget
+    ? (() => {
+        const wantW = rectRaw!.width + padding * 2;
+        const wantH = rectRaw!.height + padding * 2;
+        const width = clamp(wantW, 16, W - 16);
+        const height = clamp(wantH, 16, H - 16);
+        const x = clamp(rectRaw!.x - padding, 8, W - 8 - width);
+        const y = clamp(rectRaw!.y - padding, 8, H - 8 - height);
+        return { x, y, width, height };
+      })()
+    : null;
 
   const cardMaxWidth = Math.min(320, W - 24);
   const roomTop = hole ? hole.y : H / 2;
   const roomBottom = hole ? H - (hole.y + hole.height) : H / 2;
   const placement: NonNullable<SpotlightStep['placement']> =
-    step.placement === 'auto' || !step.placement ? (roomBottom > roomTop ? 'bottom' : 'top') : step.placement;
+    step.placement === 'auto' || !step.placement
+      ? roomBottom > roomTop
+        ? 'bottom'
+        : 'top'
+      : step.placement;
 
   // Stable positions for floating steps
   const EST_CARD_H = 168;
-  const defaultTop  = insets.top + 64;
+  const defaultTop = insets.top + 64;
   const defaultBottom = Math.max(8, H - insets.bottom - 20 - EST_CARD_H);
 
   const cardY =
@@ -223,11 +282,12 @@ const SpotlightOverlay: React.FC<OverlayProps> = ({
       ? Math.min(H - insets.bottom - 20, hole.y + hole.height + 12)
       : hole && placement === 'top'
       ? Math.max(insets.top + 20, hole.y - 12 - EST_CARD_H)
-      : (placement === 'top' ? defaultTop : defaultBottom);
+      : placement === 'top'
+      ? defaultTop
+      : defaultBottom;
 
   const cardX = clamp((hole ? hole.x + hole.width / 2 : W / 2) - cardMaxWidth / 2, 12, W - 12 - cardMaxWidth);
 
-  // Arrow — card anchored; we keep it only when card is below the hole (clean connection).
   const showArrow = !!hole && placement === 'bottom';
   const holeCenterX = hole ? hole.x + hole.width / 2 : W / 2;
   const arrowCenterX = clamp(holeCenterX, cardX + 20, cardX + cardMaxWidth - 20);
@@ -246,7 +306,7 @@ const SpotlightOverlay: React.FC<OverlayProps> = ({
         <Rect x={0} y={0} width={W} height={H} fill={BRAND.dim} mask="url(#mask)" />
       </Svg>
 
-      {/* 🔆 subtle light ring around the hole (helps on tab items) */}
+      {/* subtle light ring */}
       {hole ? (
         <Svg width={W} height={H} style={StyleSheet.absoluteFill as any} pointerEvents="none">
           <Rect
@@ -264,19 +324,11 @@ const SpotlightOverlay: React.FC<OverlayProps> = ({
       ) : null}
 
       {/* Tap to advance (if allowed) */}
-      <Pressable
-        style={StyleSheet.absoluteFill}
-        onPress={step.allowBackdropTapToNext === false ? undefined : onNext}
-      />
+      <Pressable style={StyleSheet.absoluteFill} onPress={step.allowBackdropTapToNext === false ? undefined : onNext} />
 
       {/* Arrow (only when card is under the hole) */}
       {showArrow ? (
-        <View
-          style={[
-            styles.arrow,
-            { left: arrowCenterX - 8, top: arrowTop, transform: [{ rotate: '225deg' }] },
-          ]}
-        />
+        <View style={[styles.arrow, { left: arrowCenterX - 8, top: arrowTop, transform: [{ rotate: '225deg' }] }]} />
       ) : null}
 
       {/* Tooltip card */}
@@ -332,7 +384,9 @@ export const SpotlightAutoStarter: React.FC<{
       }
     })();
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [uid, steps, persistKey, delayMs, start, isActive]);
 
   return null;

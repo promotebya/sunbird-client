@@ -27,6 +27,13 @@ import {
 } from '../utils/seedchallenges';
 import { usePro } from '../utils/subscriptions';
 
+// 👇 Spotlight
+import {
+  SpotlightAutoStarter,
+  SpotlightTarget,
+  type SpotlightStep,
+} from '../components/spotlight';
+
 /* ---------- types & labels ---------- */
 
 type DiffTabKey = 'all' | 'easy' | 'medium' | 'hard' | 'pro';
@@ -149,49 +156,6 @@ function mergePreferBase<T extends Record<string, any>>(base: T, patch: Partial<
   return out as T;
 }
 
-/** Collapsible long text */
-function Clamp({
-  text,
-  lines = 4,
-  dimColor,
-}: {
-  text: string;
-  lines?: number;
-  dimColor: string;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const [showToggle, setShowToggle] = useState<boolean>(text.length > 140);
-
-  return (
-    <View>
-      <ThemedText
-        variant="body"
-        color={dimColor}
-        style={{ marginTop: 4 }}
-        numberOfLines={expanded ? undefined : lines}
-        onTextLayout={(e) => {
-          const n = e?.nativeEvent?.lines?.length ?? 0;
-          if (n > lines) setShowToggle(true);
-        }}
-        ellipsizeMode="tail"
-      >
-        {text}
-      </ThemedText>
-      {showToggle && (
-        <Pressable
-          onPress={() => setExpanded((v) => !v)}
-          accessibilityRole="button"
-          style={{ marginTop: 6 }}
-        >
-          <ThemedText variant="label" color={dimColor}>
-            {expanded ? 'Show less' : 'Read more'}
-          </ThemedText>
-        </Pressable>
-      )}
-    </View>
-  );
-}
-
 function lockMessage(plan: 'free' | 'premium', c: SeedChallenge): string {
   const tier = (c as any)?.tier as 'base' | '10' | '25' | '50' | undefined;
   const d = extractDiffStrict(c);
@@ -310,6 +274,19 @@ export default function ChallengesScreen() {
       .filter((sec) => sec.data.length > 0);
   }, [rowsByDiff, tab]);
 
+  // Find the first locked row key for the current plan/sections
+  const firstLockedKey = useMemo(() => {
+    for (const sec of sections) {
+      for (const row of sec.data) {
+        const dKey = extractDiffStrict(row.c) ?? 'easy';
+        const lockedForPlan = safePlan === 'free' && dKey !== 'easy';
+        const finalLocked = row.locked || lockedForPlan;
+        if (finalLocked) return row.id;
+      }
+    }
+    return null as string | null;
+  }, [sections, safePlan]);
+
   const visibleByCat = useMemo(() => {
     const m: Record<CatKey, number> = { date: 0, kindness: 0, conversation: 0, surprise: 0, play: 0 };
     for (const r of allRows) {
@@ -376,38 +353,45 @@ export default function ChallengesScreen() {
   const Header = (
     <View style={s.header}>
       <ThemedText variant="display">Challenges</ThemedText>
-      <ThemedText variant="subtitle" color="textDim">
-        Total points: {total}
-      </ThemedText>
 
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.chips}>
-        {TABS.map((tabDef) => {
-          const active = tabDef.key === tab;
-          return (
-            <Pressable
-              key={tabDef.key}
-              onPress={() => setTab(tabDef.key)}
-              style={[s.chip, active && { backgroundColor: t.colors.primary, borderColor: t.colors.primary }]}
-              accessibilityRole="button"
-            >
-              <ThemedText variant="caption" color={active ? '#fff' : t.colors.textDim}>
-                {tabDef.label}
+      <SpotlightTarget id="ch-points">
+        <ThemedText variant="subtitle" color="textDim">
+          Total points: {total}
+        </ThemedText>
+      </SpotlightTarget>
+
+      <SpotlightTarget id="ch-tabs">
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.chips}>
+          {TABS.map((tabDef) => {
+            const active = tabDef.key === tab;
+            return (
+              <Pressable
+                key={tabDef.key}
+                onPress={() => setTab(tabDef.key)}
+                style={[s.chip, active && { backgroundColor: t.colors.primary, borderColor: t.colors.primary }]}
+                accessibilityRole="button"
+              >
+                <ThemedText variant="caption" color={active ? '#fff' : t.colors.textDim}>
+                  {tabDef.label}
+                </ThemedText>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+      </SpotlightTarget>
+
+      <SpotlightTarget id="ch-legend">
+        <View style={s.legendRow} accessibilityRole="text">
+          {(['date','kindness','conversation','surprise','play'] as CatKey[]).map((k) => (
+            <View key={k} style={s.legendItem}>
+              <View style={[s.legendDot, { backgroundColor: CAT_DOT[k] }]} />
+              <ThemedText variant="caption" color="textDim">
+                {CATEGORY_LABEL[k]} {visibleByCat[k] ? `· ${visibleByCat[k]}` : ''}
               </ThemedText>
-            </Pressable>
-          );
-        })}
-      </ScrollView>
-
-      <View style={s.legendRow} accessibilityRole="text">
-        {(['date','kindness','conversation','surprise','play'] as CatKey[]).map((k) => (
-          <View key={k} style={s.legendItem}>
-            <View style={[s.legendDot, { backgroundColor: CAT_DOT[k] }]} />
-            <ThemedText variant="caption" color="textDim">
-              {CATEGORY_LABEL[k]} {visibleByCat[k] ? `· ${visibleByCat[k]}` : ''}
-            </ThemedText>
-          </View>
-        ))}
-      </View>
+            </View>
+          ))}
+        </View>
+      </SpotlightTarget>
     </View>
   );
 
@@ -462,23 +446,41 @@ export default function ChallengesScreen() {
       </View>
 
       {/* themed CTA */}
-      <Pressable
-        onPress={() => {
-          try {
-            (nav.getParent?.() ?? nav).navigate('Paywall', { plan: 'monthly' });
-          } catch {
-            Alert.alert('Premium', 'Purchases are coming soon ✨');
-          }
-        }}
-        accessibilityRole="button"
-        style={s.tryPremiumBtn}
-      >
-        <ThemedText variant="button" color="#fff">
-          Try Premium
-        </ThemedText>
-      </Pressable>
+      <SpotlightTarget id="ch-upsell">
+        <Pressable
+          onPress={() => {
+            try {
+              (nav.getParent?.() ?? nav).navigate('Paywall', { plan: 'monthly' });
+            } catch {
+              Alert.alert('Premium', 'Purchases are coming soon ✨');
+            }
+          }}
+          accessibilityRole="button"
+          style={s.tryPremiumBtn}
+        >
+          <ThemedText variant="button" color="#fff">
+            Try Premium
+          </ThemedText>
+        </Pressable>
+      </SpotlightTarget>
     </Card>
   ) : null;
+
+  /* ---------- tutorial steps ---------- */
+
+  const CHALLENGES_TOUR_STEPS: SpotlightStep[] = useMemo(() => {
+    const base: SpotlightStep[] = [
+      { id: 'ch-welcome', targetId: null, title: 'Challenges', text: 'Weekly ideas to date, play and surprise each other.', placement: 'bottom', allowBackdropTapToNext: true },
+      { id: 'ch-tabs', targetId: 'ch-tabs', title: 'Pick a tier', text: 'Browse all or focus on easy → pro.' },
+      { id: 'ch-points', targetId: 'ch-points', title: 'Your points', text: 'Earn points by completing challenges.' },
+      { id: 'ch-legend', targetId: 'ch-legend', title: 'Categories', text: 'Filter mentally by vibe: Dates, Kindness, Talk, Surprise, Play.' },
+      { id: 'ch-start', targetId: 'ch-start', title: 'Open one', text: 'Tap “Start challenge” to see details and begin.', placement: 'top' },
+    ];
+    if (!effectivePremium) {
+      base.push({ id: 'ch-lock', targetId: 'ch-lock', title: 'Unlock more', text: 'Locked cards need Premium or points to open.', placement: 'top', allowBackdropTapToNext: true });
+    }
+    return base;
+  }, [effectivePremium]);
 
   /* ---------- render ---------- */
 
@@ -509,7 +511,7 @@ export default function ChallengesScreen() {
         // Push bottom spacing into the list content instead of the root container
         contentContainerStyle={{ paddingBottom: insets.bottom + t.spacing.xl }}
         showsVerticalScrollIndicator={false}
-        renderItem={({ item }) => {
+        renderItem={({ item, index, section }) => {
           const c: any = item.c;
           const dKey = extractDiffStrict(c) ?? 'easy';
           const diffLabel = DIFF_LABEL[dKey];
@@ -519,6 +521,11 @@ export default function ChallengesScreen() {
 
           const lockedForPlan = safePlan === 'free' && dKey !== 'easy';
           const finalLocked = item.locked || lockedForPlan;
+          const isFirstLocked = item.id === firstLockedKey;
+
+          // Spotlight only on the very first card of the first visible section
+          const isFirstCard =
+            sections.length > 0 && section?.key === sections[0]?.key && index === 0;
 
           return (
             <Card style={s.card}>
@@ -531,7 +538,9 @@ export default function ChallengesScreen() {
 
                   {!finalLocked ? (
                     <>
-                      {!!desc && <Clamp text={desc!} lines={4} dimColor={t.colors.textDim} />}
+                      {!!desc && (
+                        <Clamp text={desc!} lines={4} dimColor={t.colors.textDim} />
+                      )}
 
                       <View style={s.metaRow}>
                         {!!catKey && (
@@ -553,33 +562,67 @@ export default function ChallengesScreen() {
                         )}
                       </View>
 
-                      <Button
-                        label="Start challenge"
-                        onPress={() => openChallenge(c as SeedChallenge)}
-                        style={{ marginTop: t.spacing.md }}
-                      />
+                      {isFirstCard ? (
+                        <SpotlightTarget id="ch-start">
+                          <Button
+                            label="Start challenge"
+                            onPress={() => openChallenge(c as SeedChallenge)}
+                            style={{ marginTop: t.spacing.md }}
+                          />
+                        </SpotlightTarget>
+                      ) : (
+                        <Button
+                          label="Start challenge"
+                          onPress={() => openChallenge(c as SeedChallenge)}
+                          style={{ marginTop: t.spacing.md }}
+                        />
+                      )}
                     </>
                   ) : (
                     <View style={{ marginTop: t.spacing.s }}>
-                      <Pressable
-                        onPress={() => {
-                          const msg = lockMessage(safePlan, c);
-                          if (msg.includes('Premium')) {
-                            try {
-                              (nav.getParent?.() ?? nav).navigate('Paywall', { plan: 'monthly' });
-                            } catch {
-                              Alert.alert('Premium', 'Purchases are coming soon ✨');
+                      {isFirstLocked ? (
+                        <SpotlightTarget id="ch-lock">
+                          <Pressable
+                            onPress={() => {
+                              const msg = lockMessage(safePlan, c);
+                              if (msg.includes('Premium')) {
+                                try {
+                                  (nav.getParent?.() ?? nav).navigate('Paywall', { plan: 'monthly' });
+                                } catch {
+                                  Alert.alert('Premium', 'Purchases are coming soon ✨');
+                                }
+                              }
+                            }}
+                            style={s.lockBtn}
+                            accessibilityRole="button"
+                          >
+                            <Ionicons name="lock-closed" size={16} color={t.colors.textDim} />
+                            <ThemedText variant="label" color="textDim" style={{ marginLeft: 8 }}>
+                              {lockMessage(safePlan, c)}
+                            </ThemedText>
+                          </Pressable>
+                        </SpotlightTarget>
+                      ) : (
+                        <Pressable
+                          onPress={() => {
+                            const msg = lockMessage(safePlan, c);
+                            if (msg.includes('Premium')) {
+                              try {
+                                (nav.getParent?.() ?? nav).navigate('Paywall', { plan: 'monthly' });
+                              } catch {
+                                Alert.alert('Premium', 'Purchases are coming soon ✨');
+                              }
                             }
-                          }
-                        }}
-                        style={s.lockBtn}
-                        accessibilityRole="button"
-                      >
-                        <Ionicons name="lock-closed" size={16} color={t.colors.textDim} />
-                        <ThemedText variant="label" color="textDim" style={{ marginLeft: 8 }}>
-                          {lockMessage(safePlan, c)}
-                        </ThemedText>
-                      </Pressable>
+                          }}
+                          style={s.lockBtn}
+                          accessibilityRole="button"
+                        >
+                          <Ionicons name="lock-closed" size={16} color={t.colors.textDim} />
+                          <ThemedText variant="label" color="textDim" style={{ marginLeft: 8 }}>
+                            {lockMessage(safePlan, c)}
+                          </ThemedText>
+                        </Pressable>
+                      )}
                     </View>
                   )}
                 </View>
@@ -605,6 +648,57 @@ export default function ChallengesScreen() {
           </ThemedText>
         </View>
       ) : null}
+
+      {/* Auto-start tutorial */}
+      <SpotlightAutoStarter
+        uid={user?.uid ?? null}
+        steps={CHALLENGES_TOUR_STEPS}
+        persistKey="tour-challenges"
+      />
+    </View>
+  );
+}
+
+/* ---------- Clamp (collapsible long text) ---------- */
+
+function Clamp({
+  text,
+  lines = 4,
+  dimColor,
+}: {
+  text: string;
+  lines?: number;
+  dimColor: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [showToggle, setShowToggle] = useState<boolean>(text.length > 140);
+
+  return (
+    <View>
+      <ThemedText
+        variant="body"
+        color={dimColor}
+        style={{ marginTop: 4 }}
+        numberOfLines={expanded ? undefined : lines}
+        onTextLayout={(e) => {
+          const n = e?.nativeEvent?.lines?.length ?? 0;
+          if (n > lines) setShowToggle(true);
+        }}
+        ellipsizeMode="tail"
+      >
+        {text}
+      </ThemedText>
+      {showToggle && (
+        <Pressable
+          onPress={() => setExpanded((v) => !v)}
+          accessibilityRole="button"
+          style={{ marginTop: 6 }}
+        >
+          <ThemedText variant="label" color={dimColor}>
+            {expanded ? 'Show less' : 'Read more'}
+          </ThemedText>
+        </Pressable>
+      )}
     </View>
   );
 }
