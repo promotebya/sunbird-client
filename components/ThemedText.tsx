@@ -1,6 +1,6 @@
 // components/ThemedText.tsx
 import { PropsWithChildren } from 'react';
-import { Text as RNText, StyleSheet, type TextProps } from 'react-native';
+import { Platform, Text as RNText, StyleSheet, type TextProps } from 'react-native';
 import { useTokens, type ThemeTokens } from './ThemeProvider';
 
 type Variant =
@@ -39,7 +39,7 @@ export default function ThemedText({
       ? (t.colors as any)[color as keyof ThemeTokens['colors']]
       : color || t.colors.text;
 
-  const base =
+  const baseStyle =
     variant === 'display' ? styles.display :
     variant === 'title'   ? styles.title   :
     variant === 'h2'      ? styles.h2      :
@@ -51,13 +51,33 @@ export default function ThemedText({
 
   return (
     <RNText
-      {...rest} // forwards numberOfLines, onTextLayout, etc. (needed by Clamp)
-      style={[base, { color: resolvedColor }, center ? styles.center : null, style]}
+      {...rest} // forwards numberOfLines, onTextLayout, etc.
+      allowFontScaling={false}
+      style={[
+        platformBase,
+        baseStyle,
+        { color: resolvedColor },
+        center ? styles.center : null,
+        style,
+      ]}
     >
       {children}
     </RNText>
   );
 }
+
+const platformBase = Platform.select({
+  ios: {
+    // iOS metrics are already nice
+  },
+  android: {
+    includeFontPadding: false,
+    textAlignVertical: 'center',
+    // a clean default weight on Android that matches iOS better
+    fontFamily: 'sans-serif',
+  },
+  default: {},
+}) as object;
 
 const styles = StyleSheet.create({
   display:  { fontSize: 30, fontWeight: '800', lineHeight: 36 },

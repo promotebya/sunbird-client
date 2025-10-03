@@ -64,13 +64,11 @@ export default function Button({
         border: withAlpha(colors.primary, 0.32),
         text: '#FFFFFF',
         icon: '#FFFFFF',
-        // subtle micro gradient (top→bottom) on solid
         gradientTop: withAlpha('#FFFFFF', 0.08),
         gradientBot: withAlpha('#FFFFFF', 0.00),
       };
     }
     if (isDestructive) {
-      // destructive outline
       const red = '#DC2626';
       return {
         bg: '#FFFFFF',
@@ -101,13 +99,13 @@ export default function Button({
         gradientBot: 'transparent',
       };
     }
-    // tonal (default): light fill based on primary
+    // tonal (default)
     return {
-      bg: withAlpha(colors.primary, 0.14),      // theme-200 feel
-      border: withAlpha(colors.primary, 0.28),  // theme-300 feel
+      bg: withAlpha(colors.primary, 0.14),
+      border: withAlpha(colors.primary, 0.28),
       text: colors.primary,
       icon: colors.primary,
-      gradientTop: withAlpha('#FFFFFF', 0.08),  // micro highlight
+      gradientTop: withAlpha('#FFFFFF', 0.08),
       gradientBot: withAlpha('#FFFFFF', 0.00),
     };
   }, [colors, isPrimary, isOutline, isGhost, isDestructive]);
@@ -131,8 +129,10 @@ export default function Button({
       disabled={!isClickable}
       accessibilityRole="button"
       testID={testID}
+      android_ripple={Platform.OS === 'android' ? { color: 'rgba(0,0,0,0.06)', radius: 240 } : undefined}
       style={({ pressed }) => [
         styles.hit,
+        Platform.OS === 'android' ? { overflow: 'hidden' } : null,
         style,
         isGhost && { paddingHorizontal: 4, paddingVertical: 6 }, // lighter footprint for links
       ]}
@@ -146,7 +146,6 @@ export default function Button({
             borderWidth: isOutline ? 1 : isTonal ? 1 : StyleSheet.hairlineWidth,
           },
           isGhost && styles.ghost,
-          // directional shadow (skip for ghost)
           !isGhost && Platform.select({
             ios: {
               shadowColor: 'rgba(0,0,0,1)',
@@ -159,7 +158,6 @@ export default function Button({
           { transform: [{ translateY }] },
         ]}
       >
-        {/* micro gradient over fill for subtle depth */}
         {(isPrimary || isTonal || isOutline) && (
           <LinearGradient
             colors={[palette.gradientTop, palette.gradientBot]}
@@ -167,15 +165,11 @@ export default function Button({
             pointerEvents="none"
           />
         )}
-        {/* inner top highlight */}
+
         {(isPrimary || isTonal || isOutline) && (
-          <View
-            pointerEvents="none"
-            style={styles.innerHighlight}
-          />
+          <View pointerEvents="none" style={styles.innerHighlight} />
         )}
 
-        {/* content */}
         {iconLeft && !loading ? (
           <Ionicons name={iconLeft} size={18} color={palette.icon} style={{ marginRight: 8 }} />
         ) : null}

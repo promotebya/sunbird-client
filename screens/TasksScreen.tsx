@@ -402,137 +402,143 @@ const TasksScreen: React.FC = () => {
     return !alreadyUsedThisWeek && !alreadyArmedThisWeek && !pending;
   }, [streak]);
 
+  // Everything above the list now scrolls with the list
+  const listHeader = (
+    <View>
+      {/* Header */}
+      <View style={s.header}>
+        <ThemedText variant="display">Tasks</ThemedText>
+        <ThemedText variant="subtitle" color={t.colors.textDim}>
+          Keep track of kind little things
+        </ThemedText>
+      </View>
+
+      {/* Segmented tabs (counts) */}
+      <SpotlightTarget id="ts-tabs">
+        <View style={s.segmented}>
+          {(['personal', 'shared'] as const).map((k) => {
+            const active = tab === k;
+            const count = k === 'personal' ? personalCount : sharedCount;
+            return (
+              <Pressable
+                key={k}
+                onPress={() => setTab(k)}
+                accessibilityRole="button"
+                style={[s.segment, active && s.segmentActive]}
+              >
+                <ThemedText variant="label" color={active ? t.colors.text : t.colors.textDim}>
+                  {k === 'personal' ? 'Personal' : 'Shared'}{count ? ` (${count})` : ''}
+                </ThemedText>
+              </Pressable>
+            );
+          })}
+        </View>
+      </SpotlightTarget>
+
+      {/* Shared tab link banner */}
+      {tab === 'shared' && !pairId && (
+        <Card style={{ marginBottom: t.spacing.md, paddingVertical: 12, borderWidth: 1, borderColor: t.colors.border }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+            <View
+              style={{
+                width: 36, height: 36, borderRadius: 10,
+                backgroundColor: withAlpha(t.colors.primary, 0.08),
+                alignItems: 'center', justifyContent: 'center',
+              }}
+            >
+              <Ionicons name="link" size={18} color={t.colors.primary} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <ThemedText variant="title">Link with your partner</ThemedText>
+              <ThemedText variant="caption" color={t.colors.textDim}>Share tasks and progress.</ThemedText>
+            </View>
+          </View>
+          <View style={{ flexDirection: 'row', gap: 12, marginTop: 10 }}>
+            <SpotlightTarget id="ts-link">
+              <Button label="Link now" onPress={() => nav.navigate('Pairing')} />
+            </SpotlightTarget>
+            <Button label="Later" variant="ghost" />
+          </View>
+        </Card>
+      )}
+
+      {/* Catch-up helper */}
+      {showCatchupChip && (
+        <View style={{ paddingHorizontal: t.spacing.md, marginBottom: t.spacing.s }}>
+          <SpotlightTarget id="ts-catchup">
+            <Pressable
+              onPress={async () => {
+                if (!user) return;
+                await activateCatchup(user.uid);
+                showUndo('Catch-up armed for this week');
+              }}
+              style={s.catchupChip}
+            >
+              <Ionicons name="sparkles" size={14} color={t.colors.primary} />
+              <ThemedText variant="label" color={t.colors.primary} style={{ marginLeft: 6 }}>
+                Catch-up day
+              </ThemedText>
+            </Pressable>
+          </SpotlightTarget>
+          <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 4 }}>
+            Missed yesterday? Complete 2 tasks today to keep your streak.
+          </ThemedText>
+        </View>
+      )}
+
+      {/* Composer */}
+      <Card style={{ marginBottom: t.spacing.md }}>
+        <View style={s.inputRow}>
+          <SpotlightTarget id="ts-input">
+            <Input
+              ref={inputRef}
+              value={title}
+              onChangeText={(val) => {
+                setTitle(val);
+                if (titleError) setTitleError(undefined);
+              }}
+              placeholder="New task…"
+              containerStyle={{ flex: 1, marginRight: t.spacing.s }}
+              errorText={titleError}
+              returnKeyType="done"
+              onSubmitEditing={handleAddTask}
+            />
+          </SpotlightTarget>
+          <SpotlightTarget id="ts-add">
+            <Button label="Add" onPress={handleAddTask} disabled={!title.trim()} />
+          </SpotlightTarget>
+        </View>
+
+        {/* Quick ideas */}
+        <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: t.spacing.s }}>
+          Tap to add to your list.
+        </ThemedText>
+        <SpotlightTarget id="ts-suggestions">
+          <View style={s.suggestWrap}>
+            {['Plan a mini date', 'Write a love note', 'Make coffee', 'Do the dishes', 'Share a song', 'Bring a snack'].map((txt) => (
+              <Pressable key={txt} onPress={() => setTitle(txt)} style={s.suggestChip} accessibilityRole="button">
+                <ThemedText variant="label">{txt}</ThemedText>
+              </Pressable>
+            ))}
+          </View>
+        </SpotlightTarget>
+      </Card>
+    </View>
+  );
+
   return (
     <SafeAreaView style={[s.screen, { paddingTop: t.spacing.md }]} edges={['top', 'left', 'right']}>
       {showConfetti ? <ConfettiTiny /> : null}
 
       <KeyboardAvoidingView behavior={Platform.select({ ios: 'padding', android: undefined })} style={{ flex: 1 }}>
-        {/* Header */}
-        <View style={s.header}>
-          <ThemedText variant="display">Tasks</ThemedText>
-          <ThemedText variant="subtitle" color={t.colors.textDim}>
-            Keep track of kind little things
-          </ThemedText>
-        </View>
-
-        {/* Segmented tabs (counts) */}
-        <SpotlightTarget id="ts-tabs">
-          <View style={s.segmented}>
-            {(['personal', 'shared'] as const).map((k) => {
-              const active = tab === k;
-              const count = k === 'personal' ? personalCount : sharedCount;
-              return (
-                <Pressable
-                  key={k}
-                  onPress={() => setTab(k)}
-                  accessibilityRole="button"
-                  style={[s.segment, active && s.segmentActive]}
-                >
-                  <ThemedText variant="label" color={active ? t.colors.text : t.colors.textDim}>
-                    {k === 'personal' ? 'Personal' : 'Shared'}{count ? ` (${count})` : ''}
-                  </ThemedText>
-                </Pressable>
-              );
-            })}
-          </View>
-        </SpotlightTarget>
-
-        {/* Shared tab link banner */}
-        {tab === 'shared' && !pairId && (
-          <Card style={{ marginBottom: t.spacing.md, paddingVertical: 12, borderWidth: 1, borderColor: t.colors.border }}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-              <View
-                style={{
-                  width: 36, height: 36, borderRadius: 10,
-                  backgroundColor: withAlpha(t.colors.primary, 0.08),
-                  alignItems: 'center', justifyContent: 'center',
-                }}
-              >
-                <Ionicons name="link" size={18} color={t.colors.primary} />
-              </View>
-              <View style={{ flex: 1 }}>
-                <ThemedText variant="title">Link with your partner</ThemedText>
-                <ThemedText variant="caption" color={t.colors.textDim}>Share tasks and progress.</ThemedText>
-              </View>
-            </View>
-            <View style={{ flexDirection: 'row', gap: 12, marginTop: 10 }}>
-              <SpotlightTarget id="ts-link">
-                <Button label="Link now" onPress={() => nav.navigate('Pairing')} />
-              </SpotlightTarget>
-              <Button label="Later" variant="ghost" />
-            </View>
-          </Card>
-        )}
-
-        {/* Catch-up helper */}
-        {showCatchupChip && (
-          <View style={{ paddingHorizontal: t.spacing.md, marginBottom: t.spacing.s }}>
-            <SpotlightTarget id="ts-catchup">
-              <Pressable
-                onPress={async () => {
-                  if (!user) return;
-                  await activateCatchup(user.uid);
-                  showUndo('Catch-up armed for this week');
-                }}
-                style={s.catchupChip}
-              >
-                <Ionicons name="sparkles" size={14} color={t.colors.primary} />
-                <ThemedText variant="label" color={t.colors.primary} style={{ marginLeft: 6 }}>
-                  Catch-up day
-                </ThemedText>
-              </Pressable>
-            </SpotlightTarget>
-            <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 4 }}>
-              Missed yesterday? Complete 2 tasks today to keep your streak.
-            </ThemedText>
-          </View>
-        )}
-
-        {/* Composer */}
-        <Card style={{ marginBottom: t.spacing.md }}>
-          <View style={s.inputRow}>
-            <SpotlightTarget id="ts-input">
-              <Input
-                ref={inputRef}
-                value={title}
-                onChangeText={(val) => {
-                  setTitle(val);
-                  if (titleError) setTitleError(undefined);
-                }}
-                placeholder="New task…"
-                containerStyle={{ flex: 1, marginRight: t.spacing.s }}
-                errorText={titleError}
-                returnKeyType="done"
-                onSubmitEditing={handleAddTask}
-              />
-            </SpotlightTarget>
-            <SpotlightTarget id="ts-add">
-              <Button label="Add" onPress={handleAddTask} disabled={!title.trim()} />
-            </SpotlightTarget>
-          </View>
-
-          {/* Quick ideas */}
-          <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: t.spacing.s }}>
-            Tap to add to your list.
-          </ThemedText>
-          <SpotlightTarget id="ts-suggestions">
-            <View style={s.suggestWrap}>
-              {['Plan a mini date', 'Write a love note', 'Make coffee', 'Do the dishes', 'Share a song', 'Bring a snack'].map((txt) => (
-                <Pressable key={txt} onPress={() => setTitle(txt)} style={s.suggestChip} accessibilityRole="button">
-                  <ThemedText variant="label">{txt}</ThemedText>
-                </Pressable>
-              ))}
-            </View>
-          </SpotlightTarget>
-        </Card>
-
-        {/* List */}
         <FlatList
           data={data}
           keyExtractor={(i) => i.id}
           ItemSeparatorComponent={() => <View style={{ height: t.spacing.s }} />}
           renderItem={renderItem}
+          ListHeaderComponent={listHeader}
           contentContainerStyle={{ paddingBottom: insets.bottom + t.spacing.xl }}
+          keyboardShouldPersistTaps="handled"
           ListEmptyComponent={
             <Card>
               <View style={{ alignItems: 'center', paddingVertical: t.spacing.lg }}>

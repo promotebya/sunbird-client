@@ -10,8 +10,8 @@ import {
   where,
 } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Pressable, StyleSheet, View, useWindowDimensions } from 'react-native'; // ⟵ useWindowDimensions
-import { useSafeAreaInsets } from 'react-native-safe-area-context'; // ⟵ insets for tab targets
+import { Platform, Pressable, StyleSheet, View, useWindowDimensions } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import Button from '../components/Button';
 import Card from '../components/Card';
@@ -54,22 +54,25 @@ const FIRST_RUN_STEPS: SpotlightStep[] = [
     targetId: null,
     title: 'Welcome to LovePoints 💖',
     text: 'Quick tour to get you started?',
-    placement: 'bottom',           // intro sits safely above the home bar
+    placement: 'bottom',
     allowBackdropTapToNext: true,
   },
   { id: 'link',    targetId: 'home-link-partner', title: 'Pair up',     text: 'Link with your partner to sync points and memories.' },
   { id: 'log',     targetId: 'home-log-task',     title: 'Log a task',  text: 'Track a kind action and earn LovePoints.' },
   { id: 'reward',  targetId: 'home-add-reward',   title: 'Rewards',     text: 'Add a reward you can redeem with points.' },
-  { id: 'ideas',   targetId: 'home-ideas',        title: 'Ideas for today', text: 'Quick suggestions for easy wins.' },
+
+  // ⬇️ Spotlight target wraps header + first-row chips only (keeps nav out of the hole)
+  { id: 'ideas', targetId: 'home-ideas-anchor', title: 'Ideas for today', text: 'Quick suggestions for easy wins.', placement: 'top', padding: 6 },
+
   { id: 'settings',targetId: 'home-settings',     title: 'Settings',    text: 'Manage your profile, pairing, and notifications.' },
 
-  // Tabs mini-tour — force 'top' so the card is fully on-screen on all devices
-  { id: 'tab-home',       targetId: 'tab-home',       title: 'Home',         text: 'Overview, goals, ideas, and quick actions.', placement: 'top',  padding: 12 },
-  { id: 'tab-memories',   targetId: 'tab-memories',   title: 'Memories',     text: 'Save sweet moments with text & photos.',     placement: 'top',  padding: 12 },
-  { id: 'tab-reminders',  targetId: 'tab-reminders',  title: 'Reminders',    text: 'Set gentle nudges for future you.',          placement: 'top',  padding: 12 },
-  { id: 'tab-love',       targetId: 'tab-love',       title: 'Love Notes 💌', text: 'Send quick notes; we’ll nudge your partner.', placement: 'top',  padding: 12 },
-  { id: 'tab-tasks',      targetId: 'tab-tasks',      title: 'Tasks',        text: 'Shared to-dos; finishing can award points.', placement: 'top',  padding: 12 },
-  { id: 'tab-challenges', targetId: 'tab-challenges', title: 'Challenges',   text: 'Tiny prompts to spark connection.',          placement: 'top',  padding: 12 },
+  // Tabs mini-tour — narrower phantom targets so labels/neighbor tabs aren’t included
+  { id: 'tab-home',       targetId: 'tab-home',       title: 'Home',         text: 'Overview, goals, ideas, and quick actions.', placement: 'top',  padding: 8 },
+  { id: 'tab-memories',   targetId: 'tab-memories',   title: 'Memories',     text: 'Save sweet moments with text & photos.',     placement: 'top',  padding: 8 },
+  { id: 'tab-reminders',  targetId: 'tab-reminders',  title: 'Reminders',    text: 'Set gentle nudges for future you.',          placement: 'top',  padding: 8 },
+  { id: 'tab-love',       targetId: 'tab-love',       title: 'Love Notes 💌', text: 'Send quick notes; we’ll nudge your partner.', placement: 'top',  padding: 8 },
+  { id: 'tab-tasks',      targetId: 'tab-tasks',      title: 'Tasks',        text: 'Shared to-dos; finishing can award points.', placement: 'top',  padding: 8 },
+  { id: 'tab-challenges', targetId: 'tab-challenges', title: 'Challenges',   text: 'Tiny prompts to spark connection.',          placement: 'top',  padding: 8 },
 ];
 
 type PointsItem = {
@@ -141,16 +144,16 @@ export default function HomeScreen() {
   const [showAddReward, setShowAddReward] = useState(false);
   const [hideLinkBanner, setHideLinkBanner] = useState(false);
 
-  // ⟵ tab phantom target geometry
+  // ▶ Tab phantom target geometry (narrower & lifted so adjacent text like “m” isn’t included)
   const { width: W } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const TAB_COUNT = 6;
   const SEG = W / TAB_COUNT;
 
-  // Make the spotlight holes smaller and centered inside each segment
-  const TAB_ITEM_W = Math.min(64, SEG - 16);
-  const TAB_H = 64;                              // slightly shorter
-  const TAB_BOTTOM = insets.bottom + 10;         // safe-area offset
+  // Tighter, icon-focused phantom holes:
+  const TAB_ITEM_W = Math.min(44, SEG - 28);                // narrower width
+  const TAB_H = Platform.select({ ios: 56, android: 52 });  // shorter height
+  const TAB_BOTTOM = (insets.bottom || 0) + 34;             // slightly higher above the bar
   const tabLeft = (i: number) => i * SEG + (SEG - TAB_ITEM_W) / 2;
 
   // Pair info
@@ -232,7 +235,6 @@ export default function HomeScreen() {
     await redeemReward(user.uid, pairId ?? null, r);
   };
 
-  // Milestone computation (for the “Next milestone” row)
   const totalPoints = total ?? 0;
   const { target, remaining } = useMemo(
     () => nextMilestone(totalPoints),
@@ -261,7 +263,6 @@ export default function HomeScreen() {
             </Pill>
           </View>
 
-          {/* Outline so it doesn’t compete with CTAs */}
           <SpotlightTarget id="home-settings">
             <Button
               label="Settings"
@@ -299,7 +300,7 @@ export default function HomeScreen() {
         </SpotlightTarget>
       )}
 
-      {/* Weekly goal (Progress card) — also hosts the Add reward CTA when none exist */}
+      {/* Weekly goal (Progress card) */}
       <Card style={{ marginBottom: 12, borderWidth: 1, borderColor: HAIRLINE }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
           <ThemedText variant="subtitle" style={{ flex: 1 }}>Weekly goal</ThemedText>
@@ -341,29 +342,42 @@ export default function HomeScreen() {
       </Card>
 
       {/* Ideas (Navigation block) */}
-      <SpotlightTarget id="home-ideas">
-        <Card style={{ marginBottom: 12, borderWidth: 1, borderColor: HAIRLINE }}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
-            <ThemedText variant="subtitle" style={{ flex: 1 }}>Ideas for today</ThemedText>
-            <Pressable onPress={() => nav.navigate('Discover')} accessibilityRole="link">
-              <ThemedText variant="label" color={t.colors.primary}>See more →</ThemedText>
-            </Pressable>
-            <View style={{ width: 12 }} />
-            <Pressable onPress={() => setKey((k) => k + 1)} accessibilityRole="button">
-              <ThemedText variant="label" color={t.colors.primary}>🔀 Shuffle</ThemedText>
-            </Pressable>
-          </View>
-
-          <View style={s.tagWrap}>
-            {ideas.map((txt) => (
-              <Pressable key={txt} onPress={() => onIdea(txt)} style={s.chip} accessibilityRole="button">
-                <Ionicons name="sparkles" size={14} color={t.colors.textDim} />
-                <ThemedText variant="label" style={{ marginLeft: 6 }}>{txt}</ThemedText>
+      <Card style={{ marginBottom: 12, borderWidth: 1, borderColor: HAIRLINE }}>
+        <SpotlightTarget id="home-ideas-anchor" style={{ alignSelf: 'stretch' }}>
+          <View>
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+              <ThemedText variant="subtitle" style={{ flex: 1 }}>Ideas for today</ThemedText>
+              <Pressable onPress={() => nav.navigate('Discover')} accessibilityRole="link">
+                <ThemedText variant="label" color={t.colors.primary}>See more →</ThemedText>
               </Pressable>
-            ))}
+              <View style={{ width: 12 }} />
+              <Pressable onPress={() => setKey((k) => k + 1)} accessibilityRole="button">
+                <ThemedText variant="label" color={t.colors.primary}>🔀 Shuffle</ThemedText>
+              </Pressable>
+            </View>
+
+            {/* First-row chips only (keeps spotlight small and away from the tab bar) */}
+            <View style={s.tagWrap}>
+              {ideas.slice(0, 2).map((txt) => (
+                <Pressable key={txt} onPress={() => onIdea(txt)} style={s.chip} accessibilityRole="button">
+                  <Ionicons name="sparkles" size={14} color={t.colors.textDim} />
+                  <ThemedText variant="label" style={{ marginLeft: 6 }}>{txt}</ThemedText>
+                </Pressable>
+              ))}
+            </View>
           </View>
-        </Card>
-      </SpotlightTarget>
+        </SpotlightTarget>
+
+        {/* Remaining chips (outside the spotlight area) */}
+        <View style={[s.tagWrap, { marginTop: 10 }] }>
+          {ideas.slice(2).map((txt) => (
+            <Pressable key={txt} onPress={() => onIdea(txt)} style={s.chip} accessibilityRole="button">
+              <Ionicons name="sparkles" size={14} color={t.colors.textDim} />
+              <ThemedText variant="label" style={{ marginLeft: 6 }}>{txt}</ThemedText>
+            </Pressable>
+          ))}
+        </View>
+      </Card>
 
       {/* Rewards list (only when you actually have rewards) */}
       {rewards.length > 0 && (
@@ -449,7 +463,6 @@ const styles = (t: ThemeTokens) =>
       alignItems: 'center',
       justifyContent: 'space-between',
     },
-    // New: pills left, settings right
     metaRow: {
       flexDirection: 'row',
       alignItems: 'center',

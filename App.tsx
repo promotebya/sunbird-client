@@ -47,7 +47,7 @@ const NUDGE_PROMPTS: string[] = [
   "Text: “Thinking of you—how’s your energy today?”",
   "Share a small inside joke.",
   "Offer help with one task they have this week.",
-  "Recall the moment you first felt close—tell them about it.",
+  "Suggest a tiny plan for tonight—tea, short walk, or a 10-minute game.",
   "Ask them about something they care about.",
   "Tell them one new thing you learned about them recently.",
   "Say: “I’m proud of you for ___.”",

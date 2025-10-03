@@ -70,14 +70,24 @@ const REMINDERS_TOUR_STEPS: SpotlightStep[] = [
     id: 'rem-welcome',
     targetId: null,
     title: 'Reminders',
-    text: 'Set yearly dates and we\'ll handle the nudges for you.',
+    text: "Set yearly dates and we'll handle the nudges for you.",
     placement: 'bottom',
     allowBackdropTapToNext: true,
   },
   { id: 'rem-title',  targetId: 'rem-title',  title: 'Title', text: 'Pick a title or use a preset.' },
   { id: 'rem-date',   targetId: 'rem-date',   title: 'Date',  text: 'Choose the day and month.' },
   { id: 'rem-time',   targetId: 'rem-time',   title: 'Time',  text: 'Pick when the reminder should appear.' },
-  { id: 'rem-inbox',  targetId: 'rem-inbox',  title: 'Inbox', text: 'See your scheduled and pending reminders here.' },
+
+  // Toggle is part of the tour so users discover it
+  {
+    id: 'rem-toggle',
+    targetId: 'rem-toggle',
+    title: 'For both',
+    text: 'Switch this on to also add the reminder to your partner’s screen.',
+    placement: 'top',
+  },
+
+  { id: 'rem-inbox',  targetId: 'rem-inbox',  title: 'Inbox', text: 'See pending partner items and your upcoming reminders here.' },
 ];
 
 // Neutral porcelain tones (match Home/Memories)
@@ -100,6 +110,7 @@ const RemindersScreen: React.FC = () => {
   // Read spotlight state directly from context (no optional call)
   const { steps: activeSteps, stepIndex, isActive } = useSpotlight();
   const currentStepId = isActive && activeSteps?.[stepIndex]?.id ? activeSteps![stepIndex]!.id : null;
+
   // Helper to ensure a ref is visible in the scroll view
   function ensureVisible(ref: React.RefObject<View>) {
     const node = ref.current as any;
@@ -202,12 +213,11 @@ const RemindersScreen: React.FC = () => {
   // Only show “on the day” yearly/date entries here (hide nudges, timeInterval, warnings)
   const visibleScheduled = useMemo((): SavedReq[] => {
     return scheduled.filter((req) => {
-      // Hide background gentle nudges and any time-interval notifications
       if (isGentleNudge(req)) return false;
       const ttype = getTriggerType((req as any).trigger);
       if (ttype === 'timeInterval') return false;
 
-      // In this summary we only show the same‑day entry (exclude 1‑day/1‑week warnings)
+      // In this summary we only show the same-day entry (exclude 1-day/1-week warnings)
       const body = (req.content?.body ?? '') as string;
       if (/one week/i.test(body) || /tomorrow/i.test(body)) return false;
 
@@ -412,7 +422,7 @@ const RemindersScreen: React.FC = () => {
           </View>
         </Card>
 
-        {/* Date / Time + fixed info + partner toggle */}
+        {/* Date / Time + summary right below Time + partner toggle; Save at bottom */}
         <Card style={{ marginTop: t.spacing.md }}>
           <ThemedText variant="h2">Date</ThemedText>
           <SpotlightTarget id="rem-date">
@@ -440,17 +450,15 @@ const RemindersScreen: React.FC = () => {
             </Pressable>
           </SpotlightTarget>
 
-          <View style={s.rowDivider} />
-
-          <ThemedText variant="caption" color={t.colors.textDim}>
+          {/* Summary moved directly under Time */}
+          <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: t.spacing.s }}>
             {fixedSummary}
           </ThemedText>
 
-          <View style={s.rowDivider} />
-
+          {/* Toggle sits right under the summary (far from the home indicator) */}
           <View ref={toggleRef}>
             <SpotlightTarget id="rem-toggle">
-              <View style={s.toggleRow}>
+              <View style={[s.toggleRow, { marginTop: t.spacing.md }]}>
                 <ThemedText variant="body">Also create for partner</ThemedText>
                 <Switch
                   value={forBoth}
@@ -463,7 +471,9 @@ const RemindersScreen: React.FC = () => {
             </SpotlightTarget>
           </View>
 
-          <View ref={saveRef} style={{ marginTop: t.spacing.lg }}>
+          <View style={s.rowDivider} />
+
+          <View ref={saveRef} style={{ marginTop: t.spacing.s }}>
             <SpotlightTarget id="rem-save">
               <View>
                 <Button label={saving ? 'Saving…' : 'Save reminders'} onPress={onSave} disabled={saving} />
@@ -582,7 +592,6 @@ const styles = (t: ThemeTokens) =>
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'space-between',
-      marginTop: t.spacing.s,
     },
 
     savedHeader: {

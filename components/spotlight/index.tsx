@@ -100,12 +100,15 @@ export const SpotlightProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   }, []);
 
   const stop = useCallback(() => {
+    // ✅ Mark as done on Skip/Stop so AutoStarter won't immediately relaunch
+    const key = options?.persistKey;
+    if (key) AsyncStorage.setItem(`spotlight:${key}:done`, '1').catch(() => {});
     Animated.timing(opacity, { toValue: 0, duration: 150, useNativeDriver: true }).start(() => {
       setSteps(null);
       setIndex(0);
       setOptions(undefined);
     });
-  }, [opacity]);
+  }, [opacity, options]);
 
   const next = useCallback(() => {
     if (!steps) return;
@@ -179,10 +182,30 @@ export const SpotlightTarget: React.FC<TargetProps> = ({ id, children, style }) 
 
   const measure = useCallback(() => {
     const node = ref.current as any;
-    if (!node || typeof node.measureInWindow !== 'function') return;
-    node.measureInWindow((x: number, y: number, width: number, height: number) => {
-      registerTarget(id, { x, y, width, height });
-    });
+    if (!node) return;
+
+    let wrote = false;
+
+    // Try legacy measure (Android sometimes prefers this)
+    if (typeof node.measure === 'function') {
+      node.measure(
+        (_x: number, _y: number, w: number, h: number, pageX: number, pageY: number) => {
+          if (w && h) {
+            registerTarget(id, { x: pageX, y: pageY, width: w, height: h });
+            wrote = true;
+          }
+        }
+      );
+    }
+
+    // Fallback / second attempt
+    if (typeof node.measureInWindow === 'function') {
+      node.measureInWindow((x: number, y: number, w: number, h: number) => {
+        if (w && h && !wrote) {
+          registerTarget(id, { x, y, width: w, height: h });
+        }
+      });
+    }
   }, [id, registerTarget]);
 
   // Measure on mount + layout, and a few extra RAFs to catch late layouts (e.g., tab bar)
@@ -242,8 +265,7 @@ const SpotlightOverlay: React.FC<OverlayProps> = ({
   const rectRaw = wantsTarget ? targets[step.targetId!] : undefined;
   const hasTarget = !!(rectRaw && rectRaw.width > 0 && rectRaw.height > 0);
 
-  // ▶ Important: if a step expects a target but it hasn't measured yet,
-  // don't render the floating card — wait until we have the target.
+  // If a step expects a target but it hasn't measured yet, wait.
   if (wantsTarget && !hasTarget) return null;
 
   const padding = step.padding ?? 8;
@@ -262,7 +284,7 @@ const SpotlightOverlay: React.FC<OverlayProps> = ({
       })()
     : null;
 
-  const cardMaxWidth = Math.min(320, W - 24);
+  const cardMaxWidth = Math.min(380, W - 24);
   const roomTop = hole ? hole.y : H / 2;
   const roomBottom = hole ? H - (hole.y + hole.height) : H / 2;
   const placement: NonNullable<SpotlightStep['placement']> =
@@ -332,12 +354,19 @@ const SpotlightOverlay: React.FC<OverlayProps> = ({
       ) : null}
 
       {/* Tooltip card */}
-      <View style={[styles.card, { top: cardY, left: cardX, maxWidth: cardMaxWidth, paddingBottom: 12 + insets.bottom * 0.1 }]}>
+      <View
+        style={[
+          styles.card,
+          { top: cardY, left: cardX, maxWidth: cardMaxWidth, paddingBottom: 12 + insets.bottom * 0.1 },
+        ]}
+      >
         {step.title ? <Text style={styles.title}>{step.title}</Text> : null}
         <Text style={styles.text}>{step.text}</Text>
 
         <View style={styles.rowBetween}>
-          <Text style={styles.progress}>{index + 1}/{steps.length}</Text>
+          <Text style={styles.progress}>
+            {index + 1}/{steps.length}
+          </Text>
           <View style={styles.actions}>
             {index > 0 && (
               <TouchableOpacity onPress={onPrev} style={[styles.btn, styles.btnGhost]}>
@@ -348,7 +377,9 @@ const SpotlightOverlay: React.FC<OverlayProps> = ({
               <Text style={[styles.btnText, { color: BRAND.textSecondary }]}>Skip</Text>
             </TouchableOpacity>
             <TouchableOpacity onPress={onNext} style={[styles.btn, styles.btnPrimary]}>
-              <Text style={[styles.btnText, { color: '#FFFFFF' }]}>{index === steps.length - 1 ? 'Got it' : 'Next'}</Text>
+              <Text style={[styles.btnText, { color: '#FFFFFF' }]}>
+                {index === steps.length - 1 ? 'Got it' : 'Next'}
+              </Text>
             </TouchableOpacity>
           </View>
         </View>

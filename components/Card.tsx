@@ -1,6 +1,6 @@
 // components/Card.tsx
 import React, { PropsWithChildren } from 'react';
-import { Pressable, StyleProp, StyleSheet, View, ViewStyle } from 'react-native';
+import { Platform, Pressable, StyleProp, StyleSheet, View, ViewStyle } from 'react-native';
 import { useTokens, type ThemeTokens } from './ThemeProvider';
 
 export type CardProps = PropsWithChildren<{
@@ -30,12 +30,18 @@ const styles = (t: ThemeTokens) =>
       borderWidth: 1,
       borderRadius: t.radius.lg,
       padding: t.spacing.md,
-      // slightly stronger, still soft
-      shadowColor: '#000',
-      shadowOpacity: 0.06,
-      shadowRadius: 12,
-      shadowOffset: { width: 0, height: 8 },
-      elevation: 2,
+      ...Platform.select({
+        ios: {
+          shadowColor: '#000',
+          shadowOpacity: 0.06,
+          shadowRadius: 12,
+          shadowOffset: { width: 0, height: 8 },
+        },
+        android: {
+          elevation: 2,
+        },
+        default: {},
+      }),
     },
   });
 
