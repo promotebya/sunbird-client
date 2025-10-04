@@ -162,14 +162,17 @@ export default function App() {
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
+      {/* ⬇️ SafeAreaProvider wraps the whole tree so Spotlight can read insets on Android */}
       <SafeAreaProvider>
-        <SpotlightProvider>
-          <ThemeProvider>
+        {/* Theme above Spotlight so overlay inherits fonts/colors */}
+        <ThemeProvider>
+          {/* Spotlight inside SafeArea so measurements are correct on Android */}
+          <SpotlightProvider>
             <NavigationContainer>
               {user ? <AppNavigator /> : <AuthNavigator />}
             </NavigationContainer>
-          </ThemeProvider>
-        </SpotlightProvider>
+          </SpotlightProvider>
+        </ThemeProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );

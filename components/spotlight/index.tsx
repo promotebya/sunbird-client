@@ -14,6 +14,7 @@ import {
   Animated,
   Dimensions,
   Easing,
+  Platform,
   Pressable,
   StyleProp,
   StyleSheet,
@@ -131,7 +132,7 @@ export const SpotlightProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const start = useCallback(
     (s: SpotlightStep[], opt?: SpotlightOptions) => {
-      totalRef.current = s.length;         // ← lock total once
+      totalRef.current = s.length; // lock total once
       setSteps(s);
       setOptions(opt);
       setIndex(0);
@@ -192,14 +193,12 @@ export const SpotlightTarget: React.FC<TargetProps> = ({ id, children, style }) 
     let wrote = false;
 
     if (typeof node.measure === 'function') {
-      node.measure(
-        (_x: number, _y: number, w: number, h: number, pageX: number, pageY: number) => {
-          if (w && h) {
-            registerTarget(id, { x: pageX, y: pageY, width: w, height: h });
-            wrote = true;
-          }
+      node.measure((_x: number, _y: number, w: number, h: number, pageX: number, pageY: number) => {
+        if (w && h) {
+          registerTarget(id, { x: pageX, y: pageY, width: w, height: h });
+          wrote = true;
         }
-      );
+      });
     }
 
     if (typeof node.measureInWindow === 'function') {
@@ -381,17 +380,18 @@ const SpotlightOverlay: React.FC<OverlayProps> = ({
 
         <View style={styles.rowBetween}>
           <Text style={styles.progress}>{Math.min(index + 1, displayTotal)}/{displayTotal}</Text>
+          {/* No 'gap' on Android: use margins */}
           <View style={styles.actions}>
             {index > 0 && (
               <TouchableOpacity onPress={onPrev} style={[styles.btn, styles.btnGhost, styles.mr8]}>
-                <Text style={[styles.btnText, { color: BRAND.textSecondary }]}>Back</Text>
+                <Text style={styles.btnTextGhost}>Back</Text>
               </TouchableOpacity>
             )}
             <TouchableOpacity onPress={onSkip} style={[styles.btn, styles.btnGhost, styles.mr8]}>
-              <Text style={[styles.btnText, { color: BRAND.textSecondary }]}>Skip</Text>
+              <Text style={styles.btnTextGhost}>Skip</Text>
             </TouchableOpacity>
             <TouchableOpacity onPress={onNext} style={[styles.btn, styles.btnPrimary]}>
-              <Text style={[styles.btnText, { color: '#FFFFFF' }]}>
+              <Text style={styles.btnTextPrimary}>
                 {index + 1 >= displayTotal ? 'Got it' : 'Next'}
               </Text>
             </TouchableOpacity>
@@ -456,15 +456,41 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 8 },
     elevation: 8,
   },
-  title: { fontSize: 16, fontWeight: '700', color: BRAND.textPrimary, marginBottom: 6 },
-  text: { fontSize: 14, color: BRAND.textSecondary },
-  progress: { fontSize: 13, color: 'rgba(255,255,255,0.55)', paddingVertical: 10 },
+  title: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: BRAND.textPrimary,
+    marginBottom: 6,
+    paddingRight: Platform.OS === 'android' ? 2 : 0, // prevent last-glyph clipping
+  },
+  text: {
+    fontSize: 14,
+    color: BRAND.textSecondary,
+    paddingRight: Platform.OS === 'android' ? 2 : 0, // prevent last-glyph clipping
+  },
+  progress: {
+    fontSize: 13,
+    color: 'rgba(255,255,255,0.55)',
+    paddingVertical: 10,
+    paddingRight: Platform.OS === 'android' ? 2 : 0, // prevents 2/12 → 2/1 truncation
+  },
   rowBetween: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 },
-  actions: { flexDirection: 'row', alignItems: 'center' }, // no 'gap' on Android
+  actions: { flexDirection: 'row', alignItems: 'center' },
   mr8: { marginRight: 8 },
   btn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999 },
   btnGhost: { backgroundColor: 'transparent' },
   btnPrimary: { backgroundColor: BRAND.pink },
-  btnText: { fontSize: 14, fontWeight: '700' },
+  btnTextPrimary: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#FFFFFF',
+    paddingRight: Platform.OS === 'android' ? 2 : 0,
+  },
+  btnTextGhost: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: BRAND.textSecondary,
+    paddingRight: Platform.OS === 'android' ? 2 : 0,
+  },
   arrow: { position: 'absolute', width: 16, height: 16, backgroundColor: BRAND.bgCard, borderRadius: 2 },
 });

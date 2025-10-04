@@ -11,7 +11,6 @@ import {
 } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import Button from '../components/Button';
 import Card from '../components/Card';
@@ -46,7 +45,7 @@ const IDEAS = [
   'Go for a walk',
 ];
 
-// 11 steps (tabs: 5). Remove "tab-challenges" since there’s no Challenges tab here.
+// 12 steps (tabs: 6) — radius/padding tuned to match 36×36 icon hitbox
 const FIRST_RUN_STEPS: SpotlightStep[] = [
   {
     id: 'welcome',
@@ -61,11 +60,26 @@ const FIRST_RUN_STEPS: SpotlightStep[] = [
   { id: 'reward',  targetId: 'home-add-reward',   title: 'Rewards',      text: 'Add a reward you can redeem with points.' },
   { id: 'ideas',   targetId: 'home-ideas-anchor', title: 'Ideas for today', text: 'Quick suggestions for easy wins.', placement: 'top', padding: 6 },
   { id: 'settings',targetId: 'home-settings',     title: 'Settings',     text: 'Manage your profile, pairing, and notifications.' },
-  { id: 'tab-home',      targetId: 'tab-home',      title: 'Home',          text: 'Overview, goals, ideas, and quick actions.', placement: 'top', padding: 8 },
-  { id: 'tab-memories',  targetId: 'tab-memories',  title: 'Memories',      text: 'Save sweet moments with text & photos.',     placement: 'top', padding: 8 },
-  { id: 'tab-reminders', targetId: 'tab-reminders', title: 'Reminders',     text: 'Set gentle nudges for future you.',          placement: 'top', padding: 8 },
-  { id: 'tab-love',      targetId: 'tab-love',      title: 'Love Notes 💌', text: 'Send quick notes; we’ll nudge your partner.', placement: 'top', padding: 8 },
-  { id: 'tab-tasks',     targetId: 'tab-tasks',     title: 'Tasks',         text: 'Shared to-dos; finishing can award points.',  placement: 'top', padding: 8 },
+
+  // Tabs — these IDs match the SpotlightTarget inside each tab item
+  {
+    id: 'tab-home',       targetId: 'tab-home',       title: 'Home',          text: 'Overview, goals, ideas, and quick actions.', placement: 'top',  padding: 6, radius: 22,
+  },
+  {
+    id: 'tab-memories',   targetId: 'tab-memories',   title: 'Memories',      text: 'Save sweet moments with text & photos.',     placement: 'top',  padding: 6, radius: 22,
+  },
+  {
+    id: 'tab-reminders',  targetId: 'tab-reminders',  title: 'Reminders',     text: 'Set gentle nudges for future you.',          placement: 'top',  padding: 6, radius: 22,
+  },
+  {
+    id: 'tab-love',       targetId: 'tab-love',       title: 'Love Notes 💌', text: 'Send quick notes; we’ll nudge your partner.', placement: 'top',  padding: 6, radius: 22,
+  },
+  {
+    id: 'tab-tasks',      targetId: 'tab-tasks',      title: 'Tasks',         text: 'Shared to-dos; finishing can award points.',  placement: 'top',  padding: 6, radius: 22,
+  },
+  {
+    id: 'tab-challenges', targetId: 'tab-challenges', title: 'Challenges',    text: 'Tiny prompts to spark connection.',           placement: 'top',  padding: 6, radius: 22,
+  },
 ];
 
 type PointsItem = {
@@ -93,7 +107,6 @@ const withAlpha = (hex: string, alpha: number) => {
   return `#${full}${a}`;
 };
 
-// Neutral tones
 const HAIRLINE = '#F0E6EF';
 const CHIP_BG = '#F3EEF6';
 
@@ -116,7 +129,6 @@ const Pill = ({ children }: { children: React.ReactNode }) => (
   </View>
 );
 
-// Compute the next milestone after current total
 function nextMilestone(total: number) {
   for (const m of MILESTONES) if (total < m) return { target: m, remaining: m - total };
   const target = MILESTONES[MILESTONES.length - 1] * 2;
@@ -127,7 +139,6 @@ export default function HomeScreen() {
   const t = useTokens();
   const s = useMemo(() => styles(t), [t]);
   const nav = useNavigation<any>();
-  useSafeAreaInsets(); // hoisted for consistent layout
 
   const { user } = useAuthListener();
   const { total, weekly } = usePointsTotal(user?.uid);
@@ -139,7 +150,6 @@ export default function HomeScreen() {
   const [showAddReward, setShowAddReward] = useState(false);
   const [hideLinkBanner, setHideLinkBanner] = useState(false);
 
-  // Pair info
   useEffect(() => {
     (async () => {
       if (!user) return setPairId(null);
@@ -147,14 +157,12 @@ export default function HomeScreen() {
     })();
   }, [user]);
 
-  // Rewards stream
   useEffect(() => {
     if (!user) return;
     const off = listenRewards(user.uid, pairId ?? null, setRewards);
     return () => off && off();
   }, [user, pairId]);
 
-  // Recent (last 3)
   useEffect(() => {
     if (!user) return;
     const q = query(
@@ -178,7 +186,6 @@ export default function HomeScreen() {
     return () => off();
   }, [user]);
 
-  // Daily ideas (rotate at midnight)
   const [key, setKey] = useState<number>(() => dayKey());
   useEffect(() => {
     const now = new Date();
@@ -310,10 +317,11 @@ export default function HomeScreen() {
           </ThemedText>
         </View>
 
-        <View style={{ marginTop: 12, flexDirection: 'row', gap: 12 }}>
+        <View style={{ marginTop: 12, flexDirection: 'row' }}>
           <SpotlightTarget id="home-log-task">
             <Button label="Log a task" onPress={() => nav.navigate('Tasks')} />
           </SpotlightTarget>
+          <View style={{ width: 12 }} />
           <SpotlightTarget id="home-add-reward">
             <Button
               label={rewards.length ? 'Add reward' : 'Add first reward'}
@@ -339,7 +347,6 @@ export default function HomeScreen() {
               </Pressable>
             </View>
 
-            {/* First-row chips only */}
             <View style={s.tagWrap}>
               {ideas.slice(0, 2).map((txt) => (
                 <Pressable key={txt} onPress={() => onIdea(txt)} style={s.chip} accessibilityRole="button">
@@ -351,7 +358,6 @@ export default function HomeScreen() {
           </View>
         </SpotlightTarget>
 
-        {/* Remaining chips */}
         <View style={[s.tagWrap, { marginTop: 10 }] }>
           {ideas.slice(2).map((txt) => (
             <Pressable key={txt} onPress={() => onIdea(txt)} style={s.chip} accessibilityRole="button">
@@ -458,9 +464,9 @@ const styles = (t: ThemeTokens) =>
       paddingHorizontal: 14,
       paddingVertical: 10,
       borderRadius: 999,
-      backgroundColor: CHIP_BG,
+      backgroundColor: '#F3EEF6',
       borderWidth: 1,
-      borderColor: HAIRLINE,
+      borderColor: '#F0E6EF',
     },
     rewardRow: {
       flexDirection: 'row',
@@ -470,7 +476,7 @@ const styles = (t: ThemeTokens) =>
     },
     hairlineTop: {
       borderTopWidth: StyleSheet.hairlineWidth,
-      borderTopColor: HAIRLINE,
+      borderTopColor: '#F0E6EF',
       marginTop: 10,
       paddingTop: 10,
     },

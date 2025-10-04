@@ -1,12 +1,13 @@
-// navigation/AppTabs.tsx
 import { Ionicons } from '@expo/vector-icons';
 import { BottomTabBarProps, createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { useCallback, useEffect, useRef } from 'react';
+import { Pressable, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { SpotlightTarget } from '../components/spotlight';
+import { useSpotlight } from '../components/spotlight'; // ← use context to register exact rects
 import { tokens } from '../components/tokens';
 
 // Screens
+import ChallengesScreen from '../screens/ChallengesScreen';
 import HomeScreen from '../screens/HomeScreen';
 import LoveNotesScreen from '../screens/LoveNotesScreen';
 import MemoriesScreen from '../screens/MemoriesScreen';
@@ -19,6 +20,7 @@ export type TabsParamList = {
   Reminders: undefined;
   LoveNotes: undefined;
   Tasks: undefined;
+  Challenges: undefined;
 };
 
 const Tab = createBottomTabNavigator<TabsParamList>();
@@ -29,71 +31,97 @@ const ICONS: Record<keyof TabsParamList, keyof typeof Ionicons.glyphMap> = {
   Reminders: 'alarm',
   LoveNotes: 'heart',
   Tasks: 'checkmark-done',
+  Challenges: 'sparkles',
 };
 
-// Spotlight ids (must match your tour steps)
 const TARGET_IDS: Record<keyof TabsParamList, string> = {
   Home: 'tab-home',
   Memories: 'tab-memories',
   Reminders: 'tab-reminders',
   LoveNotes: 'tab-love',
   Tasks: 'tab-tasks',
+  Challenges: 'tab-challenges',
 };
 
-const LABELS: Record<keyof TabsParamList, string> = {
-  Home: 'Home',
-  Memories: 'Memories',
-  Reminders: 'Reminders',
-  LoveNotes: 'Love Notes',
-  Tasks: 'Tasks',
-};
-
-function CustomTabBar({ state, descriptors, navigation }: BottomTabBarProps) {
+function CustomTabBar({ state, navigation }: BottomTabBarProps) {
   const insets = useSafeAreaInsets();
   const activeTint = tokens.colors.primary;
   const inactiveTint = '#9CA3AF';
 
+  // ---- Explicit spotlight registration for each icon (Android-safe) ----
+  const { registerTarget } = useSpotlight();
+  const iconRefs = useRef<Partial<Record<keyof TabsParamList, View | null>>>({});
+
+  const measureOne = useCallback((name: keyof TabsParamList) => {
+    const ref = iconRefs.current[name];
+    if (!ref) return;
+    // @ts-ignore
+    ref.measureInWindow?.((x: number, y: number, w: number, h: number) => {
+      if (!w || !h) return;
+      registerTarget(TARGET_IDS[name], { x, y, width: w, height: h });
+    });
+  }, [registerTarget]);
+
+  const measureAll = useCallback(() => {
+    (Object.keys(TARGET_IDS) as (keyof TabsParamList)[]).forEach((name) => {
+      measureOne(name);
+    });
+  }, [measureOne]);
+
+  // Re-measure when layout stabilizes and when active index changes
+  const onBarLayout = () => {
+    requestAnimationFrame(() => {
+      measureAll();
+      setTimeout(measureAll, 80);
+      setTimeout(measureAll, 160);
+    });
+  };
+
+  useEffect(() => {
+    measureAll();
+    const t = setTimeout(measureAll, 100);
+    return () => clearTimeout(t);
+  }, [state.index, measureAll]);
+
   return (
-    <View style={[styles.bar, { paddingBottom: Math.max(insets.bottom, 8) }]}>
+    <View style={[styles.bar, { paddingBottom: Math.max(insets.bottom, 8) }]} onLayout={onBarLayout}>
       {state.routes.map((route, index) => {
-        const key = route.key;
-        const name = route.name as keyof TabsParamList;
         const isFocused = state.index === index;
         const color = isFocused ? activeTint : inactiveTint;
+        const iconName = ICONS[route.name as keyof TabsParamList];
 
         const onPress = () => {
-          const event = navigation.emit({ type: 'tabPress', target: key, canPreventDefault: true });
+          const event = navigation.emit({
+            type: 'tabPress',
+            target: route.key,
+            canPreventDefault: true,
+          });
           if (!isFocused && !event.defaultPrevented) navigation.navigate(route.name);
         };
 
-        const onLongPress = () => {
-          navigation.emit({ type: 'tabLongPress', target: key });
-        };
-
-        const iconName = ICONS[name];
-        const targetId = TARGET_IDS[name];
-
         return (
-          <View key={key} style={styles.itemCol}>
-            {/* Wrap the actual icon press target so Spotlight measures the real hitbox */}
-            <SpotlightTarget id={targetId}>
-              <Pressable
-                onPress={onPress}
-                onLongPress={onLongPress}
-                accessibilityRole="button"
-                accessibilityState={isFocused ? { selected: true } : {}}
-                accessibilityLabel={LABELS[name]}
-                style={styles.iconBtn}
-                android_ripple={{ color: 'rgba(0,0,0,0.06)', radius: 80 }}
-                testID={`tab-${name}`}
-              >
-                <Ionicons name={iconName} size={24} color={color} />
-              </Pressable>
-            </SpotlightTarget>
-
-            {/* Label stays outside the spotlight hole so only the icon is highlighted */}
-            <Text numberOfLines={1} style={[styles.label, { color }]}>{LABELS[name]}</Text>
-          </View>
+          <Pressable
+            key={route.key}
+            onPress={onPress}
+            accessibilityRole="button"
+            accessibilityState={isFocused ? { selected: true } : {}}
+            style={styles.item}
+            android_ripple={{ color: 'rgba(0,0,0,0.06)', radius: 80 }}
+          >
+            {/* Tight 36×36 view around the icon; this is what we measure */}
+            <View
+              ref={(el) => { iconRefs.current[route.name as keyof TabsParamList] = el; }}
+              style={styles.iconHit}
+              collapsable={false} // <- critical on Android so the view is measurable
+              onLayout={() => {
+                // measure a few times to defeat delayed layout/ripple
+                measureOne(route.name as keyof TabsParamList);
+                setTimeout(() => measureOne(route.name as keyof TabsParamList), 60);
+              }}
+            >
+              <Ionicons name={iconName} size={22} color={color} />
+            </View>
+          </Pressable>
         );
       })}
     </View>
@@ -105,7 +133,7 @@ export default function AppTabs() {
     <Tab.Navigator
       screenOptions={{
         headerShown: false,
-        tabBarStyle: { display: 'none' }, // hide the default bar; we render our own
+        tabBarStyle: { display: 'none' }, // we render our own bar
       }}
       tabBar={(props) => <CustomTabBar {...props} />}
     >
@@ -114,6 +142,7 @@ export default function AppTabs() {
       <Tab.Screen name="Reminders" component={RemindersScreen} />
       <Tab.Screen name="LoveNotes" component={LoveNotesScreen} />
       <Tab.Screen name="Tasks" component={TasksScreen} />
+      <Tab.Screen name="Challenges" component={ChallengesScreen} />
     </Tab.Navigator>
   );
 }
@@ -121,27 +150,26 @@ export default function AppTabs() {
 const styles = StyleSheet.create({
   bar: {
     flexDirection: 'row',
-    alignItems: 'flex-end',
+    alignItems: 'center',
     justifyContent: 'space-around',
     backgroundColor: '#fff',
-    paddingTop: 8,
+    paddingTop: 10,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: '#E5E7EB',
   },
-  itemCol: {
-    width: 72, // stable width so spotlight hole doesn't jump
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  iconBtn: {
-    width: 56,   // fixed icon hitbox → consistent Android measurement
+  item: {
+    width: 56,
     height: 48,
     borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  label: {
-    fontSize: 12,
-    marginTop: 2,
+  // This is the measurable icon hitbox the spotlight will hug
+  iconHit: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 });
