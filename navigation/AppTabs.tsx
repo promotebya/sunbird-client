@@ -1,7 +1,8 @@
 // navigation/AppTabs.tsx
 import { Ionicons } from '@expo/vector-icons';
-import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { Pressable } from 'react-native';
+import { BottomTabBarProps, createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { SpotlightTarget } from '../components/spotlight';
 import { tokens } from '../components/tokens';
 
@@ -22,79 +23,125 @@ export type TabsParamList = {
 
 const Tab = createBottomTabNavigator<TabsParamList>();
 
-// Helper to wrap the REAL tab button with a SpotlightTarget.
-// This guarantees the coach mark circles the true tab area.
-const wrapTabButton =
-  (id: string) =>
-  // BottomTabBarButtonProps is intentionally 'any' here to stay RN-version-agnostic
-  (props: any) =>
-    (
-      <SpotlightTarget id={id} /* collapsable disabled inside component */>
-        <Pressable
-          {...props}
-          android_ripple={{ color: 'rgba(0,0,0,0.06)', radius: 240 }}
-          // Keep layout identical to default
-          style={props.style}
-        />
-      </SpotlightTarget>
-    );
+const ICONS: Record<keyof TabsParamList, keyof typeof Ionicons.glyphMap> = {
+  Home: 'home',
+  Memories: 'images',
+  Reminders: 'alarm',
+  LoveNotes: 'heart',
+  Tasks: 'checkmark-done',
+};
+
+// Spotlight ids (must match your tour steps)
+const TARGET_IDS: Record<keyof TabsParamList, string> = {
+  Home: 'tab-home',
+  Memories: 'tab-memories',
+  Reminders: 'tab-reminders',
+  LoveNotes: 'tab-love',
+  Tasks: 'tab-tasks',
+};
+
+const LABELS: Record<keyof TabsParamList, string> = {
+  Home: 'Home',
+  Memories: 'Memories',
+  Reminders: 'Reminders',
+  LoveNotes: 'Love Notes',
+  Tasks: 'Tasks',
+};
+
+function CustomTabBar({ state, descriptors, navigation }: BottomTabBarProps) {
+  const insets = useSafeAreaInsets();
+  const activeTint = tokens.colors.primary;
+  const inactiveTint = '#9CA3AF';
+
+  return (
+    <View style={[styles.bar, { paddingBottom: Math.max(insets.bottom, 8) }]}>
+      {state.routes.map((route, index) => {
+        const key = route.key;
+        const name = route.name as keyof TabsParamList;
+        const isFocused = state.index === index;
+        const color = isFocused ? activeTint : inactiveTint;
+
+        const onPress = () => {
+          const event = navigation.emit({ type: 'tabPress', target: key, canPreventDefault: true });
+          if (!isFocused && !event.defaultPrevented) navigation.navigate(route.name);
+        };
+
+        const onLongPress = () => {
+          navigation.emit({ type: 'tabLongPress', target: key });
+        };
+
+        const iconName = ICONS[name];
+        const targetId = TARGET_IDS[name];
+
+        return (
+          <View key={key} style={styles.itemCol}>
+            {/* Wrap the actual icon press target so Spotlight measures the real hitbox */}
+            <SpotlightTarget id={targetId}>
+              <Pressable
+                onPress={onPress}
+                onLongPress={onLongPress}
+                accessibilityRole="button"
+                accessibilityState={isFocused ? { selected: true } : {}}
+                accessibilityLabel={LABELS[name]}
+                style={styles.iconBtn}
+                android_ripple={{ color: 'rgba(0,0,0,0.06)', radius: 80 }}
+                testID={`tab-${name}`}
+              >
+                <Ionicons name={iconName} size={24} color={color} />
+              </Pressable>
+            </SpotlightTarget>
+
+            {/* Label stays outside the spotlight hole so only the icon is highlighted */}
+            <Text numberOfLines={1} style={[styles.label, { color }]}>{LABELS[name]}</Text>
+          </View>
+        );
+      })}
+    </View>
+  );
+}
 
 export default function AppTabs() {
   return (
     <Tab.Navigator
-      screenOptions={({ route }) => ({
+      screenOptions={{
         headerShown: false,
-        tabBarHideOnKeyboard: true,
-        tabBarActiveTintColor: tokens.colors.primary,
-        tabBarInactiveTintColor: '#9CA3AF',
-        tabBarStyle: { backgroundColor: '#fff' },
-        tabBarIcon: ({ color, size }) => {
-          const map: Record<string, keyof typeof Ionicons.glyphMap> = {
-            Home: 'home',
-            Memories: 'images',
-            Reminders: 'alarm',
-            LoveNotes: 'heart',
-            Tasks: 'checkmark-done',
-          };
-          return <Ionicons name={map[route.name] ?? 'ellipse'} size={size} color={color} />;
-        },
-      })}
+        tabBarStyle: { display: 'none' }, // hide the default bar; we render our own
+      }}
+      tabBar={(props) => <CustomTabBar {...props} />}
     >
-      <Tab.Screen
-        name="Home"
-        component={HomeScreen}
-        options={{
-          tabBarButton: wrapTabButton('tab-home'),
-        }}
-      />
-      <Tab.Screen
-        name="Memories"
-        component={MemoriesScreen}
-        options={{
-          tabBarButton: wrapTabButton('tab-memories'),
-        }}
-      />
-      <Tab.Screen
-        name="Reminders"
-        component={RemindersScreen}
-        options={{
-          tabBarButton: wrapTabButton('tab-reminders'),
-        }}
-      />
-      <Tab.Screen
-        name="LoveNotes"
-        component={LoveNotesScreen}
-        options={{
-          tabBarButton: wrapTabButton('tab-love'),
-        }}
-      />
-      <Tab.Screen
-        name="Tasks"
-        component={TasksScreen}
-        options={{
-          tabBarButton: wrapTabButton('tab-tasks'),
-        }}
-      />
+      <Tab.Screen name="Home" component={HomeScreen} />
+      <Tab.Screen name="Memories" component={MemoriesScreen} />
+      <Tab.Screen name="Reminders" component={RemindersScreen} />
+      <Tab.Screen name="LoveNotes" component={LoveNotesScreen} />
+      <Tab.Screen name="Tasks" component={TasksScreen} />
     </Tab.Navigator>
   );
 }
+
+const styles = StyleSheet.create({
+  bar: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    justifyContent: 'space-around',
+    backgroundColor: '#fff',
+    paddingTop: 8,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#E5E7EB',
+  },
+  itemCol: {
+    width: 72, // stable width so spotlight hole doesn't jump
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  iconBtn: {
+    width: 56,   // fixed icon hitbox → consistent Android measurement
+    height: 48,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  label: {
+    fontSize: 12,
+    marginTop: 2,
+  },
+});

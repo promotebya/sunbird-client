@@ -1,6 +1,5 @@
-// screens/HomeScreen.tsx — Clarity-first: neutral pills, fused rewards CTA, bottom motivation
+// screens/HomeScreen.tsx
 import { Ionicons } from '@expo/vector-icons';
-import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import { useNavigation } from '@react-navigation/native';
 import {
   collection,
@@ -11,7 +10,7 @@ import {
   where,
 } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Pressable, StyleSheet, View, useWindowDimensions } from 'react-native';
+import { Pressable, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import Button from '../components/Button';
@@ -34,7 +33,6 @@ import { addReward, listenRewards, redeemReward, type RewardDoc } from '../utils
 const WEEK_GOAL = 50;
 const MILESTONES = [5, 10, 25, 50, 100, 200, 500];
 
-// Ideas (max 5 shown)
 const IDEAS = [
   'Plan a mini date',
   'Sunset photo walk',
@@ -48,7 +46,7 @@ const IDEAS = [
   'Go for a walk',
 ];
 
-// First-run spotlight steps (12 total)
+// 11 steps (tabs: 5). Remove "tab-challenges" since there’s no Challenges tab here.
 const FIRST_RUN_STEPS: SpotlightStep[] = [
   {
     id: 'welcome',
@@ -61,19 +59,13 @@ const FIRST_RUN_STEPS: SpotlightStep[] = [
   { id: 'link',    targetId: 'home-link-partner', title: 'Pair up',      text: 'Link with your partner to sync points and memories.' },
   { id: 'log',     targetId: 'home-log-task',     title: 'Log a task',   text: 'Track a kind action and earn LovePoints.' },
   { id: 'reward',  targetId: 'home-add-reward',   title: 'Rewards',      text: 'Add a reward you can redeem with points.' },
-
-  // Spotlight wraps header + first-row chips (keeps nav out of the hole)
   { id: 'ideas',   targetId: 'home-ideas-anchor', title: 'Ideas for today', text: 'Quick suggestions for easy wins.', placement: 'top', padding: 6 },
-
   { id: 'settings',targetId: 'home-settings',     title: 'Settings',     text: 'Manage your profile, pairing, and notifications.' },
-
-  // Tabs mini-tour — narrow phantom targets so labels/neighbors aren’t included
-  { id: 'tab-home',       targetId: 'tab-home',       title: 'Home',          text: 'Overview, goals, ideas, and quick actions.', placement: 'top',  padding: 8 },
-  { id: 'tab-memories',   targetId: 'tab-memories',   title: 'Memories',      text: 'Save sweet moments with text & photos.',     placement: 'top',  padding: 8 },
-  { id: 'tab-reminders',  targetId: 'tab-reminders',  title: 'Reminders',     text: 'Set gentle nudges for future you.',          placement: 'top',  padding: 8 },
-  { id: 'tab-love',       targetId: 'tab-love',       title: 'Love Notes 💌', text: 'Send quick notes; we’ll nudge your partner.', placement: 'top',  padding: 8 },
-  { id: 'tab-tasks',      targetId: 'tab-tasks',      title: 'Tasks',         text: 'Shared to-dos; finishing can award points.', placement: 'top',  padding: 8 },
-  { id: 'tab-challenges', targetId: 'tab-challenges', title: 'Challenges',    text: 'Tiny prompts to spark connection.',          placement: 'top',  padding: 8 },
+  { id: 'tab-home',      targetId: 'tab-home',      title: 'Home',          text: 'Overview, goals, ideas, and quick actions.', placement: 'top', padding: 8 },
+  { id: 'tab-memories',  targetId: 'tab-memories',  title: 'Memories',      text: 'Save sweet moments with text & photos.',     placement: 'top', padding: 8 },
+  { id: 'tab-reminders', targetId: 'tab-reminders', title: 'Reminders',     text: 'Set gentle nudges for future you.',          placement: 'top', padding: 8 },
+  { id: 'tab-love',      targetId: 'tab-love',      title: 'Love Notes 💌', text: 'Send quick notes; we’ll nudge your partner.', placement: 'top', padding: 8 },
+  { id: 'tab-tasks',     targetId: 'tab-tasks',     title: 'Tasks',         text: 'Shared to-dos; finishing can award points.',  placement: 'top', padding: 8 },
 ];
 
 type PointsItem = {
@@ -101,7 +93,7 @@ const withAlpha = (hex: string, alpha: number) => {
   return `#${full}${a}`;
 };
 
-// Neutral porcelain tones
+// Neutral tones
 const HAIRLINE = '#F0E6EF';
 const CHIP_BG = '#F3EEF6';
 
@@ -135,6 +127,8 @@ export default function HomeScreen() {
   const t = useTokens();
   const s = useMemo(() => styles(t), [t]);
   const nav = useNavigation<any>();
+  useSafeAreaInsets(); // hoisted for consistent layout
+
   const { user } = useAuthListener();
   const { total, weekly } = usePointsTotal(user?.uid);
   const streak = useStreak(user?.uid);
@@ -144,23 +138,6 @@ export default function HomeScreen() {
   const [recent, setRecent] = useState<PointsItem[]>([]);
   const [showAddReward, setShowAddReward] = useState(false);
   const [hideLinkBanner, setHideLinkBanner] = useState(false);
-
-  // ▶ Tab phantom target geometry — derive from the actual Bottom Tab Bar height
-  const { width: W } = useWindowDimensions();
-  const insets = useSafeAreaInsets();
-  const tabBarHeight = useBottomTabBarHeight();
-
-  const TAB_COUNT = 6;
-  const SEG = W / TAB_COUNT;
-
-  // Narrow, icon-focused hitboxes that won’t bleed into neighbor tabs/labels
-  const TAB_ITEM_W = Math.min(56, SEG - 20);
-  // Fit inside the tab bar on all DPIs while remaining easy to hit
-  const TAB_H = Math.max(36, Math.min(48, tabBarHeight - 14));
-  // Vertically center inside the real tab bar
-  const TAB_BOTTOM = insets.bottom + (tabBarHeight - TAB_H) / 2;
-
-  const tabLeft = (i: number) => i * SEG + (SEG - TAB_ITEM_W) / 2;
 
   // Pair info
   useEffect(() => {
@@ -362,7 +339,7 @@ export default function HomeScreen() {
               </Pressable>
             </View>
 
-            {/* First-row chips only (keeps spotlight small and away from the tab bar) */}
+            {/* First-row chips only */}
             <View style={s.tagWrap}>
               {ideas.slice(0, 2).map((txt) => (
                 <Pressable key={txt} onPress={() => onIdea(txt)} style={s.chip} accessibilityRole="button">
@@ -374,7 +351,7 @@ export default function HomeScreen() {
           </View>
         </SpotlightTarget>
 
-        {/* Remaining chips (outside the spotlight area) */}
+        {/* Remaining chips */}
         <View style={[s.tagWrap, { marginTop: 10 }] }>
           {ideas.slice(2).map((txt) => (
             <Pressable key={txt} onPress={() => onIdea(txt)} style={s.chip} accessibilityRole="button">
@@ -385,7 +362,7 @@ export default function HomeScreen() {
         </View>
       </Card>
 
-      {/* Rewards list (only when you actually have rewards) */}
+      {/* Rewards list */}
       {rewards.length > 0 && (
         <Card style={{ marginBottom: 12, borderWidth: 1, borderColor: HAIRLINE }}>
           {rewards.map((item, i) => (
@@ -402,7 +379,7 @@ export default function HomeScreen() {
         </Card>
       )}
 
-      {/* Recent (read-only) */}
+      {/* Recent */}
       {recent.length > 0 ? (
         <Card style={{ marginBottom: 12, borderWidth: 1, borderColor: HAIRLINE }}>
           <ThemedText variant="subtitle" style={{ marginBottom: 8 }}>Recent activity</ThemedText>
@@ -419,7 +396,7 @@ export default function HomeScreen() {
         </Card>
       ) : null}
 
-      {/* Motivation to complete a challenge (bottom nudge) */}
+      {/* Bottom nudge */}
       <Card style={{ marginBottom: 16, borderWidth: 1, borderColor: HAIRLINE }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 6 }}>
           <View
@@ -447,14 +424,6 @@ export default function HomeScreen() {
         onClose={() => setShowAddReward(false)}
         onCreate={onCreateReward}
       />
-
-      {/* Phantom targets over the tab bar (invisible, non-blocking) */}
-      <SpotlightTarget id="tab-home"       style={{ position:'absolute', left: tabLeft(0), bottom: TAB_BOTTOM, width: TAB_ITEM_W, height: TAB_H, pointerEvents: 'none' }}><View /></SpotlightTarget>
-      <SpotlightTarget id="tab-memories"   style={{ position:'absolute', left: tabLeft(1), bottom: TAB_BOTTOM, width: TAB_ITEM_W, height: TAB_H, pointerEvents: 'none' }}><View /></SpotlightTarget>
-      <SpotlightTarget id="tab-reminders"  style={{ position:'absolute', left: tabLeft(2), bottom: TAB_BOTTOM, width: TAB_ITEM_W, height: TAB_H, pointerEvents: 'none' }}><View /></SpotlightTarget>
-      <SpotlightTarget id="tab-love"       style={{ position:'absolute', left: tabLeft(3), bottom: TAB_BOTTOM, width: TAB_ITEM_W, height: TAB_H, pointerEvents: 'none' }}><View /></SpotlightTarget>
-      <SpotlightTarget id="tab-tasks"      style={{ position:'absolute', left: tabLeft(4), bottom: TAB_BOTTOM, width: TAB_ITEM_W, height: TAB_H, pointerEvents: 'none' }}><View /></SpotlightTarget>
-      <SpotlightTarget id="tab-challenges" style={{ position:'absolute', left: tabLeft(5), bottom: TAB_BOTTOM, width: TAB_ITEM_W, height: TAB_H, pointerEvents: 'none' }}><View /></SpotlightTarget>
 
       {/* 🔥 Start the tutorial once per user */}
       <SpotlightAutoStarter uid={user?.uid ?? null} steps={FIRST_RUN_STEPS} />

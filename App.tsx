@@ -8,7 +8,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { ThemeProvider } from './components/ThemeProvider';
-import { SpotlightProvider } from './components/spotlight'; // ⟵ NEW
+import { SpotlightProvider } from './components/spotlight';
 import useAuthListener from './hooks/useAuthListener';
 import usePartnerReminderListener from './hooks/usePartnerReminderListener';
 import AppNavigator from './navigation/AppNavigator';
@@ -16,10 +16,11 @@ import AuthNavigator from './navigation/AuthNavigator';
 
 // Show alerts when a notification fires in foreground
 Notifications.setNotificationHandler({
-  handleNotification: async () => ({
+  handleNotification: async (): Promise<Notifications.NotificationBehavior> => ({
     shouldShowAlert: true,
     shouldPlaySound: false,
     shouldSetBadge: false,
+    // iOS-only fields (Expo SDK 50+ typings require them)
     shouldShowBanner: true,
     shouldShowList: true,
   }),
@@ -56,11 +57,12 @@ const NUDGE_PROMPTS: string[] = [
   "Tell them why today you’re grateful for them.",
   "Ask: “What would you love to do together this weekend?”",
   "Say: “You looked great today because ___.”",
-  "Text a quick pep talk—they deserve it!"
+  "Text a quick pep talk—they deserve it!",
 ];
 
 // Random helpers
-const randInt = (min: number, max: number) => Math.floor(Math.random() * (max - min + 1)) + min;
+const randInt = (min: number, max: number) =>
+  Math.floor(Math.random() * (max - min + 1)) + min;
 
 /** Monday of the week containing 'd' (local time) */
 function startOfWeekMonday(d = new Date()) {
@@ -82,19 +84,17 @@ function makeRandomWeeklyTriggers(targetCount: number): Date[] {
     const base = startOfWeekMonday();
     base.setDate(base.getDate() + 7 * week);
 
-    // 3 or 4 nudges this week
     const hitsThisWeek = 3 + (Math.random() < 0.5 ? 0 : 1);
     const usedDays = new Set<number>();
 
     for (let i = 0; i < hitsThisWeek && out.length < targetCount; i++) {
-      // choose a unique day this week (0=Mon..6=Sun)
-      let day = randInt(0, 6);
+      let day = randInt(0, 6); // 0=Mon..6=Sun
       let guard = 0;
       while (usedDays.has(day) && guard++ < 10) day = randInt(0, 6);
       usedDays.add(day);
 
-      const hour = randInt(9, 20);        // 9:00 .. 20:59
-      const minute = randInt(0, 11) * 5;  // minute in steps of 5 to avoid bunching
+      const hour = randInt(9, 20);
+      const minute = randInt(0, 11) * 5;
 
       const when = new Date(base);
       when.setDate(when.getDate() + day);
@@ -117,25 +117,21 @@ function useKindnessNudgesScheduler(userId: string | null | undefined) {
     let cancelled = false;
     (async () => {
       if (!Device.isDevice) return;
-      // if (!userId) return; // enable if you only want nudges when logged in
 
-      // Ask permission if needed
       const perms = await Notifications.getPermissionsAsync();
       if (perms.status !== 'granted') {
         const req = await Notifications.requestPermissionsAsync();
         if (req.status !== 'granted') return;
       }
 
-      // Android channel
       if (Platform.OS === 'android') {
         await Notifications.setNotificationChannelAsync('default', {
           name: 'Kindness nudges',
-          importance: Notifications.AndroidImportance.DEFAULT
+          importance: Notifications.AndroidImportance.DEFAULT,
         });
       }
 
-      // Keep ~48 future notifications queued (≈12 weeks @ 4/wk)
-      const TARGET = 48;
+      const TARGET = 48; // ~12 weeks @ 4/wk
       const existing = await Notifications.getAllScheduledNotificationsAsync();
       if (cancelled) return;
 
@@ -145,41 +141,35 @@ function useKindnessNudgesScheduler(userId: string | null | undefined) {
       const times = makeRandomWeeklyTriggers(toAdd);
       for (const when of times) {
         const prompt = NUDGE_PROMPTS[randInt(0, NUDGE_PROMPTS.length - 1)];
-        const trigger: Notifications.DateTriggerInput = {
-          type: Notifications.SchedulableTriggerInputTypes.DATE,
-          date: when
-        };
         await Notifications.scheduleNotificationAsync({
           content: { title: 'Make their day 💖', body: prompt, sound: false },
-          trigger
+          trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: when },
         });
         if (cancelled) return;
       }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [userId]);
 }
 
 export default function App() {
   const { user } = useAuthListener();
 
-  // existing hook
   usePartnerReminderListener(user?.uid ?? null);
-
-  // schedule/tops-up the kindness nudges
   useKindnessNudgesScheduler(user?.uid ?? null);
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
-        <ThemeProvider>
-          {/* Spotlight overlay needs to sit above everything */}
-          <SpotlightProvider>
+        <SpotlightProvider>
+          <ThemeProvider>
             <NavigationContainer>
               {user ? <AppNavigator /> : <AuthNavigator />}
             </NavigationContainer>
-          </SpotlightProvider>
-        </ThemeProvider>
+          </ThemeProvider>
+        </SpotlightProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );
