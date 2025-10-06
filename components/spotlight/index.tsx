@@ -1,3 +1,4 @@
+// components/spotlight/index.tsx
 // Expo RN + TS — spotlight coach marks with dark overlay + cutout + tooltip (tap-through in hole)
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -16,6 +17,7 @@ import {
   Easing,
   Platform,
   Pressable,
+  StatusBar,
   StyleProp,
   StyleSheet,
   Text,
@@ -36,6 +38,8 @@ export type SpotlightStep = {
   radius?: number;
   padding?: number;
   allowBackdropTapToNext?: boolean;
+  /** Per-edge clamp margins (defaults to 8 each). Use { bottom: 0 } for tab bar. */
+  edgeMargin?: Partial<{ top: number; right: number; bottom: number; left: number }>;
 };
 
 export type SpotlightOptions = {
@@ -56,7 +60,7 @@ const BRAND = {
 
 type TargetMap = Record<string, SpotlightRect | undefined>;
 
-// Expose steps + stepIndex so screens can react
+// Expose steps + stepIndex so screens can react (e.g., to auto-scroll)
 type Ctx = {
   registerTarget: (id: string, rect: SpotlightRect) => void;
   unregisterTarget: (id: string) => void;
@@ -70,12 +74,14 @@ type Ctx = {
 };
 
 const SpotlightCtx = createContext<Ctx | null>(null);
-
 export const useSpotlight = () => {
   const ctx = useContext(SpotlightCtx);
   if (!ctx) throw new Error('useSpotlight must be used within <SpotlightProvider>');
   return ctx;
 };
+
+// 👇 invisible hair spaces to defeat Android right-edge glyph clipping
+const TRAIL = '\u200A\u200A';
 
 // ---- Provider ----
 export const SpotlightProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -83,12 +89,10 @@ export const SpotlightProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [steps, setSteps] = useState<SpotlightStep[] | null>(null);
   const [options, setOptions] = useState<SpotlightOptions | undefined>(undefined);
   const [index, setIndex] = useState(0);
+  const [totalSteps, setTotalSteps] = useState(0); // stable total for correct "x/N"
   const opacity = useRef(new Animated.Value(0)).current;
 
-  // Stable total for Android (prevents 2/1, 3/1)
-  const totalRef = useRef(0);
-
-  const isActive = !!steps && index >= 0 && index < totalRef.current;
+  const isActive = !!steps && index >= 0 && index < (steps?.length ?? 0);
 
   const registerTarget = useCallback((id: string, rect: SpotlightRect) => {
     setTargets(prev => ({ ...prev, [id]: rect }));
@@ -109,7 +113,7 @@ export const SpotlightProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       setSteps(null);
       setIndex(0);
       setOptions(undefined);
-      totalRef.current = 0;
+      setTotalSteps(0);
     });
   }, [opacity, options]);
 
@@ -117,7 +121,7 @@ export const SpotlightProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     if (!steps) return;
     setIndex(i => {
       const n = i + 1;
-      if (n >= totalRef.current) {
+      if (n >= totalSteps) {
         const key = options?.persistKey;
         if (key) AsyncStorage.setItem(`spotlight:${key}:done`, '1').catch(() => {});
         options?.onFinish?.();
@@ -126,14 +130,16 @@ export const SpotlightProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       }
       return n;
     });
-  }, [steps, options, stop]);
+  }, [steps, totalSteps, options, stop]);
 
-  const prev = useCallback(() => setIndex(i => Math.max(0, i - 1)), []);
+  const prev = useCallback(() => {
+    setIndex(i => Math.max(0, i - 1));
+  }, []);
 
   const start = useCallback(
     (s: SpotlightStep[], opt?: SpotlightOptions) => {
-      totalRef.current = s.length; // lock total once
       setSteps(s);
+      setTotalSteps(s.length); // capture total once
       setOptions(opt);
       setIndex(0);
       Animated.timing(opacity, {
@@ -168,7 +174,7 @@ export const SpotlightProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         isActive={isActive}
         steps={steps || []}
         index={index}
-        totalSteps={totalRef.current}
+        totalSteps={totalSteps}
         targets={targets}
         opacity={opacity}
         onNext={next}
@@ -192,18 +198,26 @@ export const SpotlightTarget: React.FC<TargetProps> = ({ id, children, style }) 
 
     let wrote = false;
 
+    // Try legacy measure first
     if (typeof node.measure === 'function') {
-      node.measure((_x: number, _y: number, w: number, h: number, pageX: number, pageY: number) => {
-        if (w && h) {
-          registerTarget(id, { x: pageX, y: pageY, width: w, height: h });
-          wrote = true;
+      node.measure(
+        (_x: number, _y: number, w: number, h: number, pageX: number, pageY: number) => {
+          if (w && h) {
+            registerTarget(id, { x: pageX, y: pageY, width: w, height: h });
+            wrote = true;
+          }
         }
-      });
+      );
     }
 
+    // Fallback / also try window measurement
     if (typeof node.measureInWindow === 'function') {
       node.measureInWindow((x: number, y: number, w: number, h: number) => {
-        if (w && h && !wrote) registerTarget(id, { x, y, width: w, height: h });
+        if (w && h && !wrote) {
+          const sb = Platform.OS === 'android' ? (StatusBar.currentHeight ?? 0) : 0;
+          const yWindow = Math.max(0, y - sb);
+          registerTarget(id, { x, y: yWindow, width: w, height: h });
+        }
       });
     }
   }, [id, registerTarget]);
@@ -214,7 +228,7 @@ export const SpotlightTarget: React.FC<TargetProps> = ({ id, children, style }) 
     const loop = () => {
       tries += 1;
       measure();
-      if (tries < 24) raf = requestAnimationFrame(loop); // extra chances on Android
+      if (tries < 24) raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
     return () => {
@@ -270,19 +284,26 @@ const SpotlightOverlay: React.FC<OverlayProps> = ({
   const padding = step.padding ?? 8;
   const radius = step.radius ?? 16;
 
+  const mTop = step.edgeMargin?.top ?? 8;
+  const mRight = step.edgeMargin?.right ?? 8;
+  const mBottom = step.edgeMargin?.bottom ?? 8;
+  const mLeft = step.edgeMargin?.left ?? 8;
+
   const hole = hasTarget
     ? (() => {
         const wantW = rectRaw!.width + padding * 2;
         const wantH = rectRaw!.height + padding * 2;
-        const width = clamp(wantW, 16, W - 16);
-        const height = clamp(wantH, 16, H - 16);
-        const x = clamp(rectRaw!.x - padding, 8, W - 8 - width);
-        const y = clamp(rectRaw!.y - padding, 8, H - 8 - height);
+        const width = clamp(wantW, 16, W - mLeft - mRight);
+        const height = clamp(wantH, 16, H - mTop - mBottom);
+        const x = clamp(rectRaw!.x - padding, mLeft, W - mRight - width);
+        const y = clamp(rectRaw!.y - padding, mTop, H - mBottom - height);
         return { x, y, width, height };
       })()
     : null;
 
-  const cardMaxWidth = Math.min(380, W - 24);
+  const CARD_SIDE_MARGIN = 22;
+  const CARD_WIDTH = Math.max(260, Math.floor(Math.min(378, W - CARD_SIDE_MARGIN * 2)) - 2);
+
   const roomTop = hole ? hole.y : H / 2;
   const roomBottom = hole ? H - (hole.y + hole.height) : H / 2;
   const placement: NonNullable<SpotlightStep['placement']> =
@@ -296,7 +317,7 @@ const SpotlightOverlay: React.FC<OverlayProps> = ({
   const defaultTop = insets.top + 64;
   const defaultBottom = Math.max(8, H - insets.bottom - 20 - EST_CARD_H);
 
-  const cardY =
+  const rawY =
     hole && placement === 'bottom'
       ? Math.min(H - insets.bottom - 20, hole.y + hole.height + 12)
       : hole && placement === 'top'
@@ -305,55 +326,52 @@ const SpotlightOverlay: React.FC<OverlayProps> = ({
       ? defaultTop
       : defaultBottom;
 
-  const cardX = clamp((hole ? hole.x + hole.width / 2 : W / 2) - cardMaxWidth / 2, 12, W - 12 - cardMaxWidth);
+  const rawX = (hole ? hole.x + hole.width / 2 : W / 2) - CARD_WIDTH / 2;
+
+  const cardY = Math.round(rawY);
+  const cardX = Math.round(clamp(rawX, CARD_SIDE_MARGIN, W - CARD_SIDE_MARGIN - CARD_WIDTH));
 
   const showArrow = !!hole && placement === 'bottom';
   const holeCenterX = hole ? hole.x + hole.width / 2 : W / 2;
-  const arrowCenterX = clamp(holeCenterX, cardX + 20, cardX + cardMaxWidth - 20);
+  const arrowCenterX = clamp(holeCenterX, cardX + 20, cardX + CARD_WIDTH - 20);
   const arrowTop = cardY - 8;
 
   const backdropPress = step.allowBackdropTapToNext === false ? undefined : onNext;
-  const displayTotal = Math.max(totalSteps, steps.length);
+
+  const stepsCount = Array.isArray(steps) ? steps.length : 0;
+  const displayTotalRaw = Number.isFinite(totalSteps) && totalSteps > 0 ? totalSteps : stepsCount;
+  const displayTotal = displayTotalRaw > 0 ? displayTotalRaw : 1;
+  const current = Math.min(index + 1, displayTotal);
 
   return (
     <Animated.View style={[StyleSheet.absoluteFill, { opacity }]}>
-      {/* Dimmer with punched hole (doesn't intercept touches) */}
+      {/* Dimmer with punched hole */}
       <Svg width={W} height={H} style={StyleSheet.absoluteFill as any} pointerEvents="none">
         <Mask id="mask">
           <Rect x={0} y={0} width={W} height={H} fill="#fff" />
-          {hole ? (
-            <Rect x={hole.x} y={hole.y} width={hole.width} height={hole.height} rx={radius} ry={radius} fill="#000" />
-          ) : null}
+        {hole ? (
+          <Rect x={hole.x} y={hole.y} width={hole.width} height={hole.height} rx={radius} ry={radius} fill="#000" />
+        ) : null}
         </Mask>
         <Rect x={0} y={0} width={W} height={H} fill={BRAND.dim} mask="url(#mask)" />
       </Svg>
 
-      {/* Tap-capture panes outside the hole — hole passes touches through */}
+      {/* Tap-capture panes outside the hole */}
       <Pressable onPress={backdropPress} style={{ position: 'absolute', left: 0, top: 0, width: W, height: hole ? hole.y : H }} />
       {hole ? (
-        <>
-          <Pressable onPress={backdropPress} style={{ position: 'absolute', left: 0, top: hole.y, width: hole.x, height: hole.height }} />
-          <Pressable
-            onPress={backdropPress}
-            style={{
-              position: 'absolute',
-              left: hole.x + hole.width,
-              top: hole.y,
-              width: Math.max(0, W - (hole.x + hole.width)),
-              height: hole.height,
-            }}
-          />
-          <Pressable
-            onPress={backdropPress}
-            style={{
-              position: 'absolute',
-              left: 0,
-              top: hole.y + hole.height,
-              width: W,
-              height: Math.max(0, H - (hole.y + hole.height)),
-            }}
-          />
-        </>
+        <Pressable onPress={backdropPress} style={{ position: 'absolute', left: 0, top: hole.y, width: hole.x, height: hole.height }} />
+      ) : null}
+      {hole ? (
+        <Pressable
+          onPress={backdropPress}
+          style={{ position: 'absolute', left: hole.x + hole.width, top: hole.y, width: Math.max(0, W - (hole.x + hole.width)), height: hole.height }}
+        />
+      ) : null}
+      {hole ? (
+        <Pressable
+          onPress={backdropPress}
+          style={{ position: 'absolute', left: 0, top: hole.y + hole.height, width: W, height: Math.max(0, H - (hole.y + hole.height)) }}
+        />
       ) : null}
 
       {/* subtle light ring */}
@@ -374,32 +392,63 @@ const SpotlightOverlay: React.FC<OverlayProps> = ({
       ) : null}
 
       {/* Tooltip card */}
-      <View style={[styles.card, { top: cardY, left: cardX, maxWidth: cardMaxWidth, paddingBottom: 12 + insets.bottom * 0.1 }]}>
+      <View
+        needsOffscreenAlphaCompositing
+        renderToHardwareTextureAndroid
+        style={[
+          styles.card,
+          { top: cardY, left: cardX, width: CARD_WIDTH, paddingRight: 18, paddingHorizontal: 16, zIndex: 10 },
+        ]}
+      >
         {step.title ? <Text style={styles.title}>{step.title}</Text> : null}
         <Text style={styles.text}>{step.text}</Text>
 
-        <View style={styles.rowBetween}>
-          <Text style={styles.progress}>{Math.min(index + 1, displayTotal)}/{displayTotal}</Text>
-          {/* No 'gap' on Android: use margins */}
+        <View style={styles.rowWrap}>
+          <Text style={styles.progress}>{`${current}/${displayTotal}`}</Text>
+
           <View style={styles.actions}>
             {index > 0 && (
-              <TouchableOpacity onPress={onPrev} style={[styles.btn, styles.btnGhost, styles.mr8]}>
-                <Text style={styles.btnTextGhost}>Back</Text>
+              <TouchableOpacity
+                onPress={onPrev}
+                style={[styles.btnTouchable, styles.btn, styles.btnGhost]}
+                hitSlop={{ left: 8, right: 8, top: 4, bottom: 4 }}
+              >
+                <View style={styles.btnLabelWrap}>
+                  <Text style={[styles.btnText, { color: BRAND.textSecondary }]} numberOfLines={1}>
+                    Back{TRAIL}
+                  </Text>
+                </View>
               </TouchableOpacity>
             )}
-            <TouchableOpacity onPress={onSkip} style={[styles.btn, styles.btnGhost, styles.mr8]}>
-              <Text style={styles.btnTextGhost}>Skip</Text>
+
+            <TouchableOpacity
+              onPress={onSkip}
+              style={[styles.btnTouchable, styles.btn, styles.btnGhost, styles.ml8]}
+              hitSlop={{ left: 8, right: 8, top: 4, bottom: 4 }}
+            >
+              <View style={styles.btnLabelWrap}>
+                <Text style={[styles.btnText, { color: BRAND.textSecondary }]} numberOfLines={1}>
+                  Skip{TRAIL}
+                </Text>
+              </View>
             </TouchableOpacity>
-            <TouchableOpacity onPress={onNext} style={[styles.btn, styles.btnPrimary]}>
-              <Text style={styles.btnTextPrimary}>
-                {index + 1 >= displayTotal ? 'Got it' : 'Next'}
-              </Text>
+
+            <TouchableOpacity
+              onPress={onNext}
+              style={[styles.btnTouchable, styles.btn, styles.btnPrimary, styles.ml8]}
+              hitSlop={{ left: 8, right: 8, top: 4, bottom: 4 }}
+            >
+              <View style={styles.btnLabelWrap}>
+                <Text style={[styles.btnText, { color: '#FFFFFF' }]} numberOfLines={1}>
+                  {index + 1 >= displayTotal ? `Got it${TRAIL}` : `Next${TRAIL}`}
+                </Text>
+              </View>
             </TouchableOpacity>
           </View>
         </View>
       </View>
 
-      {/* Arrow (only when card is under the hole) */}
+      {/* Arrow when card is under the hole */}
       {showArrow ? (
         <View style={[styles.arrow, { left: arrowCenterX - 8, top: arrowTop, transform: [{ rotate: '225deg' }] }]} />
       ) : null}
@@ -407,7 +456,7 @@ const SpotlightOverlay: React.FC<OverlayProps> = ({
   );
 };
 
-// ---- Auto starter (per-UID) ----
+// ---- Auto starter ----
 export const SpotlightAutoStarter: React.FC<{
   uid?: string | null;
   steps: SpotlightStep[];
@@ -448,49 +497,79 @@ const styles = StyleSheet.create({
     position: 'absolute',
     backgroundColor: BRAND.bgCard,
     borderRadius: 16,
-    paddingHorizontal: 14,
     paddingVertical: 12,
     shadowColor: '#000',
     shadowOpacity: 0.35,
     shadowRadius: 16,
     shadowOffset: { width: 0, height: 8 },
     elevation: 8,
+    overflow: 'visible',
   },
   title: {
     fontSize: 16,
     fontWeight: '700',
     color: BRAND.textPrimary,
     marginBottom: 6,
-    paddingRight: Platform.OS === 'android' ? 2 : 0, // prevent last-glyph clipping
+    paddingRight: 8,
+    ...(Platform.OS === 'android' ? { includeFontPadding: false } : null),
   },
   text: {
     fontSize: 14,
     color: BRAND.textSecondary,
-    paddingRight: Platform.OS === 'android' ? 2 : 0, // prevent last-glyph clipping
+    paddingRight: 10,
+    lineHeight: 20,
+    ...(Platform.OS === 'android' ? { textBreakStrategy: 'balanced', includeFontPadding: false } : null),
   },
   progress: {
     fontSize: 13,
     color: 'rgba(255,255,255,0.55)',
     paddingVertical: 10,
-    paddingRight: Platform.OS === 'android' ? 2 : 0, // prevents 2/12 → 2/1 truncation
+    paddingRight: 8,
+    minWidth: 44,
+    flexShrink: 0,
   },
-  rowBetween: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 },
-  actions: { flexDirection: 'row', alignItems: 'center' },
-  mr8: { marginRight: 8 },
+  rowWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    marginTop: 8,
+  },
+  actions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',     // allow buttons to wrap instead of shrinking (prevents clipping)
+    flexShrink: 1,
+    paddingRight: 6,
+  },
+  ml8: { marginLeft: 8 },
+
+  // touchable + label wrappers (fix Android glyph clipping and shrinking)
+  btnTouchable: {
+    flexShrink: 0,        // don't allow the button to compress its label
+    minWidth: 64,         // gives consistent room for “Back/Skip/Next”
+  },
+  btnLabelWrap: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    overflow: 'visible',
+  },
+
   btn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999 },
   btnGhost: { backgroundColor: 'transparent' },
   btnPrimary: { backgroundColor: BRAND.pink },
-  btnTextPrimary: {
+
+  btnText: {
     fontSize: 14,
     fontWeight: '700',
-    color: '#FFFFFF',
-    paddingRight: Platform.OS === 'android' ? 2 : 0,
+    paddingRight: 2,
+    ...(Platform.OS === 'android'
+      ? {
+          includeFontPadding: true,
+          textBreakStrategy: 'simple',
+        }
+      : null),
   },
-  btnTextGhost: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: BRAND.textSecondary,
-    paddingRight: Platform.OS === 'android' ? 2 : 0,
-  },
+
   arrow: { position: 'absolute', width: 16, height: 16, backgroundColor: BRAND.bgCard, borderRadius: 2 },
 });

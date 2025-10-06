@@ -4,6 +4,7 @@ import { useNavigation } from '@react-navigation/native';
 import { useCallback, useMemo, useState } from 'react';
 import {
   Alert,
+  Platform,
   Pressable,
   ScrollView,
   SectionList,
@@ -84,6 +85,16 @@ function withAlpha(hex: string, alpha: number) {
   const full = h.length === 3 ? h.split('').map((c) => c + c).join('') : h;
   const a = Math.round(alpha * 255).toString(16).padStart(2, '0');
   return `#${full}${a}`;
+}
+
+function mixWithWhite(hex: string, ratio = 0.90) {
+  const h = hex.replace('#', '');
+  const r = parseInt(h.slice(0, 2), 16);
+  const g = parseInt(h.slice(2, 4), 16);
+  const b = parseInt(h.slice(4, 6), 16);
+  const m = (c: number) => Math.round(c * (1 - ratio) + 255 * ratio);
+  const toHex = (n: number) => n.toString(16).padStart(2, '0');
+  return `#${toHex(m(r))}${toHex(m(g))}${toHex(m(b))}`;
 }
 
 function normDiff(raw: any): DiffKey | undefined {
@@ -403,7 +414,17 @@ export default function ChallengesScreen() {
         <View style={s.upsellBadge}>
           <Ionicons name="sparkles" size={18} color="#fff" />
         </View>
-        <ThemedText variant="title" style={{ marginLeft: 10 }}>
+        <ThemedText
+          variant="title"
+          style={{
+            marginLeft: 10,
+            paddingRight: 12,
+            flexGrow: 1,
+            flexShrink: 1,
+            flexBasis: 0,
+            minWidth: 0,
+          }}
+        >
           Bring your relationship to the next level
         </ThemedText>
       </View>
@@ -773,9 +794,19 @@ const styles = (t: ThemeTokens) =>
 
     /* Upsell */
     upsellCard: {
-      backgroundColor: withAlpha(t.colors.primary, 0.08),
-      borderColor: withAlpha(t.colors.primary, 0.18),
-      borderWidth: 1,
+      // Solid baby-blue on Android to avoid the darker rim; subtle tint on iOS
+      backgroundColor:
+        Platform.OS === 'android'
+          ? mixWithWhite(t.colors.primary, 0.90)
+          : withAlpha(t.colors.primary, 0.08),
+      borderColor:
+        Platform.OS === 'android'
+          ? mixWithWhite(t.colors.primary, 0.90) // match fill exactly → border disappears
+          : withAlpha(t.colors.primary, 0.18),
+      borderWidth: Platform.OS === 'android' ? StyleSheet.hairlineWidth : 1,
+      overflow: 'hidden',
+      // Keep it flat on Android to avoid any shading artifacts
+      ...(Platform.OS === 'android' ? { elevation: 0 } : {}),
     },
     upsellBadge: {
       width: 32,

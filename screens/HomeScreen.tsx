@@ -45,7 +45,7 @@ const IDEAS = [
   'Go for a walk',
 ];
 
-// 12 steps (tabs: 6) — radius/padding tuned to match 36×36 icon hitbox
+// 7 steps — final step is a floating tip (no highlight) above the nav
 const FIRST_RUN_STEPS: SpotlightStep[] = [
   {
     id: 'welcome',
@@ -55,30 +55,17 @@ const FIRST_RUN_STEPS: SpotlightStep[] = [
     placement: 'bottom',
     allowBackdropTapToNext: true,
   },
-  { id: 'link',    targetId: 'home-link-partner', title: 'Pair up',      text: 'Link with your partner to sync points and memories.' },
-  { id: 'log',     targetId: 'home-log-task',     title: 'Log a task',   text: 'Track a kind action and earn LovePoints.' },
-  { id: 'reward',  targetId: 'home-add-reward',   title: 'Rewards',      text: 'Add a reward you can redeem with points.' },
-  { id: 'ideas',   targetId: 'home-ideas-anchor', title: 'Ideas for today', text: 'Quick suggestions for easy wins.', placement: 'top', padding: 6 },
-  { id: 'settings',targetId: 'home-settings',     title: 'Settings',     text: 'Manage your profile, pairing, and notifications.' },
-
-  // Tabs — these IDs match the SpotlightTarget inside each tab item
+  { id: 'link',     targetId: 'home-link-partner', title: 'Pair up',  text: 'Link with your partner to sync points and memories.' },
+  { id: 'log',      targetId: 'home-log-task',     title: 'Log a task', text: 'Track a kind action and earn LovePoints.' },
+  { id: 'reward',   targetId: 'home-add-reward',   title: 'Rewards',  text: 'Add a reward you can redeem with points.' },
+  { id: 'ideas',    targetId: 'home-ideas-anchor', title: 'Ideas for today', text: 'Quick suggestions for easy wins.', placement: 'top', padding: 6 },
+  { id: 'settings', targetId: 'home-settings',     title: 'Settings', text: 'Manage your profile, pairing, and notifications.' },
   {
-    id: 'tab-home',       targetId: 'tab-home',       title: 'Home',          text: 'Overview, goals, ideas, and quick actions.', placement: 'top',  padding: 6, radius: 22,
-  },
-  {
-    id: 'tab-memories',   targetId: 'tab-memories',   title: 'Memories',      text: 'Save sweet moments with text & photos.',     placement: 'top',  padding: 6, radius: 22,
-  },
-  {
-    id: 'tab-reminders',  targetId: 'tab-reminders',  title: 'Reminders',     text: 'Set gentle nudges for future you.',          placement: 'top',  padding: 6, radius: 22,
-  },
-  {
-    id: 'tab-love',       targetId: 'tab-love',       title: 'Love Notes 💌', text: 'Send quick notes; we’ll nudge your partner.', placement: 'top',  padding: 6, radius: 22,
-  },
-  {
-    id: 'tab-tasks',      targetId: 'tab-tasks',      title: 'Tasks',         text: 'Shared to-dos; finishing can award points.',  placement: 'top',  padding: 6, radius: 22,
-  },
-  {
-    id: 'tab-challenges', targetId: 'tab-challenges', title: 'Challenges',    text: 'Tiny prompts to spark connection.',           placement: 'top',  padding: 6, radius: 22,
+    id: 'nav',
+    targetId: null,
+    title: 'Navigation',
+    text: 'Use the tabs below to move around: Home, Memories, Reminders, Love Notes, Tasks, Challenges.',
+    placement: 'bottom',
   },
 ];
 
@@ -139,6 +126,7 @@ export default function HomeScreen() {
   const t = useTokens();
   const s = useMemo(() => styles(t), [t]);
   const nav = useNavigation<any>();
+
 
   const { user } = useAuthListener();
   const { total, weekly } = usePointsTotal(user?.uid);
@@ -431,8 +419,8 @@ export default function HomeScreen() {
         onCreate={onCreateReward}
       />
 
-      {/* 🔥 Start the tutorial once per user */}
-      <SpotlightAutoStarter uid={user?.uid ?? null} steps={FIRST_RUN_STEPS} />
+
+      <SpotlightAutoStarter uid={user?.uid ?? null} steps={FIRST_RUN_STEPS} persistKey="first-run-v3" />
     </Screen>
   );
 }

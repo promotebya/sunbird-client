@@ -1,11 +1,18 @@
-// screens/PaywallScreen.tsx
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Alert,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  View,
+} from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import Button from '../components/Button';
-import Card from '../components/Card';
 import ThemedText from '../components/ThemedText';
 import { useTokens, type ThemeTokens } from '../components/ThemeProvider';
 
@@ -23,9 +30,19 @@ function withAlpha(hex: string, alpha: number) {
   const a = Math.round(alpha * 255).toString(16).padStart(2, '0');
   return `#${full}${a}`;
 }
+function mixWithWhite(hex: string, ratio = 0.86) {
+  const h = hex.replace('#', '');
+  const r = parseInt(h.slice(0, 2), 16);
+  const g = parseInt(h.slice(2, 4), 16);
+  const b = parseInt(h.slice(4, 6), 16);
+  const m = (c: number) => Math.round(c * (1 - ratio) + 255 * ratio);
+  const toHex = (n: number) => n.toString(16).padStart(2, '0');
+  return `#${toHex(m(r))}${toHex(m(g))}${toHex(m(b))}`;
+}
 
 export default function PaywallScreen() {
   const t = useTokens();
+  const insets = useSafeAreaInsets();
   const s = useMemo(() => styles(t), [t]);
 
   const nav = useNavigation<any>();
@@ -34,20 +51,14 @@ export default function PaywallScreen() {
   const [plan, setPlan] = useState<Plan>(initialPlan);
   const [busy, setBusy] = useState(false);
 
-  // Current user
   const { user } = useAuthListener();
-
-  // Mock store (scoped by uid inside usePro)
   const { hasPro, offerings, loading: rcLoading } = usePro(user?.uid);
   const annual = offerings?.annual;
   const monthly = offerings?.monthly;
 
-  // Firestore plan (app source of truth)
   const { isPremium, loading: planLoading } = usePlanPlus(user?.uid);
-
   const effectivePremium = !!(isPremium || hasPro);
 
-  // Close once either RC entitlement OR Firestore plan is active
   useEffect(() => {
     if (!planLoading && effectivePremium) nav.goBack();
   }, [effectivePremium, planLoading, nav]);
@@ -70,11 +81,7 @@ export default function PaywallScreen() {
   async function markUserPremium() {
     if (!user?.uid) return;
     try {
-      await setDoc(
-        doc(db, 'users', user.uid),
-        { plan: 'premium' },
-        { merge: true }
-      );
+      await setDoc(doc(db, 'users', user.uid), { plan: 'premium' }, { merge: true });
     } catch (e) {
       console.warn('[Paywall] failed to mark user premium', e);
     }
@@ -90,9 +97,7 @@ export default function PaywallScreen() {
       setBusy(true);
       const ok = await purchase(pkg);
       if (ok) {
-        // Reflect Premium in Firestore so the rest of the app unlocks.
         await markUserPremium();
-        // Don’t goBack here; the effect above will close once hooks reflect it.
       } else {
         Alert.alert('Purchase canceled');
       }
@@ -121,9 +126,13 @@ export default function PaywallScreen() {
 
   return (
     <ScrollView
-      contentContainerStyle={{ padding: t.spacing.md }}
       style={{ backgroundColor: t.colors.bg }}
       showsVerticalScrollIndicator={false}
+      contentContainerStyle={{
+        paddingHorizontal: t.spacing.md,
+        paddingBottom: t.spacing.md,
+        paddingTop: insets.top + t.spacing.lg, // clear of notch
+      }}
     >
       {/* Hero */}
       <View style={s.hero}>
@@ -141,8 +150,11 @@ export default function PaywallScreen() {
         </ThemedText>
       </View>
 
-      {/* Benefits */}
-      <Card style={{ marginTop: t.spacing.md }}>
+      {/* Premium box — single layer on Android (no borders at all) */}
+      <View
+        renderToHardwareTextureAndroid
+        style={[s.premiumBox, { marginTop: t.spacing.md }]}
+      >
         {[
           '12 curated challenges every week',
           'New drops weekly — fun, romantic or surprising',
@@ -217,21 +229,29 @@ export default function PaywallScreen() {
         <ThemedText variant="caption" color={t.colors.textDim} center style={{ marginTop: 8 }}>
           Cancel anytime. Auto-renews until canceled in Settings.
         </ThemedText>
-      </Card>
+      </View>
     </ScrollView>
   );
 }
 
 const styles = (t: ThemeTokens) =>
   StyleSheet.create({
-    center: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: t.colors.bg, padding: t.spacing.md },
+    center: {
+      flex: 1, alignItems: 'center', justifyContent: 'center',
+      backgroundColor: t.colors.bg, padding: t.spacing.md,
+    },
+
     hero: {
       alignItems: 'center',
       paddingVertical: t.spacing.lg,
       borderRadius: t.radius.lg,
-      backgroundColor: withAlpha(t.colors.primary, 0.08),
-      borderWidth: 1,
-      borderColor: t.colors.border,
+      backgroundColor:
+        Platform.OS === 'android'
+          ? mixWithWhite(t.colors.primary, 0.92)
+          : withAlpha(t.colors.primary, 0.08),
+      borderWidth: Platform.OS === 'ios' ? 1 : 0,
+      borderColor: Platform.OS === 'ios' ? t.colors.border : 'transparent',
+      ...(Platform.OS === 'android' ? { elevation: 0 } : {}),
     },
     heroBadge: {
       flexDirection: 'row',
@@ -241,11 +261,13 @@ const styles = (t: ThemeTokens) =>
       borderRadius: 999,
       backgroundColor: t.colors.primary,
     },
-    // Bullet alignment (icon vertically centered with multi-line text)
+
+    // bullets
     benefitRow: { flexDirection: 'row', alignItems: 'center', marginVertical: 6 },
     benefitIcon: { marginTop: 0 },
     benefitText: { marginLeft: 8, lineHeight: 22, flex: 1 },
 
+    // plan toggle
     planToggle: {
       flexDirection: 'row',
       backgroundColor: t.colors.card,
@@ -264,12 +286,33 @@ const styles = (t: ThemeTokens) =>
     },
     planChipActive: { backgroundColor: t.colors.primary },
 
-    // “Best value” shown *under* the €19.99/yr text
     valueTagBelow: {
       marginTop: 6,
       paddingHorizontal: 8,
       paddingVertical: 2,
       borderRadius: t.radius.pill,
       backgroundColor: withAlpha('#000', 0.18),
+    },
+
+    /**
+     * Single-layer premium box to avoid any rim on Android.
+     * - Android: solid baby-blue fill, no border, no elevation
+     * - iOS: normal card with border
+     */
+    premiumBox: {
+      borderRadius: t.radius.lg,
+      padding: t.spacing.md,
+      overflow: 'hidden',
+      backgroundColor:
+        Platform.OS === 'android'
+          ? mixWithWhite(t.colors.primary, 0.88) // solid baby-blue
+          : t.colors.card,
+      // Hairline border matching the fill to kill the anti-alias rim
+      borderWidth: Platform.OS === 'android' ? StyleSheet.hairlineWidth : 1,
+      borderColor:
+        Platform.OS === 'android'
+          ? mixWithWhite(t.colors.primary, 0.88)
+          : t.colors.border,
+      elevation: 0,
     },
   });

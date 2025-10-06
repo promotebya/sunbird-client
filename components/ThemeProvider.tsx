@@ -1,4 +1,3 @@
-// components/ThemeProvider.tsx
 import { StatusBar } from 'expo-status-bar';
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import useAuthListener from '../hooks/useAuthListener';
@@ -45,6 +44,9 @@ const base = {
   },
 };
 
+// iOS-like blue used on both platforms
+const IOS_BLUE = '#3B82F6';
+
 const THEMES: Record<ThemeName, ThemeTokens> = {
   'light-rose': {
     ...base,
@@ -81,7 +83,7 @@ const THEMES: Record<ThemeName, ThemeTokens> = {
       card: '#FFFFFF',
       text: '#14202A',
       textDim: '#5C6470',
-      primary: '#2E8CFF',
+      primary: IOS_BLUE,        // ⬅ unified iOS-like blue
       border: '#E3ECF7',
       success: '#10B981',
       danger: '#EF4444',
@@ -158,7 +160,6 @@ export const useTokens = () => useThemeContext().tokens;
 /* ── Helpers ───────────────────────────────────────────── */
 
 function normalizeLegacy(value?: string | null): ThemeName {
-  // Migrate any old values to current names; fallback to ocean.
   if (!value) return DEFAULT_PREF;
   if (value === 'system') return DEFAULT_PREF;
   if (value === 'light') return 'light-rose';
@@ -178,7 +179,6 @@ export const ThemeProvider: React.FC<React.PropsWithChildren<{}>> = ({ children 
 
   const [pref, setPref] = useState<ThemeName>(DEFAULT_PREF);
 
-  // Load user preference (and normalize away any legacy 'system'/'light'/'dark')
   useEffect(() => {
     (async () => {
       if (!user) return;

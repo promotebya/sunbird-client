@@ -1,9 +1,11 @@
-// navigation/AppNavigator.tsx
 import { Ionicons } from '@expo/vector-icons';
-import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import {
+  createBottomTabNavigator,
+  type BottomTabBarButtonProps,
+} from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import React, { useState } from 'react';
-import { Alert, ScrollView, View } from 'react-native';
+import { Alert, Platform, Pressable, ScrollView, View } from 'react-native';
 
 import ChallengesScreen from '../screens/ChallengesScreen';
 import HomeScreen from '../screens/HomeScreen';
@@ -22,17 +24,12 @@ import ThemedText from '../components/ThemedText';
 import { useTokens } from '../components/ThemeProvider';
 import useAuthListener from '../hooks/useAuthListener';
 import usePendingRemindersBadge from '../hooks/usePendingRemindersBadge';
-import { type SeedChallenge } from '../utils/seedchallenges';
 
-// 🔥 Firestore (modular v9)
-import {
-  addDoc,
-  collection,
-  getFirestore,
-  serverTimestamp,
-} from 'firebase/firestore';
+// Overlay only (doesn't alter layout)
+import { SpotlightProvider } from '../components/spotlight';
 
-/* ---------------- Error boundary to avoid “black screen” ---------------- */
+import { addDoc, collection, getFirestore, serverTimestamp } from 'firebase/firestore';
+
 class NavErrorBoundary extends React.Component<
   { children: React.ReactNode; t: ReturnType<typeof useTokens> },
   { error: any }
@@ -67,13 +64,13 @@ class NavErrorBoundary extends React.Component<
 const Tab = createBottomTabNavigator();
 const Root = createNativeStackNavigator();
 
-/** Minimal detail screen so "Start challenge" has a target + award points */
+/** Minimal detail screen so "Start challenge" awards points */
 function ChallengeDetailScreen({ route, navigation }: any) {
   const t = useTokens();
   const { user } = useAuthListener();
   const [saving, setSaving] = useState(false);
 
-  const seed: SeedChallenge | undefined = route?.params?.seed;
+  const seed: any = route?.params?.seed;
   const title = seed?.title ?? 'Challenge';
   const desc = seed?.description ?? '';
   const pts = Number(seed?.points ?? 0);
@@ -88,37 +85,33 @@ function ChallengeDetailScreen({ route, navigation }: any) {
     try {
       setSaving(true);
       const db = getFirestore();
-
-      // ✅ Write to TOP-LEVEL /points to match your Firestore rules
       await addDoc(collection(db, 'points'), {
-        ownerId: user.uid,              // rules check this
-        value: pts,                     // rules require number
+        ownerId: user.uid,
+        value: pts,
         type: 'challenge',
         challengeId: seed?.id ?? null,
         title: seed?.title ?? null,
         difficulty: seed?.difficulty ?? null,
         createdAt: serverTimestamp(),
       });
-
       Alert.alert('Nice!', `+${pts} points added.`);
       navigation.goBack();
     } catch (e: any) {
       console.warn('award points failed', e);
-      const msg =
-        (e && typeof e === 'object' && 'message' in e) ? String(e.message)
-        : 'Could not save your points. Please try again.';
-      Alert.alert('Oops', msg);
+      Alert.alert('Oops', e?.message ?? 'Could not save your points.');
     } finally {
       setSaving(false);
     }
   }
 
+  const tkn = useTokens();
+
   return (
     <ScrollView
-      style={{ flex: 1, backgroundColor: t.colors.bg }}
-      contentContainerStyle={{ padding: t.spacing.lg }}
+      style={{ flex: 1, backgroundColor: tkn.colors.bg }}
+      contentContainerStyle={{ padding: tkn.spacing.lg }}
     >
-      <ThemedText variant="display" style={{ marginBottom: t.spacing.s }}>
+      <ThemedText variant="display" style={{ marginBottom: tkn.spacing.s }}>
         {title}
       </ThemedText>
 
@@ -126,23 +119,29 @@ function ChallengeDetailScreen({ route, navigation }: any) {
         <ThemedText variant="subtitle" color="textDim">
           {`+${pts} pts`}
         </ThemedText>
-        <View style={{ height: t.spacing.s }} />
+        <View style={{ height: tkn.spacing.s }} />
         <ThemedText>{desc}</ThemedText>
       </Card>
 
-      <View style={{ height: t.spacing.md }} />
+      <View style={{ height: tkn.spacing.md }} />
       <Button
         label={saving ? 'Saving…' : `Mark finished (+${pts} pts)`}
         onPress={markFinished}
         disabled={saving}
       />
-      <View style={{ height: t.spacing.s }} />
-      <Button
-        label="Got it!"
-        onPress={() => navigation.goBack()}
-      />
+      <View style={{ height: tkn.spacing.s }} />
+      <Button label="Got it!" onPress={() => navigation.goBack()} />
     </ScrollView>
   );
+}
+
+function withAlpha(hex: string, alpha: number) {
+  const h = hex.replace('#', '');
+  const full = h.length === 3 ? h.split('').map((c) => c + c).join('') : h;
+  const r = parseInt(full.substring(0, 2), 16);
+  const g = parseInt(full.substring(2, 4), 16);
+  const b = parseInt(full.substring(4, 6), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
 }
 
 function Tabs() {
@@ -150,77 +149,83 @@ function Tabs() {
   const { badge } = usePendingRemindersBadge(user?.uid ?? null);
   const t = useTokens();
 
+  const renderTabBarButton = (props: BottomTabBarButtonProps) =>
+    Platform.OS === 'android' ? (
+      <Pressable
+        {...(props as any)}
+        android_ripple={{ color: withAlpha(t.colors.primary, 0.14), radius: 46, borderless: false }}
+        style={[props.style, { overflow: 'hidden', borderRadius: 24 }]}
+      />
+    ) : (
+      // On iOS, use the default native tab bar button for perfect layout
+      (props as any).children
+    );
+
   return (
     <Tab.Navigator
       initialRouteName="Home"
       backBehavior="history"
-      // 👇 avoid mounting all tabs up front (can crash on slow/invalid screens)
-      screenOptions={({ route }: { route: any }) => ({
+      screenOptions={() => ({
         headerShown: false,
-        sceneContainerStyle: { backgroundColor: t.colors.bg },
+
         tabBarActiveTintColor: t.colors.primary,
         tabBarInactiveTintColor: t.colors.textDim,
-        tabBarHideOnKeyboard: true,
+
         tabBarStyle: {
           backgroundColor: t.colors.card,
           borderTopColor: t.colors.border,
+          ...(Platform.OS === 'android' ? { height: 60, paddingTop: 6 } : {}),
         },
-        lazy: true,                 // <—
-        detachInactiveScreens: true // <—
+
+        tabBarItemStyle: Platform.OS === 'android' ? { paddingVertical: 2 } : undefined,
+
+        tabBarLabelStyle: {
+          fontSize: 12,
+          fontWeight: '600',
+          letterSpacing: 0.2,
+          marginBottom: 0,
+        },
+
+        tabBarButton: Platform.OS === 'android' ? renderTabBarButton : undefined,
+
+        tabBarHideOnKeyboard: true,
+        lazy: true,
+        detachInactiveScreens: true,
       })}
     >
       <Tab.Screen
         name="Home"
         component={HomeScreen}
-        options={{
-          tabBarIcon: ({ color, size }) => <Ionicons name="home" size={size} color={color} />,
-        }}
+        options={{ tabBarIcon: ({ color, size }) => <Ionicons name="home" size={size} color={color} /> }}
       />
-
       <Tab.Screen
         name="Memories"
         component={MemoriesScreen}
-        options={{
-          tabBarIcon: ({ color, size }) => <Ionicons name="images" size={size} color={color} />,
-        }}
+        options={{ tabBarIcon: ({ color, size }) => <Ionicons name="images" size={size} color={color} /> }}
       />
-
       <Tab.Screen
         name="Reminders"
         component={RemindersStack}
         options={{
           tabBarIcon: ({ color, size }) => <Ionicons name="alarm" size={size} color={color} />,
           tabBarBadge: badge ?? undefined,
-          tabBarBadgeStyle: {
-            backgroundColor: t.colors.primary,
-            color: '#fff',
-          },
+          tabBarBadgeStyle: { backgroundColor: t.colors.primary, color: '#fff' },
         }}
       />
-
       <Tab.Screen
         name="LoveNotes"
         component={LoveNotesScreen}
-        options={{
-          title: 'Love Notes',
-          tabBarIcon: ({ color, size }) => <Ionicons name="heart" size={size} color={color} />,
-        }}
+        options={{ title: 'Love Notes', tabBarIcon: ({ color, size }) => <Ionicons name="heart" size={size} color={color} /> }}
       />
-
       <Tab.Screen
         name="Tasks"
         component={TasksScreen}
-        options={{
-          tabBarIcon: ({ color, size }) => <Ionicons name="checkmark-done" size={size} color={color} />,
-        }}
+        options={{ tabBarIcon: ({ color, size }) => <Ionicons name="checkmark-done" size={size} color={color} /> }}
       />
-
       <Tab.Screen
         name="Challenges"
         component={ChallengesScreen}
-        options={{
-          tabBarIcon: ({ color, size }) => <Ionicons name="sparkles" size={size} color={color} />,
-        }}
+        options={{ tabBarIcon: ({ color, size }) => <Ionicons name="sparkles" size={size} color={color} /> }}
       />
     </Tab.Navigator>
   );
@@ -229,48 +234,37 @@ function Tabs() {
 export default function AppNavigator() {
   const t = useTokens();
   return (
-    <NavErrorBoundary t={t}>
-      <Root.Navigator
-        initialRouteName="Tabs"
-        screenOptions={{
-          headerShown: false,
-          contentStyle: { backgroundColor: t.colors.bg }, // ✅ fixes black background on stacks/modals
-        }}
-      >
-        <Root.Screen name="Tabs" component={Tabs} />
-
-        {/* Challenge detail target so the button can navigate */}
-        <Root.Screen
-          name="ChallengeDetail"
-          component={ChallengeDetailScreen}
-          options={{
-            headerShown: true,
-            title: 'Challenge',
-            presentation: 'card',
+    <SpotlightProvider>
+      <NavErrorBoundary t={t}>
+        <Root.Navigator
+          initialRouteName="Tabs"
+          screenOptions={{
+            headerShown: false,
+            contentStyle: { backgroundColor: t.colors.bg },
           }}
-        />
+        >
+          <Root.Screen name="Tabs" component={Tabs} />
 
-        <Root.Screen
-          name="Paywall"
-          component={PaywallScreen}
-          options={{
-            headerShown: true,
-            title: 'Premium',
-            presentation: 'modal',
-          }}
-        />
+          <Root.Screen
+            name="ChallengeDetail"
+            component={ChallengeDetailScreen}
+            options={{ headerShown: true, title: 'Challenge', presentation: 'card' }}
+          />
 
-        <Root.Screen
-          name="Settings"
-          component={SettingsScreen}
-          options={{ headerShown: true, title: 'Settings' }}
-        />
-        <Root.Screen
-          name="PairingScan"
-          component={PairingScanScreen}
-          options={{ headerShown: true, title: 'Scan code' }}
-        />
-      </Root.Navigator>
-    </NavErrorBoundary>
+          {/* Hide native header -> we render a perfectly placed in-screen back button */}
+          <Root.Screen
+            name="Paywall"
+            component={PaywallScreen}
+            options={{
+              headerShown: false,
+              presentation: Platform.OS === 'ios' ? 'modal' : 'card',
+            }}
+          />
+
+          <Root.Screen name="Settings" component={SettingsScreen} options={{ headerShown: true, title: 'Settings' }} />
+          <Root.Screen name="PairingScan" component={PairingScanScreen} options={{ headerShown: true, title: 'Scan code' }} />
+        </Root.Navigator>
+      </NavErrorBoundary>
+    </SpotlightProvider>
   );
 }
