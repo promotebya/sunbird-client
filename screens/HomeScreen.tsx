@@ -1,5 +1,6 @@
 // screens/HomeScreen.tsx
 import { Ionicons } from '@expo/vector-icons';
+import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import { useNavigation } from '@react-navigation/native';
 import {
   collection,
@@ -10,7 +11,8 @@ import {
   where,
 } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Pressable, StyleSheet, View } from 'react-native';
+import { Platform, Pressable, StyleSheet, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import Button from '../components/Button';
 import Card from '../components/Card';
@@ -20,14 +22,23 @@ import Screen from '../components/Screen';
 import ThemedText from '../components/ThemedText';
 import { useTokens, type ThemeTokens } from '../components/ThemeProvider';
 
-import { SpotlightAutoStarter, SpotlightTarget, type SpotlightStep } from '../components/spotlight';
+import {
+  SpotlightAutoStarter,
+  SpotlightTarget,
+  type SpotlightStep,
+} from '../components/spotlight';
 
 import { db } from '../firebaseConfig';
 import useAuthListener from '../hooks/useAuthListener';
 import usePointsTotal from '../hooks/usePointsTotal';
 import useStreak from '../hooks/useStreak';
 import { getPairId } from '../utils/partner';
-import { addReward, listenRewards, redeemReward, type RewardDoc } from '../utils/rewards';
+import {
+  addReward,
+  listenRewards,
+  redeemReward,
+  type RewardDoc,
+} from '../utils/rewards';
 
 const WEEK_GOAL = 50;
 const MILESTONES = [5, 10, 25, 50, 100, 200, 500];
@@ -45,7 +56,9 @@ const IDEAS = [
   'Go for a walk',
 ];
 
-// 7 steps — final step is a floating tip (no highlight) above the nav
+const isIOS = Platform.OS === 'ios';
+
+// Final step: highlight the real tab bar, but lift the tooltip bubble a bit
 const FIRST_RUN_STEPS: SpotlightStep[] = [
   {
     id: 'welcome',
@@ -60,13 +73,24 @@ const FIRST_RUN_STEPS: SpotlightStep[] = [
   { id: 'reward',   targetId: 'home-add-reward',   title: 'Rewards',  text: 'Add a reward you can redeem with points.' },
   { id: 'ideas',    targetId: 'home-ideas-anchor', title: 'Ideas for today', text: 'Quick suggestions for easy wins.', placement: 'top', padding: 6 },
   { id: 'settings', targetId: 'home-settings',     title: 'Settings', text: 'Manage your profile, pairing, and notifications.' },
-  {
-    id: 'nav',
-    targetId: null,
-    title: 'Navigation',
-    text: 'Use the tabs below to move around: Home, Memories, Reminders, Love Notes, Tasks, Challenges.',
-    placement: 'bottom',
-  },
+  isIOS
+    ? ({
+        id: 'nav',
+        targetId: 'tabbar-anchor',
+        title: 'Navigation',
+        text: 'Use the tabs below to move around: Home, Memories, Reminders, Love Notes, Tasks, Challenges.',
+        placement: 'top',
+        padding: 0,           // don’t inflate the highlight
+        tooltipOffset: 22,    // ⬅️ move bubble up (no effect on highlight)
+        allowBackdropTapToNext: true,
+      } as any)
+    : {
+        id: 'nav',
+        targetId: null,
+        title: 'Navigation',
+        text: 'Use the tabs below to move around: Home, Memories, Reminders, Love Notes, Tasks, Challenges.',
+        placement: 'bottom',
+      },
 ];
 
 type PointsItem = {
@@ -127,6 +151,8 @@ export default function HomeScreen() {
   const s = useMemo(() => styles(t), [t]);
   const nav = useNavigation<any>();
 
+  const insets = useSafeAreaInsets();
+  const tabBarHeight = useBottomTabBarHeight();
 
   const { user } = useAuthListener();
   const { total, weekly } = usePointsTotal(user?.uid);
@@ -242,11 +268,7 @@ export default function HomeScreen() {
           </View>
 
           <SpotlightTarget id="home-settings">
-            <Button
-              label="Settings"
-              variant="outline"
-              onPress={() => nav.navigate('Settings')}
-            />
+            <Button label="Settings" variant="outline" onPress={() => nav.navigate('Settings')} />
           </SpotlightTarget>
         </View>
       </View>
@@ -256,13 +278,7 @@ export default function HomeScreen() {
         <SpotlightTarget id="home-link-partner">
           <Card style={{ marginBottom: 12, paddingVertical: 12, borderWidth: 1, borderColor: HAIRLINE }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-              <View
-                style={{
-                  width: 36, height: 36, borderRadius: 10,
-                  backgroundColor: withAlpha(t.colors.primary, 0.08),
-                  alignItems: 'center', justifyContent: 'center',
-                }}
-              >
+              <View style={{ width: 36, height: 36, borderRadius: 10, backgroundColor: withAlpha(t.colors.primary, 0.08), alignItems: 'center', justifyContent: 'center' }}>
                 <Ionicons name="link" size={18} color={t.colors.primary} />
               </View>
               <View style={{ flex: 1 }}>
@@ -271,56 +287,41 @@ export default function HomeScreen() {
               </View>
             </View>
             <View style={{ flexDirection: 'row', gap: 12, marginTop: 10 }}>
-              <Button label="Link now" onPress={() => nav.navigate('Pairing')} />
+              <Button label="Link now" onPress={() => nav.navigate('PairingScan')} />
               <Button label="Later" variant="ghost" onPress={() => setHideLinkBanner(true)} />
             </View>
           </Card>
         </SpotlightTarget>
       )}
 
-      {/* Weekly goal (Progress card) */}
+      {/* Weekly goal */}
       <Card style={{ marginBottom: 12, borderWidth: 1, borderColor: HAIRLINE }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
           <ThemedText variant="subtitle" style={{ flex: 1 }}>Weekly goal</ThemedText>
-          <ThemedText variant="caption" color={t.colors.textDim}>
-            {weekly} / {WEEK_GOAL} · {Math.max(0, WEEK_GOAL - weekly)} to go
-          </ThemedText>
+          <ThemedText variant="caption" color={t.colors.textDim}>{weekly} / {WEEK_GOAL} · {Math.max(0, WEEK_GOAL - weekly)} to go</ThemedText>
         </View>
-
         <ProgressBar value={weekly} max={WEEK_GOAL} height={8} trackColor="#EDEAF1" />
-
-        <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 8 }}>
-          {nudge}
-        </ThemedText>
-
-        {/* Next milestone block */}
+        <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 8 }}>{nudge}</ThemedText>
         <View style={{ marginTop: 12 }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
             <ThemedText variant="label" color={t.colors.textDim}>Next milestone</ThemedText>
             <ThemedText variant="label">{target} pts</ThemedText>
           </View>
           <ProgressBar value={totalPoints} max={target} height={6} trackColor="#EDEAF1" />
-          <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 4 }}>
-            {remaining} to go • {weekly} this week
-          </ThemedText>
+          <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 4 }}>{remaining} to go • {weekly} this week</ThemedText>
         </View>
-
         <View style={{ marginTop: 12, flexDirection: 'row' }}>
           <SpotlightTarget id="home-log-task">
             <Button label="Log a task" onPress={() => nav.navigate('Tasks')} />
           </SpotlightTarget>
           <View style={{ width: 12 }} />
           <SpotlightTarget id="home-add-reward">
-            <Button
-              label={rewards.length ? 'Add reward' : 'Add first reward'}
-              variant="outline"
-              onPress={() => setShowAddReward(true)}
-            />
+            <Button label={rewards.length ? 'Add reward' : 'Add first reward'} variant="outline" onPress={() => setShowAddReward(true)} />
           </SpotlightTarget>
         </View>
       </Card>
 
-      {/* Ideas (Navigation block) */}
+      {/* Ideas */}
       <Card style={{ marginBottom: 12, borderWidth: 1, borderColor: HAIRLINE }}>
         <SpotlightTarget id="home-ideas-anchor" style={{ alignSelf: 'stretch' }}>
           <View>
@@ -330,13 +331,13 @@ export default function HomeScreen() {
                 <ThemedText variant="label" color={t.colors.primary}>See more →</ThemedText>
               </Pressable>
               <View style={{ width: 12 }} />
-              <Pressable onPress={() => setKey((k) => k + 1)} accessibilityRole="button">
+              <Pressable onPress={() => setKey(k => k + 1)} accessibilityRole="button">
                 <ThemedText variant="label" color={t.colors.primary}>🔀 Shuffle</ThemedText>
               </Pressable>
             </View>
 
             <View style={s.tagWrap}>
-              {ideas.slice(0, 2).map((txt) => (
+              {ideas.slice(0, 2).map(txt => (
                 <Pressable key={txt} onPress={() => onIdea(txt)} style={s.chip} accessibilityRole="button">
                   <Ionicons name="sparkles" size={14} color={t.colors.textDim} />
                   <ThemedText variant="label" style={{ marginLeft: 6 }}>{txt}</ThemedText>
@@ -346,8 +347,8 @@ export default function HomeScreen() {
           </View>
         </SpotlightTarget>
 
-        <View style={[s.tagWrap, { marginTop: 10 }] }>
-          {ideas.slice(2).map((txt) => (
+        <View style={[s.tagWrap, { marginTop: 10 }]}>
+          {ideas.slice(2).map(txt => (
             <Pressable key={txt} onPress={() => onIdea(txt)} style={s.chip} accessibilityRole="button">
               <Ionicons name="sparkles" size={14} color={t.colors.textDim} />
               <ThemedText variant="label" style={{ marginLeft: 6 }}>{txt}</ThemedText>
@@ -356,7 +357,7 @@ export default function HomeScreen() {
         </View>
       </Card>
 
-      {/* Rewards list */}
+      {/* Rewards */}
       {rewards.length > 0 && (
         <Card style={{ marginBottom: 12, borderWidth: 1, borderColor: HAIRLINE }}>
           {rewards.map((item, i) => (
@@ -379,12 +380,8 @@ export default function HomeScreen() {
           <ThemedText variant="subtitle" style={{ marginBottom: 8 }}>Recent activity</ThemedText>
           {recent.map((p, i) => (
             <View key={p.id} style={[s.recentRow, i > 0 && s.hairlineTop]}>
-              <ThemedText variant="title" color={t.colors.primary}>
-                {p.value > 0 ? `+${p.value}` : p.value}
-              </ThemedText>
-              <ThemedText variant="caption" color={t.colors.textDim} style={{ marginLeft: 8, flex: 1 }}>
-                {p.reason ?? 'Points'}
-              </ThemedText>
+              <ThemedText variant="title" color={t.colors.primary}>{p.value > 0 ? `+${p.value}` : p.value}</ThemedText>
+              <ThemedText variant="caption" color={t.colors.textDim} style={{ marginLeft: 8, flex: 1 }}>{p.reason ?? 'Points'}</ThemedText>
             </View>
           ))}
         </Card>
@@ -393,32 +390,36 @@ export default function HomeScreen() {
       {/* Bottom nudge */}
       <Card style={{ marginBottom: 16, borderWidth: 1, borderColor: HAIRLINE }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 6 }}>
-          <View
-            style={{
-              width: 36, height: 36, borderRadius: 10,
-              backgroundColor: withAlpha(t.colors.primary, 0.08),
-              alignItems: 'center', justifyContent: 'center',
-            }}
-          >
+          <View style={{ width: 36, height: 36, borderRadius: 10, backgroundColor: withAlpha(t.colors.primary, 0.08), alignItems: 'center', justifyContent: 'center' }}>
             <Ionicons name="sparkles" size={18} color={t.colors.primary} />
           </View>
           <ThemedText variant="title">Try a tiny challenge tonight</ThemedText>
         </View>
-        <ThemedText variant="caption" color={t.colors.textDim}>
-          A small step keeps your streak healthy. Explore a quick challenge.
-        </ThemedText>
+        <ThemedText variant="caption" color={t.colors.textDim}>A small step keeps your streak healthy. Explore a quick challenge.</ThemedText>
         <View style={{ marginTop: 10 }}>
           <Button label="Open Challenges" variant="outline" onPress={() => nav.navigate('Challenges')} />
         </View>
       </Card>
 
       {/* Add reward modal */}
-      <RedeemModal
-        visible={showAddReward}
-        onClose={() => setShowAddReward(false)}
-        onCreate={onCreateReward}
-      />
+      <RedeemModal visible={showAddReward} onClose={() => setShowAddReward(false)} onCreate={onCreateReward} />
 
+      {/* iOS: highlight matches the tab bar exactly */}
+      {isIOS && (
+        <SpotlightTarget
+          id="tabbar-anchor"
+          pointerEvents="none"
+          style={{
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            bottom: 0,
+            height: tabBarHeight,
+          }}
+        >
+          <View style={{ flex: 1 }} />
+        </SpotlightTarget>
+      )}
 
       <SpotlightAutoStarter uid={user?.uid ?? null} steps={FIRST_RUN_STEPS} persistKey="first-run-v3" />
     </Screen>
@@ -427,23 +428,9 @@ export default function HomeScreen() {
 
 const styles = (t: ThemeTokens) =>
   StyleSheet.create({
-    headerRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-    },
-    metaRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      gap: 12,
-    },
-    pillGroup: {
-      flexDirection: 'row',
-      flexWrap: 'wrap',
-      gap: 10,
-      flexShrink: 1,
-    },
+    headerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+    metaRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
+    pillGroup: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, flexShrink: 1 },
     pillsRow: { flexDirection: 'row', gap: 12 },
     tagWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
     chip: {
@@ -456,27 +443,8 @@ const styles = (t: ThemeTokens) =>
       borderWidth: 1,
       borderColor: '#F0E6EF',
     },
-    rewardRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      paddingVertical: 10,
-    },
-    hairlineTop: {
-      borderTopWidth: StyleSheet.hairlineWidth,
-      borderTopColor: '#F0E6EF',
-      marginTop: 10,
-      paddingTop: 10,
-    },
-    redeemBtn: {
-      backgroundColor: t.colors.primary,
-      paddingHorizontal: 16,
-      paddingVertical: 10,
-      borderRadius: 14,
-    },
-    recentRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      paddingVertical: 8,
-    },
+    rewardRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 10 },
+    hairlineTop: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#F0E6EF', marginTop: 10, paddingTop: 10 },
+    redeemBtn: { backgroundColor: t.colors.primary, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 14 },
+    recentRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 8 },
   });

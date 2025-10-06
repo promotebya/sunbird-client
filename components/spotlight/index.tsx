@@ -23,6 +23,7 @@ import {
   Text,
   TouchableOpacity,
   View,
+  ViewProps,
   ViewStyle,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -40,6 +41,8 @@ export type SpotlightStep = {
   allowBackdropTapToNext?: boolean;
   /** Per-edge clamp margins (defaults to 8 each). Use { bottom: 0 } for tab bar. */
   edgeMargin?: Partial<{ top: number; right: number; bottom: number; left: number }>;
+  /** Extra gap between the highlighted hole and the tooltip bubble (does NOT change the highlight). */
+  tooltipOffset?: number;
 };
 
 export type SpotlightOptions = {
@@ -186,9 +189,14 @@ export const SpotlightProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 };
 
 // ---- Target wrapper ----
-type TargetProps = { id: string; children: React.ReactNode; style?: StyleProp<ViewStyle> };
+type TargetProps = {
+  id: string;
+  children: React.ReactNode;
+  style?: StyleProp<ViewStyle>;
+  pointerEvents?: ViewProps['pointerEvents']; // allow pointerEvents passthrough
+};
 
-export const SpotlightTarget: React.FC<TargetProps> = ({ id, children, style }) => {
+export const SpotlightTarget: React.FC<TargetProps> = ({ id, children, style, pointerEvents }) => {
   const { registerTarget, unregisterTarget } = useSpotlight();
   const ref = useRef<View>(null);
 
@@ -238,7 +246,7 @@ export const SpotlightTarget: React.FC<TargetProps> = ({ id, children, style }) 
   }, [id, measure, unregisterTarget]);
 
   return (
-    <View ref={ref} onLayout={measure} collapsable={false} style={style}>
+    <View ref={ref} onLayout={measure} collapsable={false} style={style} pointerEvents={pointerEvents}>
       {children}
     </View>
   );
@@ -317,11 +325,14 @@ const SpotlightOverlay: React.FC<OverlayProps> = ({
   const defaultTop = insets.top + 64;
   const defaultBottom = Math.max(8, H - insets.bottom - 20 - EST_CARD_H);
 
+  // <-- NEW: tooltip-only offset (does not affect the highlight)
+  const extra = step.tooltipOffset ?? 0;
+
   const rawY =
     hole && placement === 'bottom'
-      ? Math.min(H - insets.bottom - 20, hole.y + hole.height + 12)
+      ? Math.min(H - insets.bottom - 20, hole.y + hole.height + 12 + extra)
       : hole && placement === 'top'
-      ? Math.max(insets.top + 20, hole.y - 12 - EST_CARD_H)
+      ? Math.max(insets.top + 20, hole.y - (12 + extra) - EST_CARD_H)
       : placement === 'top'
       ? defaultTop
       : defaultBottom;
@@ -349,9 +360,9 @@ const SpotlightOverlay: React.FC<OverlayProps> = ({
       <Svg width={W} height={H} style={StyleSheet.absoluteFill as any} pointerEvents="none">
         <Mask id="mask">
           <Rect x={0} y={0} width={W} height={H} fill="#fff" />
-        {hole ? (
-          <Rect x={hole.x} y={hole.y} width={hole.width} height={hole.height} rx={radius} ry={radius} fill="#000" />
-        ) : null}
+          {hole ? (
+            <Rect x={hole.x} y={hole.y} width={hole.width} height={hole.height} rx={radius} ry={radius} fill="#000" />
+          ) : null}
         </Mask>
         <Rect x={0} y={0} width={W} height={H} fill={BRAND.dim} mask="url(#mask)" />
       </Svg>
@@ -564,10 +575,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     paddingRight: 2,
     ...(Platform.OS === 'android'
-      ? {
-          includeFontPadding: true,
-          textBreakStrategy: 'simple',
-        }
+      ? { includeFontPadding: true, textBreakStrategy: 'simple' }
       : null),
   },
 

@@ -1,3 +1,4 @@
+// navigation/AppNavigator.tsx
 import { Ionicons } from '@expo/vector-icons';
 import {
   createBottomTabNavigator,
@@ -5,7 +6,7 @@ import {
 } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import React, { useState } from 'react';
-import { Alert, Platform, Pressable, ScrollView, View } from 'react-native';
+import { Alert, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 
 import ChallengesScreen from '../screens/ChallengesScreen';
 import HomeScreen from '../screens/HomeScreen';
@@ -20,16 +21,15 @@ import RemindersStack from './RemindersStack';
 
 import Button from '../components/Button';
 import Card from '../components/Card';
+import { SpotlightProvider } from '../components/spotlight';
 import ThemedText from '../components/ThemedText';
 import { useTokens } from '../components/ThemeProvider';
 import useAuthListener from '../hooks/useAuthListener';
 import usePendingRemindersBadge from '../hooks/usePendingRemindersBadge';
 
-// Overlay only (doesn't alter layout)
-import { SpotlightProvider } from '../components/spotlight';
-
 import { addDoc, collection, getFirestore, serverTimestamp } from 'firebase/firestore';
 
+/* ---------------- Error boundary ---------------- */
 class NavErrorBoundary extends React.Component<
   { children: React.ReactNode; t: ReturnType<typeof useTokens> },
   { error: any }
@@ -64,7 +64,7 @@ class NavErrorBoundary extends React.Component<
 const Tab = createBottomTabNavigator();
 const Root = createNativeStackNavigator();
 
-/** Minimal detail screen so "Start challenge" awards points */
+/** Minimal ChallengeDetail so “Start challenge” can award points */
 function ChallengeDetailScreen({ route, navigation }: any) {
   const t = useTokens();
   const { user } = useAuthListener();
@@ -104,14 +104,12 @@ function ChallengeDetailScreen({ route, navigation }: any) {
     }
   }
 
-  const tkn = useTokens();
-
   return (
     <ScrollView
-      style={{ flex: 1, backgroundColor: tkn.colors.bg }}
-      contentContainerStyle={{ padding: tkn.spacing.lg }}
+      style={{ flex: 1, backgroundColor: t.colors.bg }}
+      contentContainerStyle={{ padding: t.spacing.lg }}
     >
-      <ThemedText variant="display" style={{ marginBottom: tkn.spacing.s }}>
+      <ThemedText variant="display" style={{ marginBottom: t.spacing.s }}>
         {title}
       </ThemedText>
 
@@ -119,17 +117,17 @@ function ChallengeDetailScreen({ route, navigation }: any) {
         <ThemedText variant="subtitle" color="textDim">
           {`+${pts} pts`}
         </ThemedText>
-        <View style={{ height: tkn.spacing.s }} />
+        <View style={{ height: t.spacing.s }} />
         <ThemedText>{desc}</ThemedText>
       </Card>
 
-      <View style={{ height: tkn.spacing.md }} />
+      <View style={{ height: t.spacing.md }} />
       <Button
         label={saving ? 'Saving…' : `Mark finished (+${pts} pts)`}
         onPress={markFinished}
         disabled={saving}
       />
-      <View style={{ height: tkn.spacing.s }} />
+      <View style={{ height: t.spacing.s }} />
       <Button label="Got it!" onPress={() => navigation.goBack()} />
     </ScrollView>
   );
@@ -149,6 +147,23 @@ function Tabs() {
   const { badge } = usePendingRemindersBadge(user?.uid ?? null);
   const t = useTokens();
 
+  // Slightly bigger iOS icon; smaller label that auto-shrinks to fit
+  const iosIcon = (fallback: number) => (Platform.OS === 'ios' ? 23 : fallback);
+  const makeIOSLabel =
+    (text: string) =>
+    ({ color }: { focused: boolean; color: string }) =>
+      (
+        <Text
+          allowFontScaling={false}
+          numberOfLines={1}
+          adjustsFontSizeToFit
+          minimumFontScale={0.8}
+          style={{ fontSize: 9, fontWeight: '600', color }}
+        >
+          {text}
+        </Text>
+      );
+
   const renderTabBarButton = (props: BottomTabBarButtonProps) =>
     Platform.OS === 'android' ? (
       <Pressable
@@ -157,7 +172,6 @@ function Tabs() {
         style={[props.style, { overflow: 'hidden', borderRadius: 24 }]}
       />
     ) : (
-      // On iOS, use the default native tab bar button for perfect layout
       (props as any).children
     );
 
@@ -171,23 +185,21 @@ function Tabs() {
         tabBarActiveTintColor: t.colors.primary,
         tabBarInactiveTintColor: t.colors.textDim,
 
-        tabBarStyle: {
-          backgroundColor: t.colors.card,
-          borderTopColor: t.colors.border,
-          ...(Platform.OS === 'android' ? { height: 60, paddingTop: 6 } : {}),
-        },
+        tabBarStyle:
+          Platform.OS === 'ios'
+            ? { backgroundColor: t.colors.card, borderTopColor: t.colors.border }
+            : { backgroundColor: t.colors.card, borderTopColor: t.colors.border, height: 60, paddingTop: 6 },
 
         tabBarItemStyle: Platform.OS === 'android' ? { paddingVertical: 2 } : undefined,
+        tabBarIconStyle: undefined,
 
-        tabBarLabelStyle: {
-          fontSize: 12,
-          fontWeight: '600',
-          letterSpacing: 0.2,
-          marginBottom: 0,
-        },
+        // Android uses default label style; iOS labels are custom components above
+        tabBarLabelStyle: Platform.OS === 'android'
+          ? { fontSize: 12, fontWeight: '600', letterSpacing: 0.2 }
+          : undefined,
 
+        tabBarAllowFontScaling: Platform.OS !== 'ios',
         tabBarButton: Platform.OS === 'android' ? renderTabBarButton : undefined,
-
         tabBarHideOnKeyboard: true,
         lazy: true,
         detachInactiveScreens: true,
@@ -196,18 +208,25 @@ function Tabs() {
       <Tab.Screen
         name="Home"
         component={HomeScreen}
-        options={{ tabBarIcon: ({ color, size }) => <Ionicons name="home" size={size} color={color} /> }}
+        options={{
+          tabBarLabel: Platform.OS === 'ios' ? makeIOSLabel('Home') : undefined,
+          tabBarIcon: ({ color, size }) => <Ionicons name="home" size={iosIcon(size)} color={color} />,
+        }}
       />
       <Tab.Screen
         name="Memories"
         component={MemoriesScreen}
-        options={{ tabBarIcon: ({ color, size }) => <Ionicons name="images" size={size} color={color} /> }}
+        options={{
+          tabBarLabel: Platform.OS === 'ios' ? makeIOSLabel('Memories') : undefined,
+          tabBarIcon: ({ color, size }) => <Ionicons name="images" size={iosIcon(size)} color={color} />,
+        }}
       />
       <Tab.Screen
         name="Reminders"
         component={RemindersStack}
         options={{
-          tabBarIcon: ({ color, size }) => <Ionicons name="alarm" size={size} color={color} />,
+          tabBarLabel: Platform.OS === 'ios' ? makeIOSLabel('Reminders') : undefined,
+          tabBarIcon: ({ color, size }) => <Ionicons name="alarm" size={iosIcon(size)} color={color} />,
           tabBarBadge: badge ?? undefined,
           tabBarBadgeStyle: { backgroundColor: t.colors.primary, color: '#fff' },
         }}
@@ -215,17 +234,27 @@ function Tabs() {
       <Tab.Screen
         name="LoveNotes"
         component={LoveNotesScreen}
-        options={{ title: 'Love Notes', tabBarIcon: ({ color, size }) => <Ionicons name="heart" size={size} color={color} /> }}
+        options={{
+          title: 'Love Notes',
+          tabBarLabel: Platform.OS === 'ios' ? makeIOSLabel('Love Notes') : undefined,
+          tabBarIcon: ({ color, size }) => <Ionicons name="heart" size={iosIcon(size)} color={color} />,
+        }}
       />
       <Tab.Screen
         name="Tasks"
         component={TasksScreen}
-        options={{ tabBarIcon: ({ color, size }) => <Ionicons name="checkmark-done" size={size} color={color} /> }}
+        options={{
+          tabBarLabel: Platform.OS === 'ios' ? makeIOSLabel('Tasks') : undefined,
+          tabBarIcon: ({ color, size }) => <Ionicons name="checkmark-done" size={iosIcon(size)} color={color} />,
+        }}
       />
       <Tab.Screen
         name="Challenges"
         component={ChallengesScreen}
-        options={{ tabBarIcon: ({ color, size }) => <Ionicons name="sparkles" size={size} color={color} /> }}
+        options={{
+          tabBarLabel: Platform.OS === 'ios' ? makeIOSLabel('Challenges') : undefined,
+          tabBarIcon: ({ color, size }) => <Ionicons name="sparkles" size={iosIcon(size)} color={color} />,
+        }}
       />
     </Tab.Navigator>
   );
@@ -238,29 +267,19 @@ export default function AppNavigator() {
       <NavErrorBoundary t={t}>
         <Root.Navigator
           initialRouteName="Tabs"
-          screenOptions={{
-            headerShown: false,
-            contentStyle: { backgroundColor: t.colors.bg },
-          }}
+          screenOptions={{ headerShown: false, contentStyle: { backgroundColor: t.colors.bg } }}
         >
           <Root.Screen name="Tabs" component={Tabs} />
-
           <Root.Screen
             name="ChallengeDetail"
             component={ChallengeDetailScreen}
             options={{ headerShown: true, title: 'Challenge', presentation: 'card' }}
           />
-
-          {/* Hide native header -> we render a perfectly placed in-screen back button */}
           <Root.Screen
             name="Paywall"
             component={PaywallScreen}
-            options={{
-              headerShown: false,
-              presentation: Platform.OS === 'ios' ? 'modal' : 'card',
-            }}
+            options={{ headerShown: false, presentation: Platform.OS === 'ios' ? 'modal' : 'card' }}
           />
-
           <Root.Screen name="Settings" component={SettingsScreen} options={{ headerShown: true, title: 'Settings' }} />
           <Root.Screen name="PairingScan" component={PairingScanScreen} options={{ headerShown: true, title: 'Scan code' }} />
         </Root.Navigator>
