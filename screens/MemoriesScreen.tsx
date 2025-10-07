@@ -1,4 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import { useNavigation } from '@react-navigation/native';
 import * as ImagePicker from 'expo-image-picker';
 import React, { useEffect, useMemo, useState } from 'react';
@@ -14,9 +15,7 @@ import {
   View,
   useWindowDimensions,
 } from 'react-native';
-
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { SpotlightAutoStarter, SpotlightTarget, type SpotlightStep } from '../components/spotlight';
 
 import Button from '../components/Button';
 import Card from '../components/Card';
@@ -24,6 +23,7 @@ import ConfettiTiny from '../components/ConfettiTiny';
 import MemoryShareCard from '../components/MemoryShareCard';
 import ProgressBar from '../components/ProgressBar';
 import Screen from '../components/Screen';
+import { SpotlightAutoStarter, SpotlightTarget, type SpotlightStep } from '../components/spotlight';
 import ThemedText from '../components/ThemedText';
 import { useTokens, type ThemeTokens } from '../components/ThemeProvider';
 
@@ -34,6 +34,7 @@ import { getPairId } from '../utils/partner';
 import { generateFilename, uploadFileToStorage } from '../utils/storage';
 
 type Tab = 'photo' | 'text' | 'milestone';
+type Filter = 'all' | Tab;               // ⬅️ new: timeline filter
 type OptMem = MemoryDoc & { optimistic?: true };
 
 const PROMPTS = [
@@ -48,9 +49,6 @@ const PROMPTS = [
 const QUICK_TAGS = ['Walk', 'Coffee', 'Cozy night', 'Movie', 'Homemade meal', 'Sunset'];
 const GOAL = 3;
 
-// (tour steps now computed dynamically below based on layout/state)
-
-// Porcelain neutrals (harmonize with Home)
 const HAIRLINE = '#F0E6EF';
 const CHIP_BG = '#F3EEF6';
 
@@ -63,15 +61,16 @@ const MemoriesScreen: React.FC = () => {
   const s = useMemo(() => styles(t), [t]);
   const nav = useNavigation<any>();
   const { user } = useAuthListener();
-
   const { width: W } = useWindowDimensions();
   const insets = useSafeAreaInsets();
-  // Phantom target layout
+  const tabBarHeight = useBottomTabBarHeight();
+
   const FAB_SIZE = 56;
-  const HEADER_Y = insets.top + 58; // slightly below the header
+  const HEADER_Y = insets.top + 58;
   const ROW_H = 40;
 
-  const [tab, setTab] = useState<Tab>('text');
+  const [tab, setTab] = useState<Tab>('text');        // add-type selector (top)
+  const [filter, setFilter] = useState<Filter>('all'); // timeline filter (top)
   const [pairId, setPairId] = useState<string | null>(null);
   const [serverItems, setServerItems] = useState<MemoryDoc[]>([]);
   const [optimistic, setOptimistic] = useState<OptMem[]>([]);
@@ -83,7 +82,6 @@ const MemoriesScreen: React.FC = () => {
   const [saving, setSaving] = useState(false);
   const [promptIdx, setPromptIdx] = useState(() => Math.floor(Math.random() * PROMPTS.length));
 
-  // Pair
   useEffect(() => {
     (async () => {
       if (!user) return setPairId(null);
@@ -92,7 +90,6 @@ const MemoriesScreen: React.FC = () => {
     })();
   }, [user]);
 
-  // Subscribe to shared memories
   useEffect(() => {
     if (!user) return;
     if (!pairId) {
@@ -108,7 +105,6 @@ const MemoriesScreen: React.FC = () => {
     return () => unsub && unsub();
   }, [user, pairId]);
 
-  // First-real-memory confetti (per pair)
   useEffect(() => {
     if (!pairId) return;
     const KEY = `lp:first-memory-pair:${pairId}`;
@@ -125,11 +121,10 @@ const MemoriesScreen: React.FC = () => {
 
   const items: MemoryDoc[] = [...optimistic, ...serverItems];
 
-  // Weekly progress count
   const weekCount = useMemo(() => {
     const now = new Date();
     const monday = new Date(now);
-    const day = (now.getDay() + 6) % 7; // Mon = 0
+    const day = (now.getDay() + 6) % 7;
     monday.setDate(now.getDate() - day);
     monday.setHours(0, 0, 0, 0);
     return items.filter((m) => {
@@ -138,9 +133,14 @@ const MemoriesScreen: React.FC = () => {
     }).length;
   }, [items]);
 
+  // ⬅️ new: apply timeline filter
+  const filteredItems = useMemo(
+    () => (filter === 'all' ? items : items.filter((m) => m.kind === filter)),
+    [items, filter]
+  );
+
   const canAdd = !!user && !!pairId;
 
-  // Permissions + pickers
   async function requestLibrary() {
     const { status, canAskAgain } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (status !== 'granted') {
@@ -175,29 +175,46 @@ const MemoriesScreen: React.FC = () => {
     }
     return true;
   }
+
   async function pickImage() {
     const ok = await requestLibrary();
     if (!ok) return;
+    const usesNew = (ImagePicker as any).MediaType != null;
+    const media = usesNew
+      ? (ImagePicker as any).MediaType.Images
+      : (ImagePicker as any).MediaTypeOptions.Images;
+
     const res = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      mediaTypes: media as any,
       quality: 0.9,
       allowsEditing: false,
-    });
-    if (!res.canceled && res.assets?.length) setImageUri(res.assets[0].uri);
+    } as any);
+
+    if (!res.canceled && (res as any).assets?.length) setImageUri((res as any).assets[0].uri);
   }
   async function captureImage() {
     const ok = await requestCamera();
     if (!ok) return;
-    const res = await ImagePicker.launchCameraAsync({ quality: 0.9, allowsEditing: false });
-    if (!res.canceled && res.assets?.length) setImageUri(res.assets[0].uri);
+    const usesNew = (ImagePicker as any).MediaType != null;
+    const media = usesNew
+      ? (ImagePicker as any).MediaType.Images
+      : (ImagePicker as any).MediaTypeOptions.Images;
+
+    const res = await ImagePicker.launchCameraAsync({
+      mediaTypes: media as any,
+      quality: 0.9,
+      allowsEditing: false,
+    } as any);
+
+    if (!res.canceled && (res as any).assets?.length) setImageUri((res as any).assets[0].uri);
   }
 
-  // Create memory
   async function onAdd() {
     if (!user || !pairId) {
       Alert.alert('Link with partner', 'Please link with your partner to add shared memories.');
       return;
     }
+    if (saving) return;
     setSaving(true);
     try {
       const clientTag = randid();
@@ -232,6 +249,7 @@ const MemoriesScreen: React.FC = () => {
           const ext = imageUri.split('.').pop()?.toLowerCase() || 'jpg';
           const filename = generateFilename(ext);
           const path = `images/${user.uid}/memories/${filename}`;
+
           const url = await uploadFileToStorage(imageUri, path, setUploadProgress);
 
           const opt: OptMem = {
@@ -247,6 +265,7 @@ const MemoriesScreen: React.FC = () => {
             optimistic: true,
           };
           setOptimistic((prev) => [opt, ...prev]);
+
           await createMemory({
             ownerId: user.uid,
             pairId,
@@ -256,6 +275,7 @@ const MemoriesScreen: React.FC = () => {
             photoURL: url,
             clientTag,
           });
+
           setTitle('');
           setNote('');
           setImageUri(null);
@@ -263,13 +283,19 @@ const MemoriesScreen: React.FC = () => {
         }
       }
     } catch (e: any) {
-      Alert.alert('Could not save', e?.message ?? 'Please try again.');
+      const code = e?.code ?? '';
+      const server = e?.serverResponse ?? '';
+      const msg =
+        code && String(code).startsWith('storage/')
+          ? `Storage error (${code}). ${e?.message ?? ''}`
+          : e?.message ?? 'Please try again.';
+      console.log('Upload/Create error', { code, message: e?.message, server });
+      Alert.alert('Could not save', msg.trim());
     } finally {
       setSaving(false);
     }
   }
 
-  // Timeline row
   const renderItem = ({ item, index }: { item: MemoryDoc; index: number }) => (
     <>
       <View style={s.itemHeader}>
@@ -280,38 +306,25 @@ const MemoriesScreen: React.FC = () => {
             item.kind === 'milestone' && { backgroundColor: withAlpha('#FFB020', 0.18) },
           ]}
         >
-          <ThemedText variant="label" color={t.colors.text}>
-            {item.kind}
-          </ThemedText>
+          <ThemedText variant="label" color={t.colors.text}>{item.kind}</ThemedText>
         </View>
-        <ThemedText variant="caption" color={t.colors.textDim}>
-          {timeAgo(item.createdAt)}
-        </ThemedText>
+        <ThemedText variant="caption" color={t.colors.textDim}>{timeAgo(item.createdAt)}</ThemedText>
       </View>
 
       {index === 0 ? (
         <SpotlightTarget id="mem-first-card">
           <Card>
-            <MemoryShareCard
-              title={item.title ?? undefined}
-              note={item.note ?? undefined}
-              photoURL={item.photoURL ?? undefined}
-            />
+            <MemoryShareCard title={item.title ?? undefined} note={item.note ?? undefined} photoURL={item.photoURL ?? undefined} />
           </Card>
         </SpotlightTarget>
       ) : (
-          <Card>
-            <MemoryShareCard
-              title={item.title ?? undefined}
-              note={item.note ?? undefined}
-              photoURL={item.photoURL ?? undefined}
-            />
-          </Card>
+        <Card>
+          <MemoryShareCard title={item.title ?? undefined} note={item.note ?? undefined} photoURL={item.photoURL ?? undefined} />
+        </Card>
       )}
     </>
   );
 
-  // Compute dynamic tour steps
   const tourSteps = useMemo<SpotlightStep[]>(() => {
     const base: SpotlightStep[] = [
       { id: 'mem-welcome', targetId: null, title: 'Memories 📸', text: 'Save sweet moments as photos or notes. Quick 20-second tour?', placement: 'bottom', allowBackdropTapToNext: true },
@@ -327,26 +340,33 @@ const MemoriesScreen: React.FC = () => {
     return base;
   }, [items.length]);
 
+  const goalDone = weekCount >= GOAL; // ⬅️ new
+
   return (
-    <Screen keyboard scroll={false}>
+    <Screen scroll={false} style={{ paddingBottom: 0 }}>
       {burstKey ? <ConfettiTiny key={burstKey} /> : null}
 
       <FlatList
-        data={items}
+        data={filteredItems}                                    // ⬅️ filter applied
         keyExtractor={(it) => it.id}
         ItemSeparatorComponent={() => <View style={{ height: t.spacing.s }} />}
         renderItem={renderItem}
         keyboardShouldPersistTaps="handled"
-        contentContainerStyle={{ paddingVertical: t.spacing.md, paddingBottom: t.spacing.xl }}
+        style={{ flex: 1, marginBottom: -insets.bottom }}
+        contentInsetAdjustmentBehavior="never"
+        scrollIndicatorInsets={{ top: 0, bottom: tabBarHeight }}
+        contentInset={{ bottom: tabBarHeight }}
+        contentContainerStyle={{ paddingTop: t.spacing.md, paddingBottom: 0 }}
+        ListFooterComponent={<View style={{ height: 0 }} />}
         ListHeaderComponent={
           <>
-            {/* Header + Settings (outline) */}
             <View style={s.headerRow}>
               <ThemedText variant="display">Memories</ThemedText>
               <Button label="Settings" variant="outline" onPress={() => nav.navigate('Settings')} />
             </View>
 
-            {/* Segmented tabs */}
+
+            {/* Add-type selector (top) */}
             <View style={s.segmented}>
               {(['photo', 'text', 'milestone'] as const).map((key) => {
                 const active = tab === key;
@@ -365,30 +385,21 @@ const MemoriesScreen: React.FC = () => {
               })}
             </View>
 
-            {/* Prompt + quick tags + weekly goal */}
             <SpotlightTarget id="mem-prompt-card">
               <Card style={{ marginBottom: t.spacing.md }}>
                 <View style={s.rowBetween}>
                   <ThemedText variant="subtitle">Today’s prompt</ThemedText>
-
-                  {/* 🎲 Shuffle pill with a11y + long-press hint */}
                   <SpotlightTarget id="mem-shuffle">
                     <Pressable
                       onPress={() => setPromptIdx((i) => (i + 1) % PROMPTS.length)}
-                      onLongPress={() =>
-                        Alert.alert('Shuffle prompts', 'Tap “Shuffle” to get a different idea.')
-                      }
+                      onLongPress={() => Alert.alert('Shuffle prompts', 'Tap “Shuffle” to get a different idea.')}
                       accessibilityRole="button"
                       accessibilityLabel="Shuffle prompt"
                       accessibilityHint="Tap to get another prompt"
                       style={s.shufflePill}
                     >
-                      <ThemedText variant="label" style={{ marginRight: 6 }}>
-                        🎲
-                      </ThemedText>
-                      <ThemedText variant="label" color={t.colors.textDim}>
-                        Shuffle
-                      </ThemedText>
+                      <ThemedText variant="label" style={{ marginRight: 6 }}>🎲</ThemedText>
+                      <ThemedText variant="label" color={t.colors.textDim}>Shuffle</ThemedText>
                     </Pressable>
                   </SpotlightTarget>
                 </View>
@@ -399,31 +410,39 @@ const MemoriesScreen: React.FC = () => {
 
                 <View style={s.tagWrap}>
                   {QUICK_TAGS.map((tag) => (
-                    <Pressable
-                      key={tag}
-                      onPress={() => setTitle((prev) => (prev ? `${prev} · ${tag}` : tag))}
-                      style={s.tag}
-                    >
+                    <Pressable key={tag} onPress={() => setTitle((prev) => (prev ? `${prev} · ${tag}` : tag))} style={s.tag}>
                       <ThemedText variant="label">{tag}</ThemedText>
                     </Pressable>
                   ))}
                 </View>
 
+                {/* Weekly goal: show progress or “done” message */}
                 <View style={{ marginTop: 12 }}>
-                  <View style={s.rowBetween}>
-                    <ThemedText variant="caption" color={t.colors.textDim}>
-                      Weekly goal
-                    </ThemedText>
-                    <ThemedText variant="caption" color={t.colors.textDim}>
-                      {weekCount} / {GOAL} · {Math.max(0, GOAL - weekCount)} to go
-                    </ThemedText>
-                  </View>
-                  <ProgressBar value={weekCount} max={GOAL} height={8} trackColor="#EDEAF1" />
+                  {goalDone ? (
+                    <View style={s.goalDoneBox}>
+                      <ThemedText variant="title" style={{ textAlign: 'center' }}>
+                        You hit your weekly goal 🎉
+                      </ThemedText>
+                      <ThemedText variant="caption" color={t.colors.textDim} style={{ textAlign: 'center', marginTop: 4 }}>
+                        Keep it going!
+                      </ThemedText>
+                    </View>
+                  ) : (
+                    <>
+                      <View style={s.rowBetween}>
+                        <ThemedText variant="caption" color={t.colors.textDim}>Weekly goal</ThemedText>
+                        <ThemedText variant="caption" color={t.colors.textDim}>
+                          {weekCount} / {GOAL} · {Math.max(0, GOAL - weekCount)} to go
+                        </ThemedText>
+                      </View>
+                      <ProgressBar value={weekCount} max={GOAL} height={8} trackColor="#EDEAF1" />
+                    </>
+                  )}
                 </View>
               </Card>
             </SpotlightTarget>
 
-            {/* Add memory */}
+            {/* Add section */}
             <SpotlightTarget id="mem-add-section">
               <Card>
                 {!pairId ? (
@@ -506,6 +525,28 @@ const MemoriesScreen: React.FC = () => {
                 )}
               </Card>
             </SpotlightTarget>
+
+            {/* Timeline filter (above timeline) */}
+            <Card style={{ marginTop: t.spacing.md }}>
+              <ThemedText variant="subtitle" style={{ marginBottom: 8 }}>Show</ThemedText>
+              <View style={s.segmented}>
+                {(['all', 'photo', 'text', 'milestone'] as const).map((key) => {
+                  const active = filter === key;
+                  return (
+                    <Pressable
+                      key={key}
+                      onPress={() => setFilter(key)}
+                      accessibilityRole="button"
+                      style={[s.segment, active && s.segmentActive]}
+                    >
+                      <ThemedText variant="label" color={active ? t.colors.text : t.colors.textDim}>
+                        {key.charAt(0).toUpperCase() + key.slice(1)}
+                      </ThemedText>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </Card>
           </>
         }
         ListEmptyComponent={
@@ -518,8 +559,8 @@ const MemoriesScreen: React.FC = () => {
             </View>
           </SpotlightTarget>
         }
+        
       />
-      {/* Start the Memories tutorial once per user */}
       <SpotlightAutoStarter uid={user?.uid ?? null} steps={tourSteps} persistKey="memories-first-run" />
     </Screen>
   );
@@ -534,14 +575,7 @@ function withAlpha(hex: string, alpha: number) {
 
 const styles = (t: ThemeTokens) =>
   StyleSheet.create({
-    headerRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      marginBottom: 8,
-    },
-
-    // Segmented tabs (neutral by default, slight lift when active)
+    headerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
     segmented: { flexDirection: 'row', gap: 8, marginBottom: 12 },
     segment: {
       flex: 1,
@@ -562,10 +596,7 @@ const styles = (t: ThemeTokens) =>
       shadowOffset: { width: 0, height: 4 },
       elevation: 3,
     },
-
     rowBetween: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-
-    // Shuffle pill (replaces plain dice)
     shufflePill: {
       flexDirection: 'row',
       alignItems: 'center',
@@ -581,8 +612,6 @@ const styles = (t: ThemeTokens) =>
       shadowOffset: { width: 0, height: 3 },
       elevation: 2,
     },
-
-    // Tags
     tagWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: t.spacing.s },
     tag: {
       paddingHorizontal: 12,
@@ -592,8 +621,6 @@ const styles = (t: ThemeTokens) =>
       borderWidth: 1,
       borderColor: HAIRLINE,
     },
-
-    // Add area
     input: {
       minHeight: 44,
       paddingVertical: t.spacing.s,
@@ -607,8 +634,6 @@ const styles = (t: ThemeTokens) =>
     photoPickRow: { flexDirection: 'row', gap: 8 },
     preview: { width: '100%', height: 200, borderRadius: 12, resizeMode: 'cover' },
     progressRow: { flexDirection: 'row', alignItems: 'center', marginTop: t.spacing.s },
-
-    // Timeline header
     itemHeader: {
       paddingHorizontal: t.spacing.md,
       flexDirection: 'row',
@@ -616,17 +641,21 @@ const styles = (t: ThemeTokens) =>
       justifyContent: 'space-between',
       marginBottom: t.spacing.xs,
     },
-    kindPill: {
-      paddingHorizontal: 10,
-      paddingVertical: 6,
-      borderRadius: 999,
-      backgroundColor: CHIP_BG,
+    kindPill: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: CHIP_BG, borderWidth: 1, borderColor: HAIRLINE },
+    empty: { paddingVertical: t.spacing.lg, alignItems: 'center' },
+    goalDoneBox: {
+      paddingVertical: 10,
+      paddingHorizontal: 12,
+      borderRadius: 12,
+      backgroundColor: '#FFFFFF',
       borderWidth: 1,
       borderColor: HAIRLINE,
+      shadowColor: 'rgba(16,24,40,0.06)',
+      shadowOpacity: 1,
+      shadowRadius: 6,
+      shadowOffset: { width: 0, height: 3 },
+      elevation: 2,
     },
-
-    // Empty state
-    empty: { paddingVertical: t.spacing.lg, alignItems: 'center' },
   });
 
 export default MemoriesScreen;

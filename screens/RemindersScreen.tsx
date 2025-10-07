@@ -1,3 +1,4 @@
+// screens/RemindersScreen.tsx
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import * as Notifications from 'expo-notifications';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -34,14 +35,10 @@ import {
 
 type SavedReq = Notifications.NotificationRequest;
 
-// Helpers to classify notifications (keeps Saved reminders focused on yearly/date items)
+// classification helpers
 const GENTLE_KIND = 'lp:nudge';
 function isGentleNudge(req: SavedReq): boolean {
-  try {
-    return (req?.content as any)?.data?.kind === GENTLE_KIND;
-  } catch {
-    return false;
-  }
+  try { return (req?.content as any)?.data?.kind === GENTLE_KIND; } catch { return false; }
 }
 function getTriggerType(trigger: any): 'calendar' | 'date' | 'timeInterval' | 'unknown' {
   try {
@@ -52,43 +49,145 @@ function getTriggerType(trigger: any): 'calendar' | 'date' | 'timeInterval' | 'u
     const t = (trigger as any).type ?? (
       (trigger as any).dateComponents ? CAL :
       (trigger as any).date ? DATE :
-      'unknown'
+      (typeof (trigger as any).seconds === 'number' ? INT : 'unknown')
     );
     if (t === CAL || t === 'calendar') return 'calendar';
     if (t === DATE || t === 'date') return 'date';
     if (t === INT || t === 'timeInterval') return 'timeInterval';
     return 'unknown';
-  } catch {
-    return 'unknown';
-  }
+  } catch { return 'unknown'; }
 }
 
-// ---- Spotlight tutorial (Reminders)
+// spotlight tour
 const REMINDERS_TOUR_STEPS: SpotlightStep[] = [
-  {
-    id: 'rem-welcome',
-    targetId: null,
-    title: 'Reminders',
-    text: "Set yearly dates and we'll handle the nudges for you.",
-    placement: 'bottom',
-    allowBackdropTapToNext: true,
-  },
+  { id: 'rem-welcome', targetId: null, title: 'Reminders', text: "Set yearly dates and we'll handle the nudges for you.", placement: 'bottom', allowBackdropTapToNext: true },
   { id: 'rem-title',  targetId: 'rem-title',  title: 'Title', text: 'Pick a title or use a preset.' },
   { id: 'rem-date',   targetId: 'rem-date',   title: 'Date',  text: 'Choose the day and month.' },
   { id: 'rem-time',   targetId: 'rem-time',   title: 'Time',  text: 'Pick when the reminder should appear.' },
-  {
-    id: 'rem-toggle',
-    targetId: 'rem-toggle',
-    title: 'For both',
-    text: 'Switch this on to also add the reminder to your partner’s screen.',
-    placement: 'top',
-  },
+  { id: 'rem-toggle', targetId: 'rem-toggle', title: 'For both', text: 'Switch this on to also add the reminder to your partner’s screen.', placement: 'top' },
   { id: 'rem-inbox',  targetId: 'rem-inbox',  title: 'Inbox', text: 'See pending partner items and your upcoming reminders here.' },
 ];
 
-// Neutral porcelain tones
+// palette
 const HAIRLINE = '#F0E6EF';
 const CHIP_BG = '#F3EEF6';
+
+// rgba helper (keeps your theme behavior)
+function withAlpha(hex: string, alpha: number) {
+  const h = hex.replace('#', '');
+  const full = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
+  const r = parseInt(full.slice(0, 2), 16);
+  const g = parseInt(full.slice(2, 4), 16);
+  const b = parseInt(full.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+// hide “Make their day” from Saved
+function isMakeTheirDay(req: SavedReq): boolean {
+  try {
+    const title = String(req?.content?.title ?? '');
+    const body  = String(req?.content?.body ?? '');
+    const kind  = (req?.content as any)?.data?.kind;
+    if (/make\s+their\s+day/i.test(title) || /make\s+their\s+day/i.test(body)) return true;
+    if (kind === 'lp:mtday' || kind === 'lp:suggest') return true;
+  } catch {}
+  return false;
+}
+
+// only real yearly calendar (iOS)
+function isYearlyCalendarTrigger(trigger: any): boolean {
+  try {
+    const ttype = getTriggerType(trigger);
+    if (ttype !== 'calendar') return false;
+    const comps = (trigger as any).dateComponents && typeof (trigger as any).dateComponents === 'object'
+      ? (trigger as any).dateComponents
+      : trigger;
+    const hasMonth   = Number.isFinite(comps?.month);
+    const hasDay     = Number.isFinite(comps?.day);
+    const hasWeekday = Number.isFinite(comps?.weekday);
+    return hasMonth && hasDay && !hasWeekday;
+  } catch { return false; }
+}
+
+// ---------- Android scheduling helpers ----------
+const ANDROID_CHANNEL_ID = 'reminders';
+const DAY = 24 * 60 * 60 * 1000;
+
+function nextOccurrence(month1to12: number, day: number, hour: number, minute: number) {
+  const now = new Date();
+  const year = now.getFullYear();
+  let candidate = new Date(year, month1to12 - 1, day, hour, minute, 0, 0);
+  if (candidate.getTime() <= now.getTime()) {
+    candidate = new Date(year + 1, month1to12 - 1, day, hour, minute, 0, 0);
+  }
+  return candidate;
+}
+
+// Cancel previous anniversary schedules so we don't stack/duplicate
+async function cancelExistingAnniversarySchedules() {
+  try {
+    const items = await Notifications.getAllScheduledNotificationsAsync();
+    const toCancel = items.filter((it) => {
+      const kind = (it?.content as any)?.data?.kind;
+      return typeof kind === 'string' && kind.startsWith('lp:anniv:');
+    });
+    await Promise.allSettled(
+      toCancel.map((n) => Notifications.cancelScheduledNotificationAsync(n.identifier))
+    );
+  } catch {}
+}
+
+// ANDROID: correct Date trigger (no extra fields on trigger), ensure > 65s in the future
+async function scheduleAndroidDate(
+  content: Notifications.NotificationContentInput,
+  when: Date
+) {
+  let target = when.getTime();
+  const now = Date.now();
+  if (target - now < 65_000) target = now + 65_000; // avoid “fire now”
+
+  const id = await Notifications.scheduleNotificationAsync({
+    content,
+    trigger: {
+      date: new Date(target),
+      channelId: ANDROID_CHANNEL_ID,
+    } as Notifications.DateTriggerInput,
+  });
+  return id;
+}
+
+async function scheduleAndroidYearlyTriplet(params: {
+  title: string;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+}) {
+  const { title, month, day, hour, minute } = params;
+
+  const now = new Date();
+  const dueAt = nextOccurrence(month, day, hour, minute);
+  const nextYearSame = new Date(dueAt.getFullYear() + 1, month - 1, day, hour, minute, 0, 0);
+
+  const d1 = new Date(dueAt.getTime() - DAY);
+  const d7 = new Date(dueAt.getTime() - 7 * DAY);
+
+  const d1Final = d1 > now ? d1 : new Date(nextYearSame.getTime() - DAY);
+  const d7Final = d7 > now ? d7 : new Date(nextYearSame.getTime() - 7 * DAY);
+
+  await scheduleAndroidDate(
+    { title, body: `It's today! 💞 Did you plan something?`, data: { kind: 'lp:anniv:today' } },
+    dueAt
+  );
+  await scheduleAndroidDate(
+    { title, body: `Tomorrow is your ${title}. A tiny plan goes a long way ✨`, data: { kind: 'lp:anniv:d1' } },
+    d1Final
+  );
+  await scheduleAndroidDate(
+    { title, body: `One week until your ${title}! Want ideas?`, data: { kind: 'lp:anniv:d7' } },
+    d7Final
+  );
+}
 
 const RemindersScreen: React.FC = () => {
   const t = useTokens();
@@ -96,7 +195,7 @@ const RemindersScreen: React.FC = () => {
   const navigation = useNavigation<any>();
   const { user } = useAuthListener();
 
-  // --- Spotlight scroll helpers ---
+  // spotlight helpers
   const scrollRef = React.useRef<ScrollView>(null);
   const toggleRef = React.useRef<any>(null);
   const saveRef = React.useRef<any>(null);
@@ -122,10 +221,7 @@ const RemindersScreen: React.FC = () => {
 
   useEffect(() => {
     if (!currentStepId) return;
-    const map: Record<string, React.RefObject<View>> = {
-      'rem-toggle': toggleRef,
-      'rem-save': saveRef,
-    };
+    const map: Record<string, React.RefObject<View>> = { 'rem-toggle': toggleRef, 'rem-save': saveRef };
     const r = map[currentStepId];
     if (r) setTimeout(() => ensureVisible(r), 50);
   }, [currentStepId]);
@@ -161,6 +257,18 @@ const RemindersScreen: React.FC = () => {
 
   const canCreateForBoth = useMemo(() => !!partnerUid && !!pairId, [partnerUid, pairId]);
 
+  // Android: make sure channel exists
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    Notifications.setNotificationChannelAsync(ANDROID_CHANNEL_ID, {
+      name: 'Reminders',
+      importance: Notifications.AndroidImportance.DEFAULT,
+      sound: 'default',
+      vibrationPattern: [0, 250, 250, 250],
+      lightColor: '#FF231F7C',
+    }).catch(() => {});
+  }, []);
+
   const dateLabel = dateOnly
     ? dateOnly.toLocaleDateString(undefined, { day: 'numeric', month: 'long' })
     : 'Select date…';
@@ -169,15 +277,6 @@ const RemindersScreen: React.FC = () => {
   function ensureHasDefaults() {
     if (!dateOnly) setDateOnly(new Date());
     if (!timeOnly) setTimeOnly(new Date(2000, 0, 1, 9, 0));
-  }
-
-  function nextOccurrence(month1to12: number, day: number, hour: number, minute: number) {
-    const now = new Date();
-    const year = now.getFullYear();
-    let candidate = new Date(year, month1to12 - 1, day, hour, minute, 0, 0);
-    if (candidate.getTime() <= now.getTime())
-      candidate = new Date(year + 1, month1to12 - 1, day, hour, minute, 0, 0);
-    return candidate;
   }
 
   const loadScheduled = useCallback(async () => {
@@ -201,55 +300,48 @@ const RemindersScreen: React.FC = () => {
   useEffect(() => { loadScheduled(); }, [loadScheduled]);
   useFocusEffect(useCallback(() => { loadScheduled(); }, [loadScheduled]));
 
-  // Only show non-nudge calendar/date entries, hide 1-day/1-week warnings, and de-duplicate
   const visibleScheduled = useMemo((): SavedReq[] => {
     const unique = new Map<string, SavedReq>();
     for (const req of scheduled) {
       if (isGentleNudge(req)) continue;
-      const ttype = getTriggerType((req as any).trigger);
-      if (ttype === 'timeInterval') continue;
+      if (isMakeTheirDay(req)) continue;
 
-      const body = (req.content?.body ?? '') as string;
-      if (/one week/i.test(body) || /tomorrow/i.test(body)) continue;
+      const trig = (req as any).trigger;
+      const ttype = getTriggerType(trig);
 
-      const key = `${req.content?.title ?? ''}||${triggerToText((req as any).trigger)}`;
+      // iOS: keep only true yearly calendar (month+day); Android: date/timeInterval are fine
+      if (ttype === 'calendar' && !isYearlyCalendarTrigger(trig)) continue;
+
+      const key = `${req.content?.title ?? ''}||${triggerToText(trig)}||${(req.content as any)?.data?.kind ?? ''}`;
       if (!unique.has(key)) unique.set(key, req);
     }
     return Array.from(unique.values());
   }, [scheduled]);
 
-  // Defensive shape handling for Expo notifications trigger (never throws)
   function triggerToText(trigger: any): string {
     try {
       if (!trigger) return 'Scheduled';
-
       const CAL  = Notifications.SchedulableTriggerInputTypes?.CALENDAR ?? 'calendar';
       const DATE = Notifications.SchedulableTriggerInputTypes?.DATE ?? 'date';
       const INT  = Notifications.SchedulableTriggerInputTypes?.TIME_INTERVAL ?? 'timeInterval';
-
       const t = (trigger as any).type ?? (
         (trigger as any).dateComponents ? CAL :
         (trigger as any).date ? DATE :
-        undefined
+        (typeof (trigger as any).seconds === 'number' ? INT : undefined)
       );
 
       if (t === CAL || t === 'calendar') {
         const comps = (trigger as any).dateComponents && typeof (trigger as any).dateComponents === 'object'
           ? (trigger as any).dateComponents
           : trigger;
-
         const month  = Number.isFinite(comps?.month)  ? comps.month  : 1;
         const day    = Number.isFinite(comps?.day)    ? comps.day    : 1;
         const hour   = Number.isFinite(comps?.hour)   ? comps.hour   : 0;
         const minute = Number.isFinite(comps?.minute) ? comps.minute : 0;
-
         const when = new Date(2000, month - 1, day, hour, minute, 0, 0);
         let md = '';
-        try {
-          md = when.toLocaleDateString([], { month: 'long', day: 'numeric' });
-        } catch {
-          md = `${month}/${day}`;
-        }
+        try { md = when.toLocaleDateString([], { month: 'long', day: 'numeric' }); }
+        catch { md = `${month}/${day}`; }
         const hm = formatLocalTime(when);
         return `${md} • ${hm} • yearly`;
       }
@@ -259,11 +351,8 @@ const RemindersScreen: React.FC = () => {
         const d = raw ? new Date(raw) : null;
         if (d && !isNaN(d.getTime())) {
           let dd = '';
-          try {
-            dd = d.toLocaleDateString();
-          } catch {
-            dd = `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
-          }
+          try { dd = d.toLocaleDateString(); }
+          catch { dd = `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`; }
           return `${dd} • ${formatLocalTime(d)}`;
         }
         return 'Scheduled date';
@@ -271,14 +360,18 @@ const RemindersScreen: React.FC = () => {
 
       if (t === INT || t === 'timeInterval') {
         const secs = Number((trigger as any).seconds ?? 0);
-        const mins = secs ? Math.round(secs / 60) : 0;
-        return mins ? `in ${mins} min${mins === 1 ? '' : 's'}` : 'Time interval';
+        if (secs > 0) {
+          const when = new Date(Date.now() + secs * 1000);
+          let dd = '';
+          try { dd = when.toLocaleDateString([], { month: 'long', day: 'numeric' }); }
+          catch { dd = `${when.getMonth() + 1}/${when.getDate()}/${when.getFullYear()}`; }
+          return `${dd} • ${formatLocalTime(when)}`;
+        }
+        return 'Scheduled';
       }
 
       return 'Scheduled';
-    } catch {
-      return 'Scheduled';
-    }
+    } catch { return 'Scheduled'; }
   }
 
   async function onCancel(id: string) {
@@ -295,11 +388,18 @@ const RemindersScreen: React.FC = () => {
 
     const granted = await ensureNotificationPermission();
     if (!granted) {
-      Alert.alert(
-        'Enable notifications',
-        'Notifications are disabled for this app. Please enable them in Settings to schedule reminders.'
-      );
+      Alert.alert('Enable notifications', 'Notifications are disabled for this app. Please enable them in Settings to schedule reminders.');
       return;
+    }
+
+    if (Platform.OS === 'android') {
+      await Notifications.setNotificationChannelAsync(ANDROID_CHANNEL_ID, {
+        name: 'Reminders',
+        importance: Notifications.AndroidImportance.DEFAULT,
+        sound: 'default',
+        vibrationPattern: [0, 250, 250, 250],
+        lightColor: '#FF231F7C',
+      }).catch(() => {});
     }
 
     setSaving(true);
@@ -309,35 +409,20 @@ const RemindersScreen: React.FC = () => {
       const hour = timeOnly.getHours();
       const minute = timeOnly.getMinutes();
 
-      // Always schedule all three
-      await scheduleYearlyNotification({
-        title,
-        body: `It's today! 💞 Did you plan something?`,
-        month: baseMonth,
-        day: baseDay,
-        hour,
-        minute,
-      });
+      // avoid duplicates/bursts
+      await cancelExistingAnniversarySchedules();
 
-      const d1 = new Date(new Date(2000, baseMonth - 1, baseDay).getTime() - 24 * 60 * 60 * 1000);
-      await scheduleYearlyNotification({
-        title,
-        body: `Tomorrow is your ${title}. A tiny plan goes a long way ✨`,
-        month: d1.getMonth() + 1,
-        day: d1.getDate(),
-        hour,
-        minute,
-      });
-
-      const d7 = new Date(new Date(2000, baseMonth - 1, baseDay).getTime() - 7 * 24 * 60 * 60 * 1000);
-      await scheduleYearlyNotification({
-        title,
-        body: `One week until your ${title}! Want ideas?`,
-        month: d7.getMonth() + 1,
-        day: d7.getDate(),
-        hour,
-        minute,
-      });
+      if (Platform.OS === 'android') {
+        // schedule 3 separate date alarms (future-proofed)
+        await scheduleAndroidYearlyTriplet({ title, month: baseMonth, day: baseDay, hour, minute });
+      } else {
+        // iOS: true yearly calendar repeats
+        await scheduleYearlyNotification({ title, body: `It's today! 💞 Did you plan something?`, month: baseMonth, day: baseDay, hour, minute });
+        const d1 = new Date(new Date(2000, baseMonth - 1, baseDay).getTime() - DAY);
+        await scheduleYearlyNotification({ title, body: `Tomorrow is your ${title}. A tiny plan goes a long way ✨`, month: d1.getMonth() + 1, day: d1.getDate(), hour, minute });
+        const d7 = new Date(new Date(2000, baseMonth - 1, baseDay).getTime() - 7 * DAY);
+        await scheduleYearlyNotification({ title, body: `One week until your ${title}! Want ideas?`, month: d7.getMonth() + 1, day: d7.getDate(), hour, minute });
+      }
 
       if (forBoth && canCreateForBoth && partnerUid) {
         const dueAt = nextOccurrence(baseMonth, baseDay, hour, minute);
@@ -346,7 +431,9 @@ const RemindersScreen: React.FC = () => {
 
       setBanner('Reminders saved ✨');
       setTimeout(() => setBanner(null), 1800);
-      await loadScheduled();
+
+      // allow Android to register before reading back
+      setTimeout(() => { loadScheduled(); }, 2000);
     } catch (e: any) {
       Alert.alert('Could not schedule', e?.message ?? 'Please try again.');
     } finally {
@@ -371,15 +458,11 @@ const RemindersScreen: React.FC = () => {
         scrollEventThrottle={16}
         contentContainerStyle={{ paddingBottom: 32 }}
       >
-        {/* Title row + outline inbox button with badge */}
+        {/* header */}
         <View style={s.headerRow}>
           <ThemedText variant="display">Anniversary</ThemedText>
           <SpotlightTarget id="rem-inbox">
-            <Button
-              label={badge ? `Inbox  ${badge}` : 'Inbox'}
-              variant="outline"
-              onPress={openInbox}
-            />
+            <Button label={badge ? `Inbox  ${badge}` : 'Inbox'} variant="outline" onPress={openInbox} />
           </SpotlightTarget>
         </View>
 
@@ -387,7 +470,7 @@ const RemindersScreen: React.FC = () => {
           Yearly reminders—set once, we’ll take care of the nudges.
         </ThemedText>
 
-        {/* Title + quick presets */}
+        {/* title + presets */}
         <Card>
           <ThemedText variant="h2" style={{ marginBottom: t.spacing.s }}>Title</ThemedText>
           <SpotlightTarget id="rem-title">
@@ -409,40 +492,26 @@ const RemindersScreen: React.FC = () => {
           </View>
         </Card>
 
-        {/* Date / Time + summary right below Time + partner toggle; Save at bottom */}
+        {/* date/time + toggle + save */}
         <Card style={{ marginTop: t.spacing.md }}>
           <ThemedText variant="h2">Date</ThemedText>
           <SpotlightTarget id="rem-date">
-            <Pressable
-              onPress={() => { ensureHasDefaults(); setShowDatePicker(true); }}
-              style={s.input}
-              accessibilityRole="button"
-            >
-              <ThemedText variant="body" color={dateOnly ? t.colors.text : t.colors.textDim}>
-                {dateLabel}
-              </ThemedText>
+            <Pressable onPress={() => { ensureHasDefaults(); setShowDatePicker(true); }} style={s.input} accessibilityRole="button">
+              <ThemedText variant="body" color={dateOnly ? t.colors.text : t.colors.textDim}>{dateLabel}</ThemedText>
             </Pressable>
           </SpotlightTarget>
 
           <ThemedText variant="h2" style={{ marginTop: t.spacing.md }}>Time</ThemedText>
           <SpotlightTarget id="rem-time">
-            <Pressable
-              onPress={() => { ensureHasDefaults(); setShowTimePicker(true); }}
-              style={s.input}
-              accessibilityRole="button"
-            >
-              <ThemedText variant="body" color={timeOnly ? t.colors.text : t.colors.textDim}>
-                {timeLabel}
-              </ThemedText>
+            <Pressable onPress={() => { ensureHasDefaults(); setShowTimePicker(true); }} style={s.input} accessibilityRole="button">
+              <ThemedText variant="body" color={timeOnly ? t.colors.text : t.colors.textDim}>{timeLabel}</ThemedText>
             </Pressable>
           </SpotlightTarget>
 
-          {/* Summary */}
           <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: t.spacing.s }}>
             {fixedSummary}
           </ThemedText>
 
-          {/* Toggle */}
           <View ref={toggleRef}>
             <SpotlightTarget id="rem-toggle">
               <View style={[s.toggleRow, { marginTop: t.spacing.md }]}>
@@ -451,8 +520,9 @@ const RemindersScreen: React.FC = () => {
                   value={forBoth}
                   onValueChange={setForBoth}
                   disabled={!canCreateForBoth}
-                  trackColor={{ true: '#FF9FBE', false: '#D1D5DB' }}
-                  thumbColor={forBoth ? t.colors.primary : '#f4f3f4'}
+                  trackColor={{ false: withAlpha(t.colors.text, 0.15), true: withAlpha(t.colors.primary, 0.4) }}
+                  thumbColor={Platform.OS === 'android' ? (forBoth ? t.colors.primary : '#f4f3f4') : undefined}
+                  ios_backgroundColor={withAlpha(t.colors.text, 0.15)}
                 />
               </View>
             </SpotlightTarget>
@@ -469,21 +539,15 @@ const RemindersScreen: React.FC = () => {
           </View>
         </Card>
 
-        {/* Saved reminders */}
+        {/* saved reminders */}
         <Card style={{ marginTop: t.spacing.md }}>
           <View style={s.savedHeader}>
             <ThemedText variant="h2">Saved reminders</ThemedText>
-            <Button
-              label={loadingScheduled ? 'Loading…' : 'Refresh'}
-              variant="outline"
-              onPress={loadScheduled}
-            />
+            <Button label={loadingScheduled ? 'Loading…' : 'Refresh'} variant="outline" onPress={loadScheduled} />
           </View>
 
           {visibleScheduled.length === 0 ? (
-            <ThemedText variant="caption" color={t.colors.textDim}>
-              No local reminders yet.
-            </ThemedText>
+            <ThemedText variant="caption" color={t.colors.textDim}>No local reminders yet.</ThemedText>
           ) : (
             <View style={{ rowGap: 10 }}>
               {visibleScheduled.map((req) => (
@@ -503,7 +567,7 @@ const RemindersScreen: React.FC = () => {
           )}
         </Card>
 
-        {/* Pickers */}
+        {/* pickers */}
         <DateTimePickerModal
           isVisible={showDatePicker}
           mode="date"
@@ -534,80 +598,20 @@ const RemindersScreen: React.FC = () => {
 
 const styles = (t: ThemeTokens) =>
   StyleSheet.create({
-    headerRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      paddingBottom: t.spacing.s,
-    },
-
+    headerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingBottom: t.spacing.s },
     input: {
-      minHeight: 44,
-      paddingVertical: t.spacing.s,
-      paddingHorizontal: t.spacing.md,
-      backgroundColor: '#FFFFFF',
-      borderRadius: 12,
-      borderWidth: 1,
-      borderColor: HAIRLINE,
-      color: t.colors.text,
-      marginTop: t.spacing.s,
-      justifyContent: 'center',
+      minHeight: 44, paddingVertical: t.spacing.s, paddingHorizontal: t.spacing.md,
+      backgroundColor: '#FFFFFF', borderRadius: 12, borderWidth: 1, borderColor: HAIRLINE,
+      color: t.colors.text, marginTop: t.spacing.s, justifyContent: 'center',
     },
-
-    rowWrap: {
-      flexDirection: 'row',
-      flexWrap: 'wrap',
-      gap: 10,
-      marginTop: t.spacing.s,
-    },
-    pill: {
-      paddingHorizontal: 14,
-      paddingVertical: 10,
-      borderRadius: 999,
-      backgroundColor: CHIP_BG,
-      borderWidth: 1,
-      borderColor: HAIRLINE,
-    },
-
-    rowDivider: {
-      height: StyleSheet.hairlineWidth,
-      backgroundColor: HAIRLINE,
-      marginVertical: t.spacing.md,
-    },
-
-    toggleRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-    },
-
-    savedHeader: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      marginBottom: t.spacing.s,
-    },
-    savedRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 10,
-    },
-    cancelBtn: {
-      paddingHorizontal: 12,
-      paddingVertical: 8,
-      borderRadius: 10,
-      backgroundColor: '#EF4444',
-    },
-
-    toast: {
-      position: 'absolute',
-      left: t.spacing.md,
-      right: t.spacing.md,
-      bottom: t.spacing.xl,
-      backgroundColor: '#111827',
-      padding: t.spacing.md,
-      borderRadius: t.radius.lg,
-    },
+    rowWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: t.spacing.s },
+    pill: { paddingHorizontal: 14, paddingVertical: 10, borderRadius: 999, backgroundColor: CHIP_BG, borderWidth: 1, borderColor: HAIRLINE },
+    rowDivider: { height: StyleSheet.hairlineWidth, backgroundColor: HAIRLINE, marginVertical: t.spacing.md },
+    toggleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+    savedHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: t.spacing.s },
+    savedRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+    cancelBtn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, backgroundColor: '#EF4444' },
+    toast: { position: 'absolute', left: t.spacing.md, right: t.spacing.md, bottom: t.spacing.xl, backgroundColor: '#111827', padding: t.spacing.md, borderRadius: t.radius.lg },
   });
 
 export default RemindersScreen;

@@ -1,5 +1,17 @@
 // utils/rewards.ts
-import { addDoc, collection, deleteDoc, doc, onSnapshot, orderBy, query, serverTimestamp, Unsubscribe, where } from 'firebase/firestore';
+import {
+  addDoc,
+  collection,
+  deleteDoc,
+  doc,
+  DocumentData,
+  onSnapshot,
+  orderBy,
+  query,
+  serverTimestamp,
+  Unsubscribe,
+  where,
+} from 'firebase/firestore';
 import { db } from '../firebaseConfig';
 import { createPointsEntry } from './points';
 
@@ -15,12 +27,28 @@ export type RewardDoc = {
   updatedAt?: any;
 };
 
-export async function addReward(ownerId: string, pairId: string | null, title: string, cost: number) {
+export async function addReward(
+  ownerId: string,
+  pairId: string | null,
+  title: string,
+  cost: number
+) {
   await addDoc(collection(db, 'rewards'), {
-    ownerId, pairId, title, cost, redeemed: false,
+    ownerId,
+    pairId,
+    title,
+    cost,
+    redeemed: false,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
+}
+
+function mapRows(docs: DocumentData[]): RewardDoc[] {
+  return docs.map((d: any) => ({
+    id: d.id,
+    ...(d.data() as Omit<RewardDoc, 'id'>),
+  }));
 }
 
 export function listenRewards(
@@ -28,17 +56,72 @@ export function listenRewards(
   pairId: string | null,
   cb: (items: RewardDoc[]) => void
 ): Unsubscribe {
-  const base = collection(db, 'rewards');
-  const q = pairId
-    ? query(base, where('pairId', '==', pairId), orderBy('createdAt', 'desc'))
-    : query(base, where('ownerId', '==', ownerId), orderBy('createdAt', 'desc'));
+  const col = collection(db, 'rewards');
 
-  return onSnapshot(q, (snap) => {
-    cb(snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<RewardDoc, 'id'>) })));
-  });
+  // Preferred (needs composite index: pairId + createdAt desc)
+  const qWithOrder = pairId
+    ? query(col, where('pairId', '==', pairId), orderBy('createdAt', 'desc'))
+    : query(col, where('ownerId', '==', ownerId), orderBy('createdAt', 'desc'));
+
+  // Fallback without order (we'll sort in JS)
+  const qNoOrder = pairId
+    ? query(col, where('pairId', '==', pairId))
+    : query(col, where('ownerId', '==', ownerId));
+
+  let detach: Unsubscribe = () => {};
+
+  const attachNoOrder = () => {
+    detach = onSnapshot(qNoOrder, (snap) => {
+      const items = mapRows(snap.docs as any).sort((a, b) => {
+        const ta =
+          (a.createdAt?.toMillis?.() as number | undefined) ??
+          (typeof a.createdAt?.seconds === 'number'
+            ? a.createdAt.seconds * 1000
+            : 0);
+        const tb =
+          (b.createdAt?.toMillis?.() as number | undefined) ??
+          (typeof b.createdAt?.seconds === 'number'
+            ? b.createdAt.seconds * 1000
+            : 0);
+        return tb - ta; // newest first
+      });
+      cb(items);
+    });
+  };
+
+  // Try ordered query first
+  detach = onSnapshot(
+    qWithOrder,
+    (snap) => {
+      cb(mapRows(snap.docs as any));
+    },
+    (err: any) => {
+      if (err?.code === 'failed-precondition') {
+        console.warn(
+          'Missing composite index for rewards; using client-side sort fallback.\n',
+          err?.message ?? err
+        );
+        // Switch to fallback listener
+        detach();
+        attachNoOrder();
+      } else {
+        console.error('listenRewards error:', err);
+      }
+    }
+  );
+
+  return () => {
+    try {
+      detach && detach();
+    } catch {}
+  };
 }
 
-export async function redeemReward(ownerId: string, pairId: string | null, reward: RewardDoc) {
+export async function redeemReward(
+  ownerId: string,
+  pairId: string | null,
+  reward: RewardDoc
+) {
   // record a negative points entry
   await createPointsEntry({
     ownerId,
@@ -46,7 +129,7 @@ export async function redeemReward(ownerId: string, pairId: string | null, rewar
     value: -Math.abs(reward.cost),
     reason: `Redeem: ${reward.title}`,
   });
-  // we could also mark redeemed in-place, but keeping it simple for MVP:
-  // delete reward after redeem (optional)
+
+  // optional: delete reward after redeem
   await deleteDoc(doc(db, 'rewards', reward.id));
 }
