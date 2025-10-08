@@ -26,16 +26,17 @@ import { useTokens, type ThemeTokens } from '../components/ThemeProvider';
 
 import {
   addDoc,
+  arrayUnion,
   collection,
   doc,
   getDoc,
   serverTimestamp,
   setDoc,
-  updateDoc,
 } from 'firebase/firestore';
 import { db } from '../firebaseConfig';
 import useAuthListener from '../hooks/useAuthListener';
 import { getPairId, getPartnerUid } from '../utils/partner';
+import { ensureNotificationPermission } from '../utils/reminders';
 
 // 👇 Spotlight imports
 import {
@@ -43,6 +44,8 @@ import {
   SpotlightTarget,
   type SpotlightStep,
 } from '../components/spotlight';
+
+const ANDROID_CHANNEL_ID = 'messages';
 
 const SUGGESTIONS = [
   'Thanks for today 💞',
@@ -61,87 +64,6 @@ function withAlpha(hex: string, alpha: number) {
   return `#${full}${a}`;
 }
 
-/* ---------------------- Push helpers (Expo) ---------------------- */
-
-/** Ask for notif permission, get Expo push token, and store in Firestore. */
-async function registerAndStorePushToken(userId: string): Promise<string | null> {
-  try {
-    // Permissions (Android 13+ also needs POST_NOTIFICATIONS)
-    const { status: existing } = await Notifications.getPermissionsAsync();
-    let finalStatus = existing;
-    if (existing !== 'granted') {
-      const { status } = await Notifications.requestPermissionsAsync();
-      finalStatus = status;
-    }
-    if (finalStatus !== 'granted') return null;
-
-    // Get Expo token (works in EAS builds with projectId)
-    const projectId =
-      (Constants?.expoConfig as any)?.extra?.eas?.projectId ??
-      (Constants as any)?.easConfig?.projectId ??
-      undefined;
-
-    const tokenResp = await Notifications.getExpoPushTokenAsync(
-      projectId ? { projectId } : undefined
-    );
-    const token = tokenResp.data;
-
-    if (!token) return null;
-
-    // Save on users/{uid}
-    const uref = doc(db, 'users', userId);
-    const snap = await getDoc(uref);
-
-    if (!snap.exists()) {
-      await setDoc(uref, { expoPushToken: token, pushTokens: [token], pushUpdatedAt: serverTimestamp() }, { merge: true });
-    } else {
-      const cur = snap.data() || {};
-      const list: string[] = Array.isArray(cur.pushTokens) ? cur.pushTokens : [];
-      if (!list.includes(token)) list.push(token);
-      await updateDoc(uref, { expoPushToken: token, pushTokens: list, pushUpdatedAt: serverTimestamp() });
-    }
-    return token;
-  } catch {
-    return null;
-  }
-}
-
-/** Read a user's saved push token(s). Supports `expoPushToken` and/or `pushTokens` array. */
-async function getUserPushTokens(uid: string): Promise<string[]> {
-  try {
-    const snap = await getDoc(doc(db, 'users', uid));
-    if (!snap.exists()) return [];
-    const data = snap.data() || {};
-    const one = typeof data.expoPushToken === 'string' ? [data.expoPushToken] : [];
-    const many = Array.isArray(data.pushTokens) ? data.pushTokens.filter((x: any) => typeof x === 'string') : [];
-    const uniq = Array.from(new Set([...one, ...many]));
-    // Expo tokens start with "ExponentPushToken[" — filter if needed
-    return uniq.filter(t => typeof t === 'string' && t.length > 20);
-  } catch {
-    return [];
-  }
-}
-
-/** Send a push via Expo's API. (Client-side for simplicity.) */
-async function sendExpoPush(toTokens: string[], title: string, body: string, data?: any) {
-  if (!toTokens.length) return;
-  // Send in small batches (Expo allows arrays but we keep it simple/robust)
-  const messages = toTokens.map((to) => ({
-    to,
-    sound: 'default',
-    title,
-    body,
-    data,
-  }));
-  await fetch('https://exp.host/--/api/v2/push/send', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify(messages),
-  }).catch(() => {});
-}
-
-/* ---------------------------------------------------------------- */
-
 const LoveNotesScreen: React.FC = () => {
   const nav = useNavigation<any>();
   const insets = useSafeAreaInsets();
@@ -150,32 +72,95 @@ const LoveNotesScreen: React.FC = () => {
 
   const { user } = useAuthListener();
   const [pairId, setPairId] = useState<string | null>(null);
-  const [partnerUid, setPartnerUidState] = useState<string | null>(null);
   const [text, setText] = useState('');
   const inputRef = useRef<any>(null);
 
-  // Link state + partner uid
+  // --- Push setup (one-time per device) ---
+  useEffect(() => {
+    // Banner/list handler (replaces deprecated shouldShowAlert)
+    Notifications.setNotificationHandler({
+      handleNotification: async () => ({
+        shouldPlaySound: true,
+        shouldSetBadge: false,
+        shouldShowBanner: true,
+        shouldShowList: true,
+      }) as any,
+    });
+  }, []);
+
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    Notifications.setNotificationChannelAsync(ANDROID_CHANNEL_ID, {
+      name: 'Messages',
+      importance: Notifications.AndroidImportance.DEFAULT,
+      sound: 'default',
+      vibrationPattern: [0, 250, 250, 250],
+      lightColor: '#FF231F7C',
+    }).catch(() => {});
+  }, []);
+
+  // Register device for push and store token on user's doc
   useEffect(() => {
     (async () => {
       if (!user) return;
-      const pid = await getPairId(user.uid);
-      setPairId(pid ?? null);
-      if (pid) {
-        const puid = await getPartnerUid(user.uid);
-        setPartnerUidState(puid ?? null);
-      } else {
-        setPartnerUidState(null);
-      }
+      const granted = await ensureNotificationPermission();
+      if (!granted) return;
+
+      const projectId =
+        (Constants as any)?.expoConfig?.extra?.eas?.projectId ??
+        (Constants as any)?.easConfig?.projectId;
+
+      // Get Expo push token (requires EAS projectId in app.json)
+      const tokenResp = await Notifications.getExpoPushTokenAsync({ projectId });
+      const token = tokenResp.data;
+
+      // Save token (array so users can have multiple devices)
+      const userRef = doc(db, 'users', user.uid);
+      await setDoc(
+        userRef,
+        { expoPushTokens: arrayUnion(token) },
+        { merge: true }
+      );
+    })().catch(() => {});
+  }, [user]);
+
+  // ---- Pairing / state ----
+  useEffect(() => {
+    (async () => {
+      if (!user) return;
+      setPairId(await getPairId(user.uid));
     })();
   }, [user]);
 
-  // Ensure *this* device has a stored push token
-  useEffect(() => {
-    (async () => {
-      if (!user) return;
-      await registerAndStorePushToken(user.uid);
-    })();
-  }, [user]);
+  // Send Expo push to partner (client-side call to Expo push API)
+  async function sendPushToPartner(partnerUid: string, bodyText: string, noteId?: string) {
+    try {
+      const partnerRef = doc(db, 'users', partnerUid);
+      const snap = await getDoc(partnerRef);
+      const tokens: string[] = (snap.exists() && Array.isArray(snap.data()?.expoPushTokens))
+        ? snap.data()?.expoPushTokens
+        : [];
+
+      if (!tokens.length) return; // partner not registered for push yet
+
+      const messages = tokens.map((to) => ({
+        to,
+        sound: 'default',
+        title: 'New love note 💌',
+        body: bodyText,
+        data: { kind: 'lp:loveNote', noteId, fromUid: user?.uid ?? null, pairId },
+        channelId: ANDROID_CHANNEL_ID,
+      }));
+
+      await fetch('https://exp.host/--/api/v2/push/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(messages),
+      });
+    } catch {
+      // swallow; push delivery best-effort
+    }
+  }
 
   async function sendNote() {
     if (!user) return;
@@ -189,8 +174,8 @@ const LoveNotesScreen: React.FC = () => {
       return;
     }
     try {
-      // Save in Firestore
-      await addDoc(collection(db, 'notes'), {
+      // Create the note
+      const ref = await addDoc(collection(db, 'notes'), {
         ownerId: user.uid,
         pairId,
         text: tText,
@@ -198,15 +183,10 @@ const LoveNotesScreen: React.FC = () => {
         updatedAt: serverTimestamp(),
       });
 
-      // Fire a push to partner (if we have their token)
+      // Look up partner and push
+      const partnerUid = await getPartnerUid(user.uid);
       if (partnerUid) {
-        const tokens = await getUserPushTokens(partnerUid);
-        const preview = tText.length > 120 ? `${tText.slice(0, 117)}…` : tText;
-        await sendExpoPush(tokens, 'Love note 💌', preview, {
-          kind: 'love_note',
-          fromUid: user.uid,
-          pairId,
-        });
+        await sendPushToPartner(partnerUid, tText, ref.id);
       }
 
       setText('');
@@ -432,6 +412,7 @@ const styles = (t: ThemeTokens) =>
       marginTop: t.spacing.md,
     },
 
+    // theme-safe neutral chip
     suggestChip: {
       paddingHorizontal: t.spacing.md,
       paddingVertical: 10,

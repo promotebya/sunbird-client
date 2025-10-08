@@ -1,5 +1,6 @@
 // App.tsx
 import { NavigationContainer } from '@react-navigation/native';
+import Constants from 'expo-constants';
 import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
 import { useEffect } from 'react';
@@ -14,19 +15,11 @@ import usePartnerReminderListener from './hooks/usePartnerReminderListener';
 import AppNavigator from './navigation/AppNavigator';
 import AuthNavigator from './navigation/AuthNavigator';
 
-// Show alerts when a notification fires in foreground
-Notifications.setNotificationHandler({
-  handleNotification: async (): Promise<Notifications.NotificationBehavior> => ({
-    shouldShowAlert: true,
-    shouldPlaySound: false,
-    shouldSetBadge: false,
-    // iOS-only fields (Expo SDK 50+ typings require them)
-    shouldShowBanner: true,
-    shouldShowList: true,
-  }),
-});
+// Firestore (to save Expo push tokens)
+import { arrayUnion, doc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { db } from './firebaseConfig';
 
-// --- prompts (about 30) ---
+// ---------- Helpers for “Make their day” nudges ----------
 const NUDGE_PROMPTS: string[] = [
   "What made you smile about your partner today? Tell them!",
   "Send a quick text: three things you love about them.",
@@ -60,11 +53,9 @@ const NUDGE_PROMPTS: string[] = [
   "Text a quick pep talk—they deserve it!",
 ];
 
-// Random helpers
 const randInt = (min: number, max: number) =>
   Math.floor(Math.random() * (max - min + 1)) + min;
 
-/** Monday of the week containing 'd' (local time) */
 function startOfWeekMonday(d = new Date()) {
   const copy = new Date(d);
   const day = copy.getDay(); // 0..6 (Sun..Sat)
@@ -74,7 +65,6 @@ function startOfWeekMonday(d = new Date()) {
   return copy;
 }
 
-/** Build a set of Date triggers: 3–4 per week between 9:00–21:00, for up to ~12 weeks */
 function makeRandomWeeklyTriggers(targetCount: number): Date[] {
   const out: Date[] = [];
   const used = new Set<number>();
@@ -111,6 +101,42 @@ function makeRandomWeeklyTriggers(targetCount: number): Date[] {
   return out.sort((a, b) => a.getTime() - b.getTime());
 }
 
+/** Register + save Expo push token on the user's Firestore doc */
+async function registerAndSaveExpoPushToken(uid: string) {
+  try {
+    if (!uid) return null;
+
+    const { status } = await Notifications.getPermissionsAsync();
+    const granted =
+      status === 'granted'
+        ? true
+        : (await Notifications.requestPermissionsAsync()).status === 'granted';
+    if (!granted) return null;
+
+    // Important: projectId must match app.json -> extra.eas.projectId
+    const projectId =
+      (Constants as any)?.expoConfig?.extra?.eas?.projectId ??
+      (Constants as any)?.easConfig?.projectId;
+
+    const token = (await Notifications.getExpoPushTokenAsync({ projectId })).data;
+
+    // Save into an array so a user can have multiple devices
+    const userRef = doc(db, 'users', uid);
+    await setDoc(
+      userRef,
+      {
+        expoPushTokens: arrayUnion(token),
+        lastPushTokenAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+    return token;
+  } catch {
+    return null;
+  }
+}
+
 /** Schedules/tops-up local “kindness nudge” notifications */
 function useKindnessNudgesScheduler(userId: string | null | undefined) {
   useEffect(() => {
@@ -125,10 +151,14 @@ function useKindnessNudgesScheduler(userId: string | null | undefined) {
       }
 
       if (Platform.OS === 'android') {
+        // Ensure a default channel exists
         await Notifications.setNotificationChannelAsync('default', {
           name: 'Kindness nudges',
           importance: Notifications.AndroidImportance.DEFAULT,
-        });
+          sound: 'default',
+          vibrationPattern: [0, 250, 250, 250],
+          lightColor: '#FF231F7C',
+        }).catch(() => {});
       }
 
       const TARGET = 48; // ~12 weeks @ 4/wk
@@ -142,8 +172,13 @@ function useKindnessNudgesScheduler(userId: string | null | undefined) {
       for (const when of times) {
         const prompt = NUDGE_PROMPTS[randInt(0, NUDGE_PROMPTS.length - 1)];
         await Notifications.scheduleNotificationAsync({
-          content: { title: 'Make their day 💖', body: prompt, sound: false },
-          trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: when },
+          content: { title: 'Make their day 💖', body: prompt, sound: false, data: { kind: 'lp:mtday' } },
+          trigger: {
+            type: Notifications.SchedulableTriggerInputTypes.DATE,
+            date: when,
+            // 👇 Tag a channel for Android reliability
+            ...(Platform.OS === 'android' ? { channelId: 'default' } : null),
+          } as any,
         });
         if (cancelled) return;
       }
@@ -157,16 +192,55 @@ function useKindnessNudgesScheduler(userId: string | null | undefined) {
 export default function App() {
   const { user } = useAuthListener();
 
+  // Global notifications handler (modern fields: banner/list)
+  useEffect(() => {
+    Notifications.setNotificationHandler({
+      handleNotification: async () => ({
+        shouldPlaySound: true,
+        shouldSetBadge: false,
+        shouldShowBanner: true,
+        shouldShowList: true,
+      }) as any,
+    });
+  }, []);
+
+  // Ensure common Android channels exist up front
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    (async () => {
+      await Notifications.setNotificationChannelAsync('default', {
+        name: 'General',
+        importance: Notifications.AndroidImportance.DEFAULT,
+        sound: 'default',
+        vibrationPattern: [0, 200, 200, 200],
+        lightColor: '#FF231F7C',
+      }).catch(() => {});
+      await Notifications.setNotificationChannelAsync('reminders', {
+        name: 'Reminders',
+        importance: Notifications.AndroidImportance.DEFAULT,
+        sound: 'default',
+      }).catch(() => {});
+      await Notifications.setNotificationChannelAsync('messages', {
+        name: 'Messages',
+        importance: Notifications.AndroidImportance.DEFAULT,
+        sound: 'default',
+      }).catch(() => {});
+    })();
+  }, []);
+
+  // Save Expo push token whenever a user logs in (or changes)
+  useEffect(() => {
+    if (user?.uid) registerAndSaveExpoPushToken(user.uid);
+  }, [user?.uid]);
+
+  // Existing listeners/hooks
   usePartnerReminderListener(user?.uid ?? null);
   useKindnessNudgesScheduler(user?.uid ?? null);
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      {/* ⬇️ SafeAreaProvider wraps the whole tree so Spotlight can read insets on Android */}
       <SafeAreaProvider>
-        {/* Theme above Spotlight so overlay inherits fonts/colors */}
         <ThemeProvider>
-          {/* Spotlight inside SafeArea so measurements are correct on Android */}
           <SpotlightProvider>
             <NavigationContainer>
               {user ? <AppNavigator /> : <AuthNavigator />}
