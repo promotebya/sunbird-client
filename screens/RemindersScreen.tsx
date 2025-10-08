@@ -137,21 +137,23 @@ async function cancelExistingAnniversarySchedules() {
   } catch {}
 }
 
-// ANDROID: correct Date trigger (no extra fields on trigger), ensure > 65s in the future
+// ANDROID: schedule with time-interval trigger, ensure at least 90s in the future
 async function scheduleAndroidDate(
   content: Notifications.NotificationContentInput,
   when: Date
 ) {
-  let target = when.getTime();
-  const now = Date.now();
-  if (target - now < 65_000) target = now + 65_000; // avoid “fire now”
+  const diffSec = Math.ceil((when.getTime() - Date.now()) / 1000);
+  const seconds = Math.max(90, diffSec); // ensure future; prevents immediate fire
 
   const id = await Notifications.scheduleNotificationAsync({
     content,
     trigger: {
-      date: new Date(target),
+      type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+      seconds,
+      repeats: false,
       channelId: ANDROID_CHANNEL_ID,
-    } as Notifications.DateTriggerInput,
+      allowWhileIdle: true,
+    } as Notifications.TimeIntervalTriggerInput,
   });
   return id;
 }
@@ -269,6 +271,19 @@ const RemindersScreen: React.FC = () => {
     }).catch(() => {});
   }, []);
 
+  // Modern notification handler to avoid `shouldShowAlert` deprecation
+  useEffect(() => {
+    Notifications.setNotificationHandler({
+      handleNotification: async () => ({
+        shouldPlaySound: true,
+        shouldSetBadge: false,
+        // iOS displays: use banner + list instead of deprecated alert
+        shouldShowBanner: true,
+        shouldShowList: true,
+      }) as any,
+    });
+  }, []);
+
   const dateLabel = dateOnly
     ? dateOnly.toLocaleDateString(undefined, { day: 'numeric', month: 'long' })
     : 'Select date…';
@@ -300,21 +315,31 @@ const RemindersScreen: React.FC = () => {
   useEffect(() => { loadScheduled(); }, [loadScheduled]);
   useFocusEffect(useCallback(() => { loadScheduled(); }, [loadScheduled]));
 
+  // Only show the main (day-of) yearly item in Saved reminders
   const visibleScheduled = useMemo((): SavedReq[] => {
     const unique = new Map<string, SavedReq>();
+
     for (const req of scheduled) {
-      if (isGentleNudge(req)) continue;
-      if (isMakeTheirDay(req)) continue;
+      if (isGentleNudge(req)) continue;       // internal nudges
+      if (isMakeTheirDay(req)) continue;      // app suggestions
 
       const trig = (req as any).trigger;
       const ttype = getTriggerType(trig);
 
-      // iOS: keep only true yearly calendar (month+day); Android: date/timeInterval are fine
+      // iOS: keep only true yearly calendar (month+day). Android: date/timeInterval are fine.
       if (ttype === 'calendar' && !isYearlyCalendarTrigger(trig)) continue;
 
-      const key = `${req.content?.title ?? ''}||${triggerToText(trig)}||${(req.content as any)?.data?.kind ?? ''}`;
+      // Hide the pre-alerts (Android uses data.kind; iOS fallback uses body text)
+      const kind = (req?.content as any)?.data?.kind;
+      if (kind === 'lp:anniv:d1' || kind === 'lp:anniv:d7') continue;
+      const body = String(req?.content?.body ?? '');
+      if (/one week/i.test(body) || /tomorrow/i.test(body)) continue;
+
+      // Deduplicate
+      const key = `${req.content?.title ?? ''}||${triggerToText(trig)}||${kind ?? ''}`;
       if (!unique.has(key)) unique.set(key, req);
     }
+
     return Array.from(unique.values());
   }, [scheduled]);
 
@@ -433,7 +458,8 @@ const RemindersScreen: React.FC = () => {
       setTimeout(() => setBanner(null), 1800);
 
       // allow Android to register before reading back
-      setTimeout(() => { loadScheduled(); }, 2000);
+      await new Promise((r) => setTimeout(r, 2000));
+      await loadScheduled();
     } catch (e: any) {
       Alert.alert('Could not schedule', e?.message ?? 'Please try again.');
     } finally {

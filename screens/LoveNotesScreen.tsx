@@ -2,6 +2,8 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import * as Clipboard from 'expo-clipboard';
+import Constants from 'expo-constants';
+import * as Notifications from 'expo-notifications';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
@@ -22,10 +24,18 @@ import Input from '../components/Input';
 import ThemedText from '../components/ThemedText';
 import { useTokens, type ThemeTokens } from '../components/ThemeProvider';
 
-import { addDoc, collection, serverTimestamp } from 'firebase/firestore';
+import {
+  addDoc,
+  collection,
+  doc,
+  getDoc,
+  serverTimestamp,
+  setDoc,
+  updateDoc,
+} from 'firebase/firestore';
 import { db } from '../firebaseConfig';
 import useAuthListener from '../hooks/useAuthListener';
-import { getPairId } from '../utils/partner';
+import { getPairId, getPartnerUid } from '../utils/partner';
 
 // 👇 Spotlight imports
 import {
@@ -51,6 +61,87 @@ function withAlpha(hex: string, alpha: number) {
   return `#${full}${a}`;
 }
 
+/* ---------------------- Push helpers (Expo) ---------------------- */
+
+/** Ask for notif permission, get Expo push token, and store in Firestore. */
+async function registerAndStorePushToken(userId: string): Promise<string | null> {
+  try {
+    // Permissions (Android 13+ also needs POST_NOTIFICATIONS)
+    const { status: existing } = await Notifications.getPermissionsAsync();
+    let finalStatus = existing;
+    if (existing !== 'granted') {
+      const { status } = await Notifications.requestPermissionsAsync();
+      finalStatus = status;
+    }
+    if (finalStatus !== 'granted') return null;
+
+    // Get Expo token (works in EAS builds with projectId)
+    const projectId =
+      (Constants?.expoConfig as any)?.extra?.eas?.projectId ??
+      (Constants as any)?.easConfig?.projectId ??
+      undefined;
+
+    const tokenResp = await Notifications.getExpoPushTokenAsync(
+      projectId ? { projectId } : undefined
+    );
+    const token = tokenResp.data;
+
+    if (!token) return null;
+
+    // Save on users/{uid}
+    const uref = doc(db, 'users', userId);
+    const snap = await getDoc(uref);
+
+    if (!snap.exists()) {
+      await setDoc(uref, { expoPushToken: token, pushTokens: [token], pushUpdatedAt: serverTimestamp() }, { merge: true });
+    } else {
+      const cur = snap.data() || {};
+      const list: string[] = Array.isArray(cur.pushTokens) ? cur.pushTokens : [];
+      if (!list.includes(token)) list.push(token);
+      await updateDoc(uref, { expoPushToken: token, pushTokens: list, pushUpdatedAt: serverTimestamp() });
+    }
+    return token;
+  } catch {
+    return null;
+  }
+}
+
+/** Read a user's saved push token(s). Supports `expoPushToken` and/or `pushTokens` array. */
+async function getUserPushTokens(uid: string): Promise<string[]> {
+  try {
+    const snap = await getDoc(doc(db, 'users', uid));
+    if (!snap.exists()) return [];
+    const data = snap.data() || {};
+    const one = typeof data.expoPushToken === 'string' ? [data.expoPushToken] : [];
+    const many = Array.isArray(data.pushTokens) ? data.pushTokens.filter((x: any) => typeof x === 'string') : [];
+    const uniq = Array.from(new Set([...one, ...many]));
+    // Expo tokens start with "ExponentPushToken[" — filter if needed
+    return uniq.filter(t => typeof t === 'string' && t.length > 20);
+  } catch {
+    return [];
+  }
+}
+
+/** Send a push via Expo's API. (Client-side for simplicity.) */
+async function sendExpoPush(toTokens: string[], title: string, body: string, data?: any) {
+  if (!toTokens.length) return;
+  // Send in small batches (Expo allows arrays but we keep it simple/robust)
+  const messages = toTokens.map((to) => ({
+    to,
+    sound: 'default',
+    title,
+    body,
+    data,
+  }));
+  await fetch('https://exp.host/--/api/v2/push/send', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify(messages),
+  }).catch(() => {});
+}
+
+/* ---------------------------------------------------------------- */
+
 const LoveNotesScreen: React.FC = () => {
   const nav = useNavigation<any>();
   const insets = useSafeAreaInsets();
@@ -59,13 +150,30 @@ const LoveNotesScreen: React.FC = () => {
 
   const { user } = useAuthListener();
   const [pairId, setPairId] = useState<string | null>(null);
+  const [partnerUid, setPartnerUidState] = useState<string | null>(null);
   const [text, setText] = useState('');
   const inputRef = useRef<any>(null);
 
+  // Link state + partner uid
   useEffect(() => {
     (async () => {
       if (!user) return;
-      setPairId(await getPairId(user.uid));
+      const pid = await getPairId(user.uid);
+      setPairId(pid ?? null);
+      if (pid) {
+        const puid = await getPartnerUid(user.uid);
+        setPartnerUidState(puid ?? null);
+      } else {
+        setPartnerUidState(null);
+      }
+    })();
+  }, [user]);
+
+  // Ensure *this* device has a stored push token
+  useEffect(() => {
+    (async () => {
+      if (!user) return;
+      await registerAndStorePushToken(user.uid);
     })();
   }, [user]);
 
@@ -81,6 +189,7 @@ const LoveNotesScreen: React.FC = () => {
       return;
     }
     try {
+      // Save in Firestore
       await addDoc(collection(db, 'notes'), {
         ownerId: user.uid,
         pairId,
@@ -88,6 +197,18 @@ const LoveNotesScreen: React.FC = () => {
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
+
+      // Fire a push to partner (if we have their token)
+      if (partnerUid) {
+        const tokens = await getUserPushTokens(partnerUid);
+        const preview = tText.length > 120 ? `${tText.slice(0, 117)}…` : tText;
+        await sendExpoPush(tokens, 'Love note 💌', preview, {
+          kind: 'love_note',
+          fromUid: user.uid,
+          pairId,
+        });
+      }
+
       setText('');
       Keyboard.dismiss();
     } catch (e: any) {
@@ -299,7 +420,7 @@ const styles = (t: ThemeTokens) =>
       width: 36,
       height: 36,
       borderRadius: 10,
-      backgroundColor: withAlpha(t.colors.primary, 0.08), // theme-aware tint (matches Home)
+      backgroundColor: withAlpha(t.colors.primary, 0.08),
       alignItems: 'center',
       justifyContent: 'center',
     },
@@ -311,7 +432,6 @@ const styles = (t: ThemeTokens) =>
       marginTop: t.spacing.md,
     },
 
-    // theme-safe neutral chip
     suggestChip: {
       paddingHorizontal: t.spacing.md,
       paddingVertical: 10,
