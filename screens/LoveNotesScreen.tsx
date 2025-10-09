@@ -1,10 +1,9 @@
 // screens/LoveNotesScreen.tsx
 import { Ionicons } from '@expo/vector-icons';
-import { useNavigation } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import * as Clipboard from 'expo-clipboard';
-import Constants from 'expo-constants';
 import * as Notifications from 'expo-notifications';
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   FlatList,
@@ -24,21 +23,15 @@ import Input from '../components/Input';
 import ThemedText from '../components/ThemedText';
 import { useTokens, type ThemeTokens } from '../components/ThemeProvider';
 
-import {
-  addDoc,
-  arrayUnion,
-  collection,
-  doc,
-  getDoc,
-  serverTimestamp,
-  setDoc,
-} from 'firebase/firestore';
+import { addDoc, collection, serverTimestamp } from 'firebase/firestore';
 import { db } from '../firebaseConfig';
 import useAuthListener from '../hooks/useAuthListener';
 import { getPairId, getPartnerUid } from '../utils/partner';
-import { ensureNotificationPermission } from '../utils/reminders';
 
-// 👇 Spotlight imports
+// Push helpers
+import { ensurePushSetup, getUserExpoTokens, sendToTokens } from '../utils/push';
+
+// Spotlight
 import {
   SpotlightAutoStarter,
   SpotlightTarget,
@@ -71,13 +64,16 @@ const LoveNotesScreen: React.FC = () => {
   const s = useMemo(() => styles(t), [t]);
 
   const { user } = useAuthListener();
+
+  // Pair/link state
   const [pairId, setPairId] = useState<string | null>(null);
+  const [linked, setLinked] = useState<boolean | null>(null); // null = loading
+
   const [text, setText] = useState('');
   const inputRef = useRef<any>(null);
 
-  // --- Push setup (one-time per device) ---
+  // Modern handler (avoids deprecated shouldShowAlert)
   useEffect(() => {
-    // Banner/list handler (replaces deprecated shouldShowAlert)
     Notifications.setNotificationHandler({
       handleNotification: async () => ({
         shouldPlaySound: true,
@@ -88,6 +84,7 @@ const LoveNotesScreen: React.FC = () => {
     });
   }, []);
 
+  // Android channel for push/local
   useEffect(() => {
     if (Platform.OS !== 'android') return;
     Notifications.setNotificationChannelAsync(ANDROID_CHANNEL_ID, {
@@ -99,72 +96,59 @@ const LoveNotesScreen: React.FC = () => {
     }).catch(() => {});
   }, []);
 
-  // Register device for push and store token on user's doc
+  // Register device token & store to users/{uid}/public/push
   useEffect(() => {
     (async () => {
       if (!user) return;
-      const granted = await ensureNotificationPermission();
-      if (!granted) return;
-
-      const projectId =
-        (Constants as any)?.expoConfig?.extra?.eas?.projectId ??
-        (Constants as any)?.easConfig?.projectId;
-
-      // Get Expo push token (requires EAS projectId in app.json)
-      const tokenResp = await Notifications.getExpoPushTokenAsync({ projectId });
-      const token = tokenResp.data;
-
-      // Save token (array so users can have multiple devices)
-      const userRef = doc(db, 'users', user.uid);
-      await setDoc(
-        userRef,
-        { expoPushTokens: arrayUnion(token) },
-        { merge: true }
-      );
-    })().catch(() => {});
+      await ensurePushSetup(user.uid);
+    })().catch((e) => console.warn('[push] setup failed', e));
   }, [user]);
 
-  // ---- Pairing / state ----
-  useEffect(() => {
-    (async () => {
-      if (!user) return;
-      setPairId(await getPairId(user.uid));
-    })();
+  // ---- Link state resolution (uses pairId OR partnerUid) ----
+  const refreshLinkState = useCallback(async () => {
+    if (!user) {
+      setPairId(null);
+      setLinked(false);
+      return;
+    }
+    setLinked(null); // loading
+    try {
+      const [pid, pUid] = await Promise.all([getPairId(user.uid), getPartnerUid(user.uid)]);
+      setPairId(pid ?? null);
+      setLinked(Boolean(pid || pUid));
+    } catch {
+      setPairId(null);
+      setLinked(false);
+    }
   }, [user]);
 
-  // Send Expo push to partner (client-side call to Expo push API)
+  useEffect(() => { refreshLinkState(); }, [refreshLinkState]);
+  useFocusEffect(useCallback(() => { refreshLinkState(); }, [refreshLinkState]));
+
+  // Send Expo pushes to all partner devices (reads users/{partnerUid}/public/push)
   async function sendPushToPartner(partnerUid: string, bodyText: string, noteId?: string) {
     try {
-      const partnerRef = doc(db, 'users', partnerUid);
-      const snap = await getDoc(partnerRef);
-      const tokens: string[] = (snap.exists() && Array.isArray(snap.data()?.expoPushTokens))
-        ? snap.data()?.expoPushTokens
-        : [];
-
-      if (!tokens.length) return; // partner not registered for push yet
-
-      const messages = tokens.map((to) => ({
-        to,
-        sound: 'default',
+      const tokens = await getUserExpoTokens(partnerUid);
+      if (!tokens.length) {
+        console.warn('[push] partner has no tokens yet');
+        return;
+      }
+      const { tickets, receipts } = await sendToTokens(tokens, {
         title: 'New love note 💌',
         body: bodyText,
         data: { kind: 'lp:loveNote', noteId, fromUid: user?.uid ?? null, pairId },
         channelId: ANDROID_CHANNEL_ID,
-      }));
-
-      await fetch('https://exp.host/--/api/v2/push/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(messages),
       });
-    } catch {
-      // swallow; push delivery best-effort
+      console.log('[push] tickets:', tickets);
+      console.log('[push] receipts:', receipts);
+    } catch (e) {
+      console.warn('[push] send error', e);
     }
   }
 
   async function sendNote() {
     if (!user) return;
-    if (!pairId) {
+    if (!linked) {
       Alert.alert('Link accounts first', 'Open Settings to link with your partner.');
       return;
     }
@@ -174,7 +158,6 @@ const LoveNotesScreen: React.FC = () => {
       return;
     }
     try {
-      // Create the note
       const ref = await addDoc(collection(db, 'notes'), {
         ownerId: user.uid,
         pairId,
@@ -183,10 +166,11 @@ const LoveNotesScreen: React.FC = () => {
         updatedAt: serverTimestamp(),
       });
 
-      // Look up partner and push
       const partnerUid = await getPartnerUid(user.uid);
       if (partnerUid) {
         await sendPushToPartner(partnerUid, tText, ref.id);
+      } else {
+        console.warn('[push] no partnerUid found');
       }
 
       setText('');
@@ -197,7 +181,7 @@ const LoveNotesScreen: React.FC = () => {
   }
 
   async function onPickSuggestion(sug: string) {
-    if (pairId) {
+    if (linked) {
       setText(sug);
       requestAnimationFrame(() => inputRef.current?.focus?.());
       return;
@@ -213,78 +197,24 @@ const LoveNotesScreen: React.FC = () => {
     } catch {}
   }
 
-  // ---- Spotlight steps (depend on link state) ----
+  // Spotlight steps
   const STEPS: SpotlightStep[] = useMemo(() => {
-    if (!pairId) {
-      // Not linked
+    if (!linked) {
       return [
-        {
-          id: 'ln-welcome',
-          targetId: null,
-          title: 'Love Notes 💌',
-          text: 'Send quick notes; we’ll nudge your partner.',
-          placement: 'bottom',
-          allowBackdropTapToNext: true,
-        },
-        {
-          id: 'ln-link',
-          targetId: 'ln-link',
-          title: 'Link with your partner',
-          text: 'Connect accounts to send and receive notes in-app.',
-        },
-        {
-          id: 'ln-suggestions',
-          targetId: 'ln-suggestions',
-          title: 'Need a spark?',
-          text: 'Tap a suggestion to copy the text.',
-        },
-        {
-          id: 'ln-share',
-          targetId: 'ln-share',
-          title: 'Send via Messages',
-          text: 'Prefer SMS? Share it from here.',
-          placement: 'top',
-        },
+        { id: 'ln-welcome', targetId: null, title: 'Love Notes 💌', text: 'Send quick notes; we’ll nudge your partner.', placement: 'bottom', allowBackdropTapToNext: true },
+        { id: 'ln-link', targetId: 'ln-link', title: 'Link with your partner', text: 'Connect accounts to send and receive notes in-app.' },
+        { id: 'ln-suggestions', targetId: 'ln-suggestions', title: 'Need a spark?', text: 'Tap a suggestion to copy the text.' },
+        { id: 'ln-share', targetId: 'ln-share', title: 'Send via Messages', text: 'Prefer SMS? Share it from here.', placement: 'top' },
       ];
     }
-    // Linked
     return [
-      {
-        id: 'ln-welcome',
-        targetId: null,
-        title: 'Love Notes 💌',
-        text: 'Send quick notes; we’ll nudge your partner.',
-        placement: 'bottom',
-        allowBackdropTapToNext: true,
-      },
-      {
-        id: 'ln-input',
-        targetId: 'ln-input',
-        title: 'Write here',
-        text: 'Type a short note for your partner.',
-      },
-      {
-        id: 'ln-send',
-        targetId: 'ln-send',
-        title: 'Send',
-        text: 'Deliver instantly and notify your partner.',
-        placement: 'top',
-      },
-      {
-        id: 'ln-suggestions',
-        targetId: 'ln-suggestions',
-        title: 'Need a spark?',
-        text: 'Tap to prefill your note.',
-      },
-      {
-        id: 'ln-share',
-        targetId: 'ln-share',
-        title: 'Send via Messages',
-        text: 'Prefer SMS? Share it from here.',
-        placement: 'top',
-      },
+      { id: 'ln-welcome', targetId: null, title: 'Love Notes 💌', text: 'Send quick notes; we’ll nudge your partner.', placement: 'bottom', allowBackdropTapToNext: true },
+      { id: 'ln-input', targetId: 'ln-input', title: 'Write here', text: 'Type a short note for your partner.' },
+      { id: 'ln-send', targetId: 'ln-send', title: 'Send', text: 'Deliver instantly and notify your partner.', placement: 'top' },
+      { id: 'ln-suggestions', targetId: 'ln-suggestions', title: 'Need a spark?', text: 'Tap to prefill your note.' },
+      { id: 'ln-share', targetId: 'ln-share', title: 'Send via Messages', text: 'Prefer SMS? Share it from here.', placement: 'top' },
     ];
-  }, [pairId]);
+  }, [linked]);
 
   const NotLinkedCard = () => (
     <Card>
@@ -311,6 +241,15 @@ const LoveNotesScreen: React.FC = () => {
     </Card>
   );
 
+  const LoadingCard = () => (
+    <Card>
+      <ThemedText variant="title">Checking link…</ThemedText>
+      <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 4 }}>
+        One moment.
+      </ThemedText>
+    </Card>
+  );
+
   return (
     <SafeAreaView
       style={{ flex: 1, backgroundColor: t.colors.bg, paddingTop: t.spacing.md }}
@@ -325,8 +264,10 @@ const LoveNotesScreen: React.FC = () => {
           </ThemedText>
         </View>
 
-        {/* If not linked yet, show CTA card; if linked, show composer */}
-        {!pairId ? (
+        {/* Composer / CTA */}
+        {linked === null ? (
+          <LoadingCard />
+        ) : !linked ? (
           <NotLinkedCard />
         ) : (
           <Card>
@@ -356,7 +297,7 @@ const LoveNotesScreen: React.FC = () => {
         <Card style={{ marginTop: t.spacing.md }}>
           <ThemedText variant="title">Need a spark?</ThemedText>
           <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 4 }}>
-            Tap to {pairId ? 'fill your note' : 'copy to clipboard'}.
+            Tap to {linked ? 'fill your note' : 'copy to clipboard'}.
           </ThemedText>
 
           <SpotlightTarget id="ln-suggestions">
@@ -384,7 +325,7 @@ const LoveNotesScreen: React.FC = () => {
           contentContainerStyle={{ paddingBottom: insets.bottom + t.spacing.xl }}
         />
 
-        {/* Auto-start the tutorial (once per user & screen) */}
+        {/* Tutorial */}
         <SpotlightAutoStarter uid={user?.uid ?? null} steps={STEPS} persistKey="tour-love-notes" />
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -412,7 +353,6 @@ const styles = (t: ThemeTokens) =>
       marginTop: t.spacing.md,
     },
 
-    // theme-safe neutral chip
     suggestChip: {
       paddingHorizontal: t.spacing.md,
       paddingVertical: 10,

@@ -25,7 +25,7 @@ import ThemedText from '../components/ThemedText';
 import { useTokens, type ThemeTokens } from '../components/ThemeProvider';
 import ToastUndo from '../components/ToastUndo';
 
-// 👇 Spotlight
+// Spotlight
 import {
   SpotlightAutoStarter,
   SpotlightTarget,
@@ -37,6 +37,8 @@ import {
   collection,
   deleteDoc,
   doc,
+  getDocs,
+  limit,
   orderBy,
   query,
   serverTimestamp,
@@ -50,6 +52,10 @@ import { getPairId } from '../utils/partner';
 import { createPointsEntry, deletePointsEntry } from '../utils/points';
 import { listenDoc, listenQuery } from '../utils/snap';
 import { activateCatchup, isoWeekStr, notifyTaskCompletion } from '../utils/streak';
+
+// Rewards quick-add from Tasks
+import RedeemModal from '../components/RedeemModal';
+import { addReward } from '../utils/rewards';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -87,7 +93,6 @@ const TasksScreen: React.FC = () => {
 
   const [pairId, setPairId] = useState<string | null>(null);
   const [tasks, setTasks] = useState<TaskDoc[]>([]);
-  const [tab, setTab] = useState<'personal' | 'shared'>('personal');
 
   const [title, setTitle] = useState('');
   const [titleError, setTitleError] = useState<string | undefined>(undefined);
@@ -97,6 +102,7 @@ const TasksScreen: React.FC = () => {
   const showUndo = (message: string, undo?: () => Promise<void> | void) => setToast({ visible: true, msg: message, undo });
 
   const [showConfetti, setShowConfetti] = useState(false);
+  const [showAddReward, setShowAddReward] = useState(false);
 
   const [streak, setStreak] = useState<{
     current?: number;
@@ -119,6 +125,7 @@ const TasksScreen: React.FC = () => {
     }
   }, [route.params, nav]);
 
+  // Load pairId
   useEffect(() => {
     (async () => {
       if (!user) return setPairId(null);
@@ -127,11 +134,15 @@ const TasksScreen: React.FC = () => {
     })();
   }, [user]);
 
+  // Shared-only listener (both partners see)
   useEffect(() => {
-    if (!user) return;
+    if (!user || !pairId) {
+      setTasks([]);
+      return;
+    }
     const qRef = query(
       collection(db, 'tasks'),
-      where('ownerId', '==', user.uid),
+      where('pairId', '==', pairId),
       orderBy('createdAt', 'desc')
     );
     const unsub = listenQuery(
@@ -140,24 +151,40 @@ const TasksScreen: React.FC = () => {
         const next: TaskDoc[] = snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<TaskDoc, 'id'>) }));
         setTasks(next);
       },
-      'tasks'
+      'tasks:shared'
     );
     return () => unsub();
-  }, [user]);
+  }, [user, pairId]);
 
+  // Migrate recent orphan tasks (pairId == null) to current pair after link (best-effort)
+  useEffect(() => {
+    (async () => {
+      if (!user || !pairId) return;
+      try {
+        const qRef = query(
+          collection(db, 'tasks'),
+          where('ownerId', '==', user.uid),
+          orderBy('createdAt', 'desc'),
+          limit(50)
+        );
+        const snap = await getDocs(qRef);
+        const orphan = snap.docs.filter(d => (d.data() as any)?.pairId == null);
+        await Promise.all(
+          orphan.map(d => updateDoc(doc(db, 'tasks', d.id), { pairId, updatedAt: serverTimestamp() }))
+        );
+      } catch {
+        // ignore
+      }
+    })();
+  }, [user, pairId]);
+
+  // Streak doc
   useEffect(() => {
     if (!user) return;
     const ref = doc(db, 'streaks', user.uid);
     const off = listenDoc(ref, (snap) => setStreak(snap.exists() ? (snap.data() as any) : null), 'streaks');
     return () => off && off();
   }, [user]);
-
-  const personalTasks = useMemo(() => tasks.filter((t) => !t.pairId), [tasks]);
-  const sharedTasks   = useMemo(() => tasks.filter((t) => !!t.pairId), [tasks]);
-  const data = tab === 'personal' ? personalTasks : sharedTasks;
-
-  const personalCount = personalTasks.length;
-  const sharedCount   = sharedTasks.length;
 
   async function handleAddTask() {
     if (!user) return;
@@ -166,13 +193,17 @@ const TasksScreen: React.FC = () => {
       setTitleError('Please type a task first.');
       return;
     }
+    if (!pairId) {
+      Alert.alert('Link accounts first', 'Open Pairing to link with your partner before adding shared tasks.');
+      return;
+    }
     setTitleError(undefined);
 
     try {
       const payload: Omit<TaskDoc, 'id'> = {
         title: trimmed,
         ownerId: user.uid,
-        pairId: tab === 'shared' ? (pairId ?? null) : null,
+        pairId,            // shared-only
         done: false,
         points: 0,
         createdAt: serverTimestamp(),
@@ -183,7 +214,7 @@ const TasksScreen: React.FC = () => {
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       setTitle('');
       Keyboard.dismiss();
-      showUndo('Nice! Added to your list.');
+      showUndo('Nice! Added to the shared list.');
     } catch (e: any) {
       Alert.alert('Couldn’t add task', e?.message ?? 'Please try again.');
     }
@@ -238,7 +269,7 @@ const TasksScreen: React.FC = () => {
       showUndo('+1 point added 🎉', async () => {
         await deletePointsEntry(pointsId);
         await updateDoc(doc(db, 'tasks', item.id), {
-          points: Math.max(0, item.points ?? 0),
+          points: Math.max(0, (item.points ?? 0)),
           updatedAt: serverTimestamp(),
         });
       });
@@ -256,7 +287,7 @@ const TasksScreen: React.FC = () => {
         await addDoc(collection(db, 'tasks'), {
           title: backup.title,
           ownerId: backup.ownerId,
-          pairId: backup.pairId ?? null,
+          pairId: backup.pairId ?? pairId ?? null,
           done: backup.done ?? false,
           points: backup.points ?? 0,
           createdAt: serverTimestamp(),
@@ -268,73 +299,31 @@ const TasksScreen: React.FC = () => {
     }
   }
 
-  // ---- Spotlight steps (dynamic; only anchor things that exist) ----
+  const onCreateReward = async (title: string, cost: number) => {
+    if (!user) return;
+    try {
+      await addReward(user.uid, pairId ?? null, title, cost);
+    } catch (e: any) {
+      Alert.alert('Could not add reward', e?.message ?? 'Please try again.');
+    }
+  };
+
+  // Spotlight steps (shared-only)
   const TASKS_TOUR_STEPS: SpotlightStep[] = useMemo(() => {
     const steps: SpotlightStep[] = [
       {
         id: 'tsk-welcome',
         targetId: null,
-        title: 'Tasks',
-        text: 'Shared to-dos; finishing can award points.',
+        title: 'Shared Tasks',
+        text: 'Both partners see and update this list.',
         placement: 'bottom',
         allowBackdropTapToNext: true,
       },
-      {
-        id: 'tsk-tabs',
-        targetId: 'ts-tabs',
-        title: 'Personal vs Shared',
-        text: 'Switch between your own tasks and shared ones.',
-      },
+      { id: 'tsk-input', targetId: 'ts-input', title: 'Add a task', text: 'Type a small, kind action.' },
+      { id: 'tsk-add', targetId: 'ts-add', title: 'Save it', text: 'Tap Add to put it on the list.', placement: 'top' },
+      { id: 'tsk-suggestions', targetId: 'ts-suggestions', title: 'Ideas', text: 'Tap a suggestion to prefill.' },
     ];
-
-    if (tab === 'shared' && !pairId) {
-      steps.push({
-        id: 'tsk-link',
-        targetId: 'ts-link',
-        title: 'Link to share',
-        text: 'Connect with your partner to track shared tasks.',
-      });
-    }
-
-    if (streak && ((): boolean => {
-      const thisWeek = isoWeekStr(new Date());
-      const alreadyUsedThisWeek  = streak.catchupWeekISO === thisWeek;
-      const alreadyArmedThisWeek = streak.catchupIntentWeekISO === thisWeek;
-      const pending = !!streak.catchupPending;
-      return !alreadyUsedThisWeek && !alreadyArmedThisWeek && !pending;
-    })()) {
-      steps.push({
-        id: 'tsk-catchup',
-        targetId: 'ts-catchup',
-        title: 'Catch-up day',
-        text: 'Missed yesterday? Do two today to keep your streak.',
-        placement: 'bottom',
-      });
-    }
-
-    steps.push(
-      {
-        id: 'tsk-input',
-        targetId: 'ts-input',
-        title: 'Add a task',
-        text: 'Type a small, kind action.',
-      },
-      {
-        id: 'tsk-add',
-        targetId: 'ts-add',
-        title: 'Save it',
-        text: 'Tap Add to put it on the list.',
-        placement: 'top',
-      },
-      {
-        id: 'tsk-suggestions',
-        targetId: 'ts-suggestions',
-        title: 'Ideas',
-        text: 'Tap a suggestion to prefill.',
-      },
-    );
-
-    if (data.length > 0) {
+    if (tasks.length > 0) {
       steps.push(
         { id: 'tsk-done',   targetId: 'ts-done',   title: 'Mark complete', text: 'Tap the box when you’re done.' },
         { id: 'tsk-award',  targetId: 'ts-award',  title: 'Give a point',  text: 'Reward effort with +1.', placement: 'top' },
@@ -342,7 +331,7 @@ const TasksScreen: React.FC = () => {
       );
     }
     return steps;
-  }, [pairId, tab, data.length, streak]);
+  }, [tasks.length]);
 
   const renderItem = ({ item, index }: { item: TaskDoc; index: number }) => {
     const done = !!item.done;
@@ -406,39 +395,16 @@ const TasksScreen: React.FC = () => {
   const listHeader = (
     <View>
       {/* Header */}
-      <View style={s.header}>
-        <ThemedText variant="display">Tasks</ThemedText>
-        <ThemedText variant="subtitle" color={t.colors.textDim}>
-          Keep track of kind little things
-        </ThemedText>
+      <View style={[s.header, { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }]}>
+        <View>
+          <ThemedText variant="display">Shared tasks</ThemedText>
+        </View>
+        <Button label="Add reward" variant="outline" onPress={() => setShowAddReward(true)} />
       </View>
 
-      {/* Segmented tabs (counts) */}
-      <SpotlightTarget id="ts-tabs">
-        <View style={s.segmented}>
-          {(['personal', 'shared'] as const).map((k) => {
-            const active = tab === k;
-            const count = k === 'personal' ? personalCount : sharedCount;
-            return (
-              <Pressable
-                key={k}
-                onPress={() => setTab(k)}
-                accessibilityRole="button"
-                style={[s.segment, active && s.segmentActive]}
-              >
-                <ThemedText variant="label" color={active ? t.colors.text : t.colors.textDim}>
-                  {k === 'personal' ? 'Personal' : 'Shared'}{count ? ` (${count})` : ''}
-                </ThemedText>
-              </Pressable>
-            );
-          })}
-        </View>
-      </SpotlightTarget>
-
-      {/* Shared tab link banner */}
-      {tab === 'shared' && !pairId && (
-        <Card style={{ marginBottom: t.spacing.md, paddingVertical: 12, borderWidth: 1, borderColor: t.colors.border }}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+      {!pairId && (
+        <Card style={{ marginHorizontal: t.spacing.md, marginBottom: t.spacing.md, paddingVertical: 12 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: t.spacing.md }}>
             <View
               style={{
                 width: 36, height: 36, borderRadius: 10,
@@ -453,11 +419,8 @@ const TasksScreen: React.FC = () => {
               <ThemedText variant="caption" color={t.colors.textDim}>Share tasks and progress.</ThemedText>
             </View>
           </View>
-          <View style={{ flexDirection: 'row', gap: 12, marginTop: 10 }}>
-            <SpotlightTarget id="ts-link">
-              <Button label="Link now" onPress={() => nav.navigate('Pairing')} />
-            </SpotlightTarget>
-            <Button label="Later" variant="ghost" />
+          <View style={{ flexDirection: 'row', gap: 12, marginTop: 10, paddingHorizontal: t.spacing.md }}>
+            <Button label="Link now" onPress={() => nav.navigate('Pairing')} />
           </View>
         </Card>
       )}
@@ -497,15 +460,16 @@ const TasksScreen: React.FC = () => {
                 setTitle(val);
                 if (titleError) setTitleError(undefined);
               }}
-              placeholder="New task…"
+              placeholder="New shared task…"
               containerStyle={{ flex: 1, marginRight: t.spacing.s }}
               errorText={titleError}
+              editable={!!pairId}
               returnKeyType="done"
               onSubmitEditing={handleAddTask}
             />
           </SpotlightTarget>
           <SpotlightTarget id="ts-add">
-            <Button label="Add" onPress={handleAddTask} disabled={!title.trim()} />
+            <Button label="Add" onPress={handleAddTask} disabled={!title.trim() || !pairId} />
           </SpotlightTarget>
         </View>
 
@@ -532,7 +496,7 @@ const TasksScreen: React.FC = () => {
 
       <KeyboardAvoidingView behavior={Platform.select({ ios: 'padding', android: undefined })} style={{ flex: 1 }}>
         <FlatList
-          data={data}
+          data={tasks}
           keyExtractor={(i) => i.id}
           ItemSeparatorComponent={() => <View style={{ height: t.spacing.s }} />}
           renderItem={renderItem}
@@ -544,13 +508,13 @@ const TasksScreen: React.FC = () => {
               <View style={{ alignItems: 'center', paddingVertical: t.spacing.lg }}>
                 <ThemedText variant="display">📝</ThemedText>
                 <ThemedText variant="title" style={{ marginTop: t.spacing.xs }}>
-                  No tasks yet
+                  No shared tasks yet
                 </ThemedText>
                 <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: t.spacing.xs }}>
                   Try adding ‘Plan a surprise’ 😉
                 </ThemedText>
                 <View style={{ marginTop: t.spacing.md }}>
-                  <Button label="Add a task" onPress={() => inputRef.current?.focus()} />
+                  <Button label="Add a task" onPress={() => inputRef.current?.focus()} disabled={!pairId} />
                 </View>
               </View>
             </Card>
@@ -564,8 +528,15 @@ const TasksScreen: React.FC = () => {
           onHide={() => setToast({ visible: false, msg: '' })}
         />
 
+        {/* Add reward modal */}
+        <RedeemModal
+          visible={showAddReward}
+          onClose={() => setShowAddReward(false)}
+          onCreate={onCreateReward}
+        />
+
         {/* Auto-start tutorial */}
-        <SpotlightAutoStarter uid={user?.uid ?? null} steps={TASKS_TOUR_STEPS} persistKey="tour-tasks" />
+        <SpotlightAutoStarter uid={user?.uid ?? null} steps={TASKS_TOUR_STEPS} persistKey="tour-tasks-shared-only" />
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -576,28 +547,6 @@ const styles = (t: ThemeTokens) =>
     screen: { flex: 1, backgroundColor: t.colors.bg },
 
     header: { padding: t.spacing.md, paddingBottom: t.spacing.s },
-
-    // Segmented tabs (neutral; slight lift when active)
-    segmented: { flexDirection: 'row', gap: 8, paddingHorizontal: t.spacing.md, marginBottom: t.spacing.md },
-    segment: {
-      flex: 1,
-      alignItems: 'center',
-      justifyContent: 'center',
-      paddingVertical: 10,
-      borderRadius: 14,
-      backgroundColor: t.colors.card,
-      borderWidth: 1,
-      borderColor: t.colors.border,
-    },
-    segmentActive: {
-      backgroundColor: t.colors.card,
-      borderColor: t.colors.border,
-      shadowColor: 'rgba(16,24,40,0.08)',
-      shadowOpacity: 1,
-      shadowRadius: 8,
-      shadowOffset: { width: 0, height: 4 },
-      elevation: 3,
-    },
 
     // Catch-up chip: derive tint from primary (theme-safe)
     catchupChip: {
@@ -639,7 +588,6 @@ const styles = (t: ThemeTokens) =>
 
     metaRow: { marginTop: 2 },
 
-    // Theme-tinted points pill
     pointsPill: {
       paddingHorizontal: 10,
       paddingVertical: 4,

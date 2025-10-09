@@ -44,7 +44,10 @@
       ]
     },
 
-    "notification": { "icon": "./assets/icon.png", "color": "#FF4F8B" },
+    "notification": {
+      "icon": "./assets/icon.png",
+      "color": "#FF4F8B"
+    },
 
     "plugins": [
       [
@@ -64,7 +67,9 @@
       "expo-notifications"
     ],
 
-    "extra": { "eas": { "projectId": "d791c6d2-2f30-4b8e-b5b6-0f52eb421bf3" } },
+    "extra": {
+      "eas": { "projectId": "d791c6d2-2f30-4b8e-b5b6-0f52eb421bf3" }
+    },
 
     "runtimeVersion": { "policy": "appVersion" },
     "jsEngine": "hermes",
