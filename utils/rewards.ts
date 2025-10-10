@@ -58,12 +58,10 @@ export function listenRewards(
 ): Unsubscribe {
   const col = collection(db, 'rewards');
 
-  // Preferred (needs composite index: pairId + createdAt desc)
   const qWithOrder = pairId
     ? query(col, where('pairId', '==', pairId), orderBy('createdAt', 'desc'))
     : query(col, where('ownerId', '==', ownerId), orderBy('createdAt', 'desc'));
 
-  // Fallback without order (we'll sort in JS)
   const qNoOrder = pairId
     ? query(col, where('pairId', '==', pairId))
     : query(col, where('ownerId', '==', ownerId));
@@ -71,39 +69,46 @@ export function listenRewards(
   let detach: Unsubscribe = () => {};
 
   const attachNoOrder = () => {
-    detach = onSnapshot(qNoOrder, (snap) => {
-      const items = mapRows(snap.docs as any).sort((a, b) => {
-        const ta =
-          (a.createdAt?.toMillis?.() as number | undefined) ??
-          (typeof a.createdAt?.seconds === 'number'
-            ? a.createdAt.seconds * 1000
-            : 0);
-        const tb =
-          (b.createdAt?.toMillis?.() as number | undefined) ??
-          (typeof b.createdAt?.seconds === 'number'
-            ? b.createdAt.seconds * 1000
-            : 0);
-        return tb - ta; // newest first
-      });
-      cb(items);
-    });
+    detach = onSnapshot(
+      qNoOrder,
+      (snap) => {
+        const items = mapRows(snap.docs as any).sort((a, b) => {
+          const ta =
+            (a.createdAt?.toMillis?.() as number | undefined) ??
+            (typeof a.createdAt?.seconds === 'number' ? a.createdAt.seconds * 1000 : 0);
+          const tb =
+            (b.createdAt?.toMillis?.() as number | undefined) ??
+            (typeof b.createdAt?.seconds === 'number' ? b.createdAt.seconds * 1000 : 0);
+          return tb - ta;
+        });
+        cb(items);
+      },
+      (err: any) => {
+        if (err?.code === 'permission-denied') {
+          console.warn('listenRewards fallback permission-denied; returning empty list.');
+          cb([]);
+        } else {
+          console.warn('listenRewards fallback snapshot error:', err);
+        }
+      }
+    );
   };
 
   // Try ordered query first
   detach = onSnapshot(
     qWithOrder,
-    (snap) => {
-      cb(mapRows(snap.docs as any));
-    },
+    (snap) => cb(mapRows(snap.docs as any)),
     (err: any) => {
       if (err?.code === 'failed-precondition') {
         console.warn(
           'Missing composite index for rewards; using client-side sort fallback.\n',
           err?.message ?? err
         );
-        // Switch to fallback listener
-        detach();
+        try { detach && detach(); } catch {}
         attachNoOrder();
+      } else if (err?.code === 'permission-denied') {
+        console.warn('listenRewards permission-denied; returning empty list.');
+        cb([]);
       } else {
         console.error('listenRewards error:', err);
       }
@@ -111,9 +116,7 @@ export function listenRewards(
   );
 
   return () => {
-    try {
-      detach && detach();
-    } catch {}
+    try { detach && detach(); } catch {}
   };
 }
 
@@ -122,7 +125,6 @@ export async function redeemReward(
   pairId: string | null,
   reward: RewardDoc
 ) {
-  // record a negative points entry
   await createPointsEntry({
     ownerId,
     pairId,
@@ -130,6 +132,5 @@ export async function redeemReward(
     reason: `Redeem: ${reward.title}`,
   });
 
-  // optional: delete reward after redeem
   await deleteDoc(doc(db, 'rewards', reward.id));
 }

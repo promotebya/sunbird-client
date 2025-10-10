@@ -1,7 +1,7 @@
 // screens/HomeScreen.tsx
 import { Ionicons } from '@expo/vector-icons';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
-import { useNavigation } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import {
   collection,
   limit,
@@ -11,7 +11,7 @@ import {
   where,
 } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Platform, Pressable, StyleSheet, View } from 'react-native';
+import { Alert, Platform, Pressable, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import Button from '../components/Button';
@@ -80,8 +80,8 @@ const FIRST_RUN_STEPS: SpotlightStep[] = [
         title: 'Navigation',
         text: 'Use the tabs below to move around: Home, Memories, Reminders, Love Notes, Tasks, Challenges.',
         placement: 'top',
-        padding: 0,           // don’t inflate the highlight
-        tooltipOffset: 22,    // ⬅️ move bubble up (no effect on highlight)
+        padding: 0,
+        tooltipOffset: 22,
         allowBackdropTapToNext: true,
       } as any)
     : {
@@ -162,7 +162,6 @@ export default function HomeScreen() {
   const [rewards, setRewards] = useState<RewardDoc[]>([]);
   const [recent, setRecent] = useState<PointsItem[]>([]);
   const [showAddReward, setShowAddReward] = useState(false);
-  const [hideLinkBanner, setHideLinkBanner] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -170,6 +169,27 @@ export default function HomeScreen() {
       setPairId(await getPairId(user.uid));
     })();
   }, [user]);
+
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+      (async () => {
+        if (!user?.uid) {
+          if (active) setPairId(null);
+          return;
+        }
+        try {
+          const pid = await getPairId(user.uid);
+          if (active) setPairId(pid ?? null);
+        } catch {
+          if (active) setPairId(null);
+        }
+      })();
+      return () => {
+        active = false;
+      };
+    }, [user?.uid])
+  );
 
   useEffect(() => {
     if (!user) return;
@@ -245,6 +265,68 @@ export default function HomeScreen() {
     [totalPoints]
   );
 
+  // --- NEW: helper to open the same QR screen as Settings (with graceful fallbacks)
+  const openPairingQR = useCallback(() => {
+    const navRef: any = nav as any;
+    const candidates = [
+      'PairingShare',
+      'PairingQR',
+      'PairingShowQR',
+      'PairingCode',
+      'PairQr',
+      'PairingInvite',
+      'Pairing',
+      'PairWithPartner',
+    ];
+
+    const canNavigateTo = (n: any, name: string) => {
+      try {
+        const state = n.getState?.();
+        const names = new Set<string>();
+        const walk = (s: any) => {
+          if (!s) return;
+          if (Array.isArray(s.routes)) {
+            for (const r of s.routes) {
+              if (r?.name) names.add(r.name);
+              if (r?.state) walk(r.state);
+            }
+          }
+        };
+        walk(state);
+        return names.has(name);
+      } catch {
+        return false;
+      }
+    };
+
+    const navigators = [navRef, navRef.getParent?.()].filter(Boolean) as any[];
+
+    for (const n of navigators) {
+      for (const route of candidates) {
+        if (canNavigateTo(n, route)) {
+          try {
+            n.navigate(route as never, { origin: 'Home' } as never);
+            return;
+          } catch {}
+        }
+      }
+    }
+
+    // As a last resort, try pushing through Settings if present
+    try {
+      (navRef.getParent?.() ?? navRef).navigate('Settings', {
+        screen: 'Pairing',
+        params: { showQR: true, origin: 'Home' },
+      });
+      return;
+    } catch {}
+
+    Alert.alert(
+      'Pairing QR',
+      'Open Settings → Pairing to view your QR code.',
+    );
+  }, [nav]);
+
   return (
     <Screen>
       {/* HERO */}
@@ -273,8 +355,8 @@ export default function HomeScreen() {
         </View>
       </View>
 
-      {/* Partner (Action card) */}
-      {!pairId && !hideLinkBanner && (
+      {/* Partner (Action card) — shown ONLY when not paired */}
+      {!pairId && (
         <SpotlightTarget id="home-link-partner">
           <Card style={{ marginBottom: 12, paddingVertical: 12, borderWidth: 1, borderColor: HAIRLINE }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
@@ -286,9 +368,24 @@ export default function HomeScreen() {
                 <ThemedText variant="caption" color={t.colors.textDim}>Share points and memories together.</ThemedText>
               </View>
             </View>
-            <View style={{ flexDirection: 'row', gap: 12, marginTop: 10 }}>
-              <Button label="Link now" onPress={() => nav.navigate('PairingScan')} />
-              <Button label="Later" variant="ghost" onPress={() => setHideLinkBanner(true)} />
+
+            {/* NEW: Scan + Show QR actions */}
+            <View style={{ flexDirection: 'row', gap: 12, marginTop: 10, flexWrap: 'wrap' }}>
+              <Button
+                label="Scan QR"
+                onPress={() => {
+                  try {
+                    nav.navigate('PairingScan');
+                  } catch {
+                    Alert.alert('Pairing', 'Scanner not available. Open Settings → Pairing.');
+                  }
+                }}
+              />
+              <Button
+                label="Show my QR"
+                variant="outline"
+                onPress={openPairingQR}
+              />
             </View>
           </Card>
         </SpotlightTarget>

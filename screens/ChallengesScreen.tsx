@@ -1,7 +1,7 @@
 // screens/ChallengesScreen.tsx
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   Platform,
@@ -26,7 +26,13 @@ import {
   getWeeklyChallengeSet,
   type SeedChallenge,
 } from '../utils/seedchallenges';
+import { isoWeekStr } from '../utils/streak';
 import { usePro } from '../utils/subscriptions';
+
+// NEW: pair + firestore for partner premium propagation
+import { doc, onSnapshot, serverTimestamp, updateDoc } from 'firebase/firestore';
+import { db } from '../firebaseConfig';
+import { getPairId } from '../utils/partner';
 
 // 👇 Spotlight
 import {
@@ -147,7 +153,15 @@ function extractCategoryStrict(c: any): CatKey | undefined {
   return undefined;
 }
 
-const safeTitle = (c: any) => extractTitleStrict(c) ?? 'Challenge';
+function cleanTitleSuffix(raw?: string): string {
+  const title = (raw ?? '').trim();
+  if (!title) return 'Challenge';
+  // Strip a trailing category in parentheses, e.g. "Title (date)" → "Title"
+  const cats = ['date','dates','kindness','conversation','talk','surprise','play'];
+  const re = new RegExp(`\\s*\\(\\s*(?:${cats.join('|')})\\s*\\)$`, 'i');
+  return title.replace(re, '');
+}
+const safeTitle = (c: any) => cleanTitleSuffix(extractTitleStrict(c)) || 'Challenge';
 const safeDescription = (c: any) => extractDescriptionStrict(c);
 const safeCategory = (c: any) => extractCategoryStrict(c);
 
@@ -179,6 +193,17 @@ function lockMessage(plan: 'free' | 'premium', c: SeedChallenge): string {
   return 'Locked';
 }
 
+// Robust partner UID extraction for various pair doc shapes
+function extractPartnerUidFromPairDoc(d: any, myUid: string): string | null {
+  if (!d) return null;
+  if (d.userA && d.userB) return d.userA === myUid ? d.userB : d.userA;
+  if (d.ownerId && d.partnerId) return d.ownerId === myUid ? d.partnerId : d.ownerId;
+  if (Array.isArray(d.members)) return d.members.find((u: string) => u && u !== myUid) ?? null;
+  if (Array.isArray(d.userIds)) return d.userIds.find((u: string) => u && u !== myUid) ?? null;
+  if (d.a && d.b) return d.a === myUid ? d.b : d.a;
+  return null;
+}
+
 /* ---------- screen ---------- */
 
 export default function ChallengesScreen() {
@@ -192,21 +217,121 @@ export default function ChallengesScreen() {
   const { hasPro } = usePro();
   const { total, weekly } = usePointsTotal(user?.uid);
 
-  const effectivePremium = !!(isPremium || hasPro);
+  // NEW: derive partner UID from pair doc and check their premium
+  const [partnerUid, setPartnerUid] = useState<string | null>(null);
+  const [pairId, setPairId] = useState<string | null>(null);
+  const [pairPremiumActive, setPairPremiumActive] = useState<boolean>(false);
+
+  useEffect(() => {
+    let unsubscribe: (() => void) | undefined;
+
+    (async () => {
+      try {
+        if (!user?.uid) {
+          setPartnerUid(null);
+          setPairId(null);
+          return;
+        }
+        const pid = await getPairId(user.uid);
+        setPairId(pid ?? null);
+        if (!pid) {
+          setPartnerUid(null);
+          setPairId(null);
+          return;
+        }
+        const ref = doc(db, 'pairs', pid);
+        unsubscribe = onSnapshot(
+          ref,
+          (snap) => {
+            if (!snap.exists()) {
+              // Pair doc deleted; clear local pair state
+              setPartnerUid(null);
+              setPairPremiumActive(false);
+              setPairId(null);
+              return;
+            }
+            const data = snap.data();
+            const other = extractPartnerUidFromPairDoc(data, user.uid);
+            setPartnerUid(other ?? null);
+            const pairHasPremium = !!(
+              data?.premiumActive ?? data?.premium ?? data?.proActive ?? data?.plusActive ?? data?.premiumForPair
+            );
+            setPairPremiumActive(pairHasPremium);
+          },
+          (err) => {
+            console.warn('[pairs.onSnapshot] permission/error', err);
+            // If we lost access (e.g., unlinked), clear local pair state gracefully.
+            // Firestore uses `code: "permission-denied"` for removed access.
+            // @ts-ignore – code is present at runtime
+            if (err?.code === 'permission-denied') {
+              setPartnerUid(null);
+              setPairPremiumActive(false);
+              setPairId(null);
+            }
+          }
+        );
+      } catch {
+        setPartnerUid(null);
+        setPairId(null);
+      }
+    })();
+
+    return () => {
+      if (unsubscribe) unsubscribe();
+    };
+  }, [user?.uid]);
+
+  const { isPremium: partnerIsPremium } = usePlanPlus(partnerUid ?? undefined);
+
+  // Keep the pair doc in sync:
+  // Promote to premium when *this* device has it, but never demote from a non‑premium device.
+  useEffect(() => {
+    (async () => {
+      try {
+        if (!pairId) return;
+        const localHasPremium = !!(isPremium || hasPro);
+        // Only write when this device actually has premium; otherwise we could overwrite
+        // the partner's active premium flag.
+        if (!localHasPremium) return;
+        // Already active at pair level → nothing to do.
+        if (pairPremiumActive) return;
+        await updateDoc(doc(db, 'pairs', pairId), {
+          premiumActive: true,
+          premiumUpdatedAt: serverTimestamp(),
+          premiumUpdatedBy: user?.uid ?? null,
+        });
+      } catch {
+        // ignore
+      }
+    })();
+  }, [pairId, isPremium, hasPro, pairPremiumActive, user?.uid]);
+
+  // Shared weekly seed so both partners see the exact same challenges each week
+  const weeklySeed = useMemo(() => {
+    const week = isoWeekStr(new Date());
+    if (pairId) return `pair:${pairId}:${week}`;
+    // fallback to user-based seed if not paired yet
+    return `solo:${user?.uid ?? 'guest'}:${week}`;
+  }, [pairId, user?.uid]);
+
+  // Premium is active if I OR my partner has it (or global Pro or pair doc says so)
+  const effectivePremium = !!(isPremium || hasPro || partnerIsPremium || pairPremiumActive);
+
   const safePlan: 'free' | 'premium' = effectivePremium ? 'premium' : 'free';
   const weeklySafe = Number.isFinite(weekly as any) ? Number(weekly) : 0;
 
   const [tab, setTab] = useState<DiffTabKey>('all');
 
+  // Use pair-and-week based seed so both partners get identical challenges
   const selection = useMemo(
     () =>
       getWeeklyChallengeSet({
         plan: safePlan,
         weeklyPoints: weeklySafe,
-        uid: user?.uid ?? 'guest',
+        uid: weeklySeed,
         pool: CHALLENGE_POOL,
       }),
-    [safePlan, weeklySafe, user?.uid]
+    [safePlan, weeklySafe, weeklySeed]
   );
 
   const POOL_BY_ID = useMemo(() => {

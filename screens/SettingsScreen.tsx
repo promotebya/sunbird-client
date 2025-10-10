@@ -25,7 +25,7 @@ import useAuthListener from '../hooks/useAuthListener';
 import usePartnerUid from '../hooks/usePartnerUid';
 
 import { generatePairCode, redeemPairCode, type PairCodeInfo } from '../utils/pairing';
-import { getPairId } from '../utils/partner';
+import { getPairId, unlinkPair } from '../utils/partner';
 import { showOpenSettingsAlert } from '../utils/permissions';
 
 import { useNavigation } from '@react-navigation/native';
@@ -195,6 +195,8 @@ const SettingsScreen: React.FC = () => {
       try {
         await redeemPairCode(user.uid, code.trim());
         Alert.alert('Linked', 'You are now linked 💞');
+        setPairInfo(null);
+        setPairId(await getPairId(user.uid));
       } catch (e: any) {
         Alert.alert('Could not link', e?.message ?? 'Try again.');
       }
@@ -255,6 +257,31 @@ const SettingsScreen: React.FC = () => {
     ]);
   }
 
+  const onUnlink = () => {
+    if (!user?.uid) return;
+    Alert.alert(
+      'Unlink partner?',
+      'You will stop sharing points, rewards, and Premium immediately. You can re-link any time.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Unlink',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await unlinkPair(user.uid);
+              setPairId(null);
+              setPairInfo(null);
+              Alert.alert('Unlinked', 'Pairing removed.');
+            } catch (e: any) {
+              Alert.alert('Could not unlink', e?.message ?? 'Please try again.');
+            }
+          },
+        },
+      ],
+    );
+  };
+
   const showNotifOpenSettings = notifStatus === 'denied';
   const showLibOpenSettings = libStatus === 'denied';
   const showCamOpenSettings = camStatus === 'denied';
@@ -298,6 +325,7 @@ const SettingsScreen: React.FC = () => {
           }
         />
 
+        {/* When NOT linked: show QR + actions */}
         {!linked && pairInfo?.code ? (
           <>
             <View style={styles.codeBox}>
@@ -314,6 +342,13 @@ const SettingsScreen: React.FC = () => {
               <LinkButton title="Scan code" onPress={() => nav.navigate('PairingScan')} />
             </View>
           </>
+        ) : null}
+
+        {/* When linked: allow unlink */}
+        {linked ? (
+          <View style={[styles.rowBtns, { justifyContent: 'flex-start' }]}>
+            <Button label="Unlink partner" variant="outline" onPress={onUnlink} />
+          </View>
         ) : null}
       </Card>
 

@@ -1,16 +1,16 @@
 // utils/pairing.ts
 import {
-    collection,
-    deleteDoc,
-    doc,
-    getDoc,
-    getDocs,
-    query,
-    runTransaction,
-    serverTimestamp,
-    setDoc,
-    updateDoc,
-    where,
+  collection,
+  deleteDoc,
+  doc,
+  getDoc,
+  getDocs,
+  query,
+  serverTimestamp,
+  setDoc,
+  updateDoc,
+  where,
+  writeBatch,
 } from 'firebase/firestore';
 import { db } from '../firebaseConfig';
 
@@ -28,7 +28,7 @@ function expiryFromNow(minutes = EXPIRY_MINUTES) {
   return d;
 }
 
-/** Purge any unused + expired codes owned by this user. Safe to call anytime. */
+/** Clean up any expired, unused codes for this user. */
 export async function purgeMyExpiredPairCodes(ownerUid: string) {
   if (!ownerUid) return;
 
@@ -48,27 +48,22 @@ export async function purgeMyExpiredPairCodes(ownerUid: string) {
     }
   }
 
-  // Also clear any stale code reference on the user doc (best-effort)
+  // Best-effort clear stale reference on the user doc
   try {
-    const uref = doc(db, 'users', ownerUid);
-    const usnap = await getDoc(uref);
-    if (usnap.exists()) {
-      const u = usnap.data() as any;
-      const userExp = u?.pairCodeExpiresAt ? new Date(u.pairCodeExpiresAt).getTime() : 0;
-      if (userExp && userExp < now) {
-        await updateDoc(uref, { pairCode: null, pairCodeExpiresAt: null, updatedAt: serverTimestamp() });
-      }
-    }
+    await updateDoc(doc(db, 'users', ownerUid), {
+      pairCode: null,
+      pairCodeExpiresAt: null,
+      updatedAt: serverTimestamp(),
+    });
   } catch {}
 }
 
 export type PairCodeInfo = { code: string; expiresAtISO: string };
 
-/** Return the currently active (non-expired) code stored on the user doc, if any. */
+/** Returns the active (non-expired) code stored on the user, if any. */
 export async function getMyActivePairCode(ownerUid: string): Promise<PairCodeInfo | null> {
   if (!ownerUid) return null;
-  const uref = doc(db, 'users', ownerUid);
-  const usnap = await getDoc(uref);
+  const usnap = await getDoc(doc(db, 'users', ownerUid));
   if (!usnap.exists()) return null;
   const u = usnap.data() as any;
   const code: string | null = u?.pairCode ?? null;
@@ -79,18 +74,12 @@ export async function getMyActivePairCode(ownerUid: string): Promise<PairCodeInf
   return { code, expiresAtISO };
 }
 
-/**
- * Create a single-use code other users can redeem to link with you.
- * - Writes to /pairCodes/{code} with ownerUid + expiry
- * - Returns { code, expiresAtISO }
- */
+/** Generate a single-use code your partner can redeem. */
 export async function generatePairCode(ownerUid: string): Promise<PairCodeInfo> {
   if (!ownerUid) throw new Error('Missing ownerUid');
 
-  // Clean up stale codes first
   await purgeMyExpiredPairCodes(ownerUid);
 
-  // Try a few times in case of collision
   for (let i = 0; i < 5; i++) {
     const code = randomCode();
     const ref = doc(db, 'pairCodes', code);
@@ -103,7 +92,7 @@ export async function generatePairCode(ownerUid: string): Promise<PairCodeInfo> 
         expiresAt: expiresAtISO,
         used: false,
       });
-      // Also store on user (optional convenience)
+      // convenience
       await updateDoc(doc(db, 'users', ownerUid), {
         pairCode: code,
         pairCodeExpiresAt: expiresAtISO,
@@ -116,87 +105,76 @@ export async function generatePairCode(ownerUid: string): Promise<PairCodeInfo> 
 }
 
 /**
- * Redeem a partner's code and link both accounts.
- * - Validates expiry & ownership
- * - Writes partnerUid on both users and a shared pairId
- * - Marks/revokes the code
+ * Redeem a partner’s code and link both accounts.
+ *
+ * IMPORTANT: No reads of the partner’s /users doc (your rules forbid that).
+ * We do a single batch that:
+ *   - upserts /pairs/{pairId}
+ *   - sets (merge) my user with partnerUid/pairId and clears my pairCode*
+ *   - sets (merge) partner user with ONLY partnerUid/pairId (no updatedAt, no code fields)
+ *   - deletes /pairCodes/{code}
  */
 export async function redeemPairCode(myUid: string, code: string): Promise<{ partnerUid: string; pairId: string }> {
   if (!myUid || !code) throw new Error('Missing uid or code');
 
   const codeRef = doc(db, 'pairCodes', code);
+  const codeSnap = await getDoc(codeRef);
+  if (!codeSnap.exists()) throw new Error('Invalid or expired code');
 
-  return await runTransaction(db, async (tx) => {
-    const codeSnap = await tx.get(codeRef);
-    if (!codeSnap.exists()) throw new Error('Invalid code');
+  const data = codeSnap.data() as { ownerUid?: string; expiresAt?: string; used?: boolean };
+  if (!data?.ownerUid) throw new Error('Invalid code');
+  if (data.used) throw new Error('Code already used');
+  if (data.ownerUid === myUid) throw new Error('You cannot link with yourself');
 
-    const data = codeSnap.data() as { ownerUid: string; expiresAt?: string; used?: boolean };
-    if (data.used) throw new Error('Code already used');
-    if (data.ownerUid === myUid) throw new Error('You cannot link with yourself');
+  if (data.expiresAt) {
+    const isExpired = new Date(data.expiresAt).getTime() < Date.now();
+    if (isExpired) throw new Error('Code expired');
+  }
 
-    // expiry check
-    if (data.expiresAt) {
-      const isExpired = new Date(data.expiresAt).getTime() < Date.now();
-      if (isExpired) throw new Error('Code expired');
-    }
+  const partnerUid = data.ownerUid;
+  const pairId = [myUid, partnerUid].sort().join('_');
 
-    const partnerUid = data.ownerUid;
+  const batch = writeBatch(db);
 
-    // Optional: block if either already linked
-    const myRef = doc(db, 'users', myUid);
-    const partnerRef = doc(db, 'users', partnerUid);
-    const mySnap = await tx.get(myRef);
-    const partnerSnap = await tx.get(partnerRef);
+  // Upsert pair
+  batch.set(
+    doc(db, 'pairs', pairId),
+    { members: [myUid, partnerUid], createdAt: serverTimestamp() },
+    { merge: true }
+  );
 
-    const myData = mySnap.exists() ? (mySnap.data() as any) : {};
-    const partnerData = partnerSnap.exists() ? (partnerSnap.data() as any) : {};
-
-    if (myData.partnerUid && myData.partnerUid !== partnerUid) {
-      throw new Error('You are already linked to someone else');
-    }
-    if (partnerData.partnerUid && partnerData.partnerUid !== myUid) {
-      throw new Error('Code owner is already linked to someone else');
-    }
-
-    // Deterministic pairId (sorted)
-    const pairId = [myUid, partnerUid].sort().join('_');
-
-    tx.update(myRef, {
+  // My user — allowed freely (isSelf). Also clear any visible invite code fields.
+  batch.set(
+    doc(db, 'users', myUid),
+    {
       partnerUid,
       pairId,
-      updatedAt: serverTimestamp(),
       pairCode: null,
       pairCodeExpiresAt: null,
-    });
-    tx.update(partnerRef, {
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true }
+  );
+
+  // Partner user — rule only lets us change pairId & partnerUid (no updatedAt/other keys).
+  batch.set(
+    doc(db, 'users', partnerUid),
+    {
       partnerUid: myUid,
       pairId,
-      updatedAt: serverTimestamp(),
-      pairCode: null,
-      pairCodeExpiresAt: null,
-    });
+    } as any,
+    { merge: true }
+  );
 
-    // Mark used (audit)
-    tx.update(codeRef, { used: true, usedAt: serverTimestamp() });
-    return { partnerUid, pairId };
-  }).then(async (res) => {
-    // Hard delete after success
-    try {
-      await deleteDoc(doc(db, 'pairCodes', code));
-    } catch {}
-    return res;
-  });
-}
+  // One-time use
+  batch.delete(codeRef);
 
-/** Convenience unlink (optional) */
-export async function unlinkPartners(myUid: string, partnerUid: string) {
-  const myRef = doc(db, 'users', myUid);
-  const ptRef = doc(db, 'users', partnerUid);
-  await updateDoc(myRef, { partnerUid: null, pairId: null, updatedAt: serverTimestamp() }).catch(() => {});
-  await updateDoc(ptRef, { partnerUid: null, pairId: null, updatedAt: serverTimestamp() }).catch(() => {});
-}
+  await batch.commit();
 
-/** Manual revoke (rarely needed now that we auto-expire) */
-export async function revokePairCode(code: string) {
-  await deleteDoc(doc(db, 'pairCodes', code));
+  // Best-effort: hard delete the code doc if still present (race safe)
+  try {
+    await deleteDoc(codeRef);
+  } catch {}
+
+  return { partnerUid, pairId };
 }

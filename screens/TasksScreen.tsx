@@ -25,7 +25,6 @@ import ThemedText from '../components/ThemedText';
 import { useTokens, type ThemeTokens } from '../components/ThemeProvider';
 import ToastUndo from '../components/ToastUndo';
 
-// Spotlight
 import {
   SpotlightAutoStarter,
   SpotlightTarget,
@@ -39,6 +38,7 @@ import {
   doc,
   getDocs,
   limit,
+  onSnapshot,
   orderBy,
   query,
   serverTimestamp,
@@ -47,15 +47,15 @@ import {
 } from 'firebase/firestore';
 import { db } from '../firebaseConfig';
 import useAuthListener from '../hooks/useAuthListener';
+import usePointsTotal from '../hooks/usePointsTotal';
 
 import { getPairId } from '../utils/partner';
 import { createPointsEntry, deletePointsEntry } from '../utils/points';
-import { listenDoc, listenQuery } from '../utils/snap';
+import { listenDoc } from '../utils/snap';
 import { activateCatchup, isoWeekStr, notifyTaskCompletion } from '../utils/streak';
 
-// Rewards quick-add from Tasks
 import RedeemModal from '../components/RedeemModal';
-import { addReward } from '../utils/rewards';
+import { addReward, listenRewards, redeemReward, type RewardDoc } from '../utils/rewards';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -75,7 +75,6 @@ type TaskDoc = {
 const FIRST_DONE_KEY = (uid: string) =>
   `lp:first-done:${uid}:${new Date().toISOString().slice(0, 10)}`;
 
-// theme utility
 function withAlpha(hex: string, alpha: number) {
   const h = hex.replace('#', '');
   const full = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
@@ -88,11 +87,13 @@ const TasksScreen: React.FC = () => {
   const route = useRoute<any>();
   const insets = useSafeAreaInsets();
   const { user } = useAuthListener();
+  const { total } = usePointsTotal(user?.uid);
   const t = useTokens();
   const s = useMemo(() => styles(t), [t]);
 
   const [pairId, setPairId] = useState<string | null>(null);
   const [tasks, setTasks] = useState<TaskDoc[]>([]);
+  const [rewards, setRewards] = useState<RewardDoc[]>([]);
 
   const [title, setTitle] = useState('');
   const [titleError, setTitleError] = useState<string | undefined>(undefined);
@@ -115,7 +116,7 @@ const TasksScreen: React.FC = () => {
     catchupIntentWeekISO?: string;
   } | null>(null);
 
-  // Accept preset idea from Home: nav.navigate('Tasks', { presetIdea: '...' })
+  // Accept preset idea
   useEffect(() => {
     const preset: string | undefined = route.params?.presetIdea;
     if (preset) {
@@ -134,29 +135,56 @@ const TasksScreen: React.FC = () => {
     })();
   }, [user]);
 
-  // Shared-only listener (both partners see)
+  // Rewards listener (lives on Tasks now)
+  useEffect(() => {
+    if (!user) return;
+    const off = listenRewards(user.uid, pairId ?? null, setRewards);
+    return () => off && off();
+  }, [user, pairId]);
+
+  // Shared-only listener with graceful index fallback
   useEffect(() => {
     if (!user || !pairId) {
       setTasks([]);
       return;
     }
-    const qRef = query(
-      collection(db, 'tasks'),
-      where('pairId', '==', pairId),
-      orderBy('createdAt', 'desc')
-    );
-    const unsub = listenQuery(
-      qRef,
-      (snap) => {
-        const next: TaskDoc[] = snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<TaskDoc, 'id'>) }));
-        setTasks(next);
-      },
-      'tasks:shared'
-    );
-    return () => unsub();
+
+    const baseCol = collection(db, 'tasks');
+    const qWithOrder = query(baseCol, where('pairId', '==', pairId), orderBy('createdAt', 'desc'));
+
+    let unsub: (() => void) | undefined;
+
+    const startOrdered = () => {
+      unsub = onSnapshot(
+        qWithOrder,
+        (snap) => {
+          const next: TaskDoc[] = snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<TaskDoc, 'id'>) }));
+          setTasks(next);
+        },
+        (err) => {
+          if ((err as any)?.code === 'failed-precondition') {
+            const qNoOrder = query(baseCol, where('pairId', '==', pairId));
+            unsub = onSnapshot(
+              qNoOrder,
+              (snap2) => {
+                const next: TaskDoc[] = snap2.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<TaskDoc, 'id'>) }));
+                next.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+                setTasks(next);
+              },
+              (e2) => console.warn('[firestore] fallback query error', e2)
+            );
+          } else {
+            console.warn('[firestore] tasks listener error', err);
+          }
+        }
+      );
+    };
+
+    startOrdered();
+    return () => unsub && unsub();
   }, [user, pairId]);
 
-  // Migrate recent orphan tasks (pairId == null) to current pair after link (best-effort)
+  // Optional migration: attach recent no-pair tasks to current pair
   useEffect(() => {
     (async () => {
       if (!user || !pairId) return;
@@ -172,9 +200,7 @@ const TasksScreen: React.FC = () => {
         await Promise.all(
           orphan.map(d => updateDoc(doc(db, 'tasks', d.id), { pairId, updatedAt: serverTimestamp() }))
         );
-      } catch {
-        // ignore
-      }
+      } catch {}
     })();
   }, [user, pairId]);
 
@@ -203,7 +229,7 @@ const TasksScreen: React.FC = () => {
       const payload: Omit<TaskDoc, 'id'> = {
         title: trimmed,
         ownerId: user.uid,
-        pairId,            // shared-only
+        pairId,
         done: false,
         points: 0,
         createdAt: serverTimestamp(),
@@ -308,7 +334,24 @@ const TasksScreen: React.FC = () => {
     }
   };
 
-  // Spotlight steps (shared-only)
+  const onRedeem = async (r: RewardDoc) => {
+    if (!user) return;
+    const current = total ?? 0;
+    if (current < r.cost) {
+      const short = r.cost - current;
+      Alert.alert(
+        'Not enough points',
+        `You need ${short} more point${short === 1 ? '' : 's'} to redeem “${r.title}”.`
+      );
+      return;
+    }
+    try {
+      await redeemReward(user.uid, pairId ?? null, r);
+    } catch (e: any) {
+      Alert.alert('Could not redeem reward', e?.message ?? 'Please try again.');
+    }
+  };
+
   const TASKS_TOUR_STEPS: SpotlightStep[] = useMemo(() => {
     const steps: SpotlightStep[] = [
       {
@@ -391,16 +434,44 @@ const TasksScreen: React.FC = () => {
     return !alreadyUsedThisWeek && !alreadyArmedThisWeek && !pending;
   }, [streak]);
 
-  // Everything above the list now scrolls with the list
+  // Rewards section (ABOVE the task input/list)
+  const rewardsSection = useMemo(() => {
+    if (rewards.length === 0) return null;
+    return (
+      <Card style={{ marginBottom: 12, borderWidth: 1, borderColor: '#F0E6EF' }}>
+        <ThemedText variant="subtitle" style={{ marginBottom: 8 }}>Rewards</ThemedText>
+        {rewards.map((item, i) => {
+          const canRedeem = (total ?? 0) >= item.cost;
+          return (
+            <View key={item.id} style={[s.rewardRow, i > 0 && s.hairlineTop]}>
+              <View style={{ flex: 1 }}>
+                <ThemedText variant="title">{item.title}</ThemedText>
+                <ThemedText variant="caption" color={t.colors.textDim}>
+                  Cost {item.cost} pts{!canRedeem ? ` • Need ${item.cost - (total ?? 0)}` : ''}
+                </ThemedText>
+              </View>
+              <Button label="Redeem" onPress={() => onRedeem(item)} disabled={!canRedeem} />
+            </View>
+          );
+        })}
+      </Card>
+    );
+  }, [rewards, t.colors.textDim, s.rewardRow, s.hairlineTop, total]);
+
   const listHeader = (
     <View>
-      {/* Header */}
-      <View style={[s.header, { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }]}>
-        <View>
-          <ThemedText variant="display">Shared tasks</ThemedText>
+      {/* Header + Add-reward */}
+      <View style={s.headerRow}>
+        <ThemedText variant="display" style={{ flexShrink: 1, marginRight: t.spacing.s }}>
+          Shared tasks
+        </ThemedText>
+        <View style={{ flexShrink: 0 }}>
+          <Button label="Add reward" variant="outline" onPress={() => setShowAddReward(true)} />
         </View>
-        <Button label="Add reward" variant="outline" onPress={() => setShowAddReward(true)} />
       </View>
+
+      {/* Rewards come first */}
+      {rewardsSection}
 
       {!pairId && (
         <Card style={{ marginHorizontal: t.spacing.md, marginBottom: t.spacing.md, paddingVertical: 12 }}>
@@ -425,7 +496,6 @@ const TasksScreen: React.FC = () => {
         </Card>
       )}
 
-      {/* Catch-up helper */}
       {showCatchupChip && (
         <View style={{ paddingHorizontal: t.spacing.md, marginBottom: t.spacing.s }}>
           <SpotlightTarget id="ts-catchup">
@@ -449,7 +519,7 @@ const TasksScreen: React.FC = () => {
         </View>
       )}
 
-      {/* Composer */}
+      {/* Task input & suggestions */}
       <Card style={{ marginBottom: t.spacing.md }}>
         <View style={s.inputRow}>
           <SpotlightTarget id="ts-input">
@@ -473,7 +543,6 @@ const TasksScreen: React.FC = () => {
           </SpotlightTarget>
         </View>
 
-        {/* Quick ideas */}
         <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: t.spacing.s }}>
           Tap to add to your list.
         </ThemedText>
@@ -528,27 +597,47 @@ const TasksScreen: React.FC = () => {
           onHide={() => setToast({ visible: false, msg: '' })}
         />
 
-        {/* Add reward modal */}
-        <RedeemModal
-          visible={showAddReward}
-          onClose={() => setShowAddReward(false)}
-          onCreate={onCreateReward}
-        />
+        {/* Add / create reward */}
+        <RedeemModal visible={showAddReward} onClose={() => setShowAddReward(false)} onCreate={onCreateReward} />
 
-        {/* Auto-start tutorial */}
         <SpotlightAutoStarter uid={user?.uid ?? null} steps={TASKS_TOUR_STEPS} persistKey="tour-tasks-shared-only" />
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
 };
 
+function toMillis(ts: any): number {
+  if (!ts) return 0;
+  if (typeof ts.toMillis === 'function') return ts.toMillis();
+  if (ts.seconds != null) return ts.seconds * 1000 + (ts.nanoseconds || 0) / 1e6;
+  try { return new Date(ts).getTime() || 0; } catch { return 0; }
+}
+
+function extractIndexUrl(msg: string): string | null {
+  const m = msg.match(/https:\/\/console\.firebase\.google\.com\/[^\s)]+/);
+  return m ? m[0] : null;
+}
+
 const styles = (t: ThemeTokens) =>
   StyleSheet.create({
     screen: { flex: 1, backgroundColor: t.colors.bg },
 
+    // Responsive header row that wraps the button when space is tight
+    headerRow: {
+      paddingHorizontal: t.spacing.md,
+      paddingTop: t.spacing.md,
+      paddingBottom: t.spacing.s,
+      flexDirection: 'row',
+      alignItems: 'flex-end',
+      justifyContent: 'space-between',
+      flexWrap: 'wrap',
+      rowGap: 8,
+      columnGap: 8,
+    },
+
+    // (kept for backward compatibility if used elsewhere)
     header: { padding: t.spacing.md, paddingBottom: t.spacing.s },
 
-    // Catch-up chip: derive tint from primary (theme-safe)
     catchupChip: {
       alignSelf: 'flex-start',
       backgroundColor: withAlpha(t.colors.primary, 0.10),
@@ -587,7 +676,6 @@ const styles = (t: ThemeTokens) =>
     },
 
     metaRow: { marginTop: 2 },
-
     pointsPill: {
       paddingHorizontal: 10,
       paddingVertical: 4,
@@ -615,6 +703,10 @@ const styles = (t: ThemeTokens) =>
       borderWidth: 1,
       borderColor: t.colors.border,
     },
+
+    // Rewards
+    rewardRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 10 },
+    hairlineTop: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#F0E6EF', marginTop: 10, paddingTop: 10 },
   });
 
 export default TasksScreen;

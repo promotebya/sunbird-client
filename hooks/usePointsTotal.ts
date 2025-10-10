@@ -1,6 +1,7 @@
 // hooks/usePointsTotal.ts
+import { doc, onSnapshot } from 'firebase/firestore';
 import { useEffect, useState } from 'react';
-import { getPairId } from '../utils/partner';
+import { db } from '../firebaseConfig';
 import { listenTotalPoints, listenWeekPoints } from '../utils/points';
 
 export default function usePointsTotal(uid?: string | null) {
@@ -9,14 +10,25 @@ export default function usePointsTotal(uid?: string | null) {
   const [weekly, setWeekly] = useState(0);
   const [popped, setPopped] = useState(false);
 
+  // Live-listen to my user doc so pairId updates immediately on link/unlink
   useEffect(() => {
-    let mounted = true;
-    (async () => {
-      if (!uid) return setPairId(null);
-      const p = await getPairId(uid);
-      if (mounted) setPairId(p ?? null);
-    })();
-    return () => { mounted = false; };
+    if (!uid) {
+      setPairId(null);
+      return;
+    }
+    const uref = doc(db, 'users', uid);
+    const off = onSnapshot(
+      uref,
+      (snap) => {
+        const data = snap.data() as any;
+        setPairId((data?.pairId as string | null) ?? null);
+      },
+      () => {
+        // If for some reason we cannot read our user doc, behave as unpaired
+        setPairId(null);
+      }
+    );
+    return () => off();
   }, [uid]);
 
   useEffect(() => {
