@@ -67,9 +67,17 @@ export function listenRewards(
     : query(col, where('ownerId', '==', ownerId));
 
   let detach: Unsubscribe = () => {};
+  let detached = false;
+  const safeDetach = () => {
+    if (!detached) {
+      try { detach(); } catch {}
+      detached = true;
+    }
+  };
 
   const attachNoOrder = () => {
-    detach = onSnapshot(
+    let fallbackUnsub: Unsubscribe = () => {};
+    fallbackUnsub = onSnapshot(
       qNoOrder,
       (snap) => {
         const items = mapRows(snap.docs as any).sort((a, b) => {
@@ -85,38 +93,48 @@ export function listenRewards(
       },
       (err: any) => {
         if (err?.code === 'permission-denied') {
-          console.warn('listenRewards fallback permission-denied; returning empty list.');
+          // During unlink the rules flip; stop listening quietly.
+          try { fallbackUnsub(); } catch {}
           cb([]);
-        } else {
-          console.warn('listenRewards fallback snapshot error:', err);
+          return;
         }
+        console.warn('listenRewards fallback snapshot error:', err);
       }
     );
+
+    // Replace top-level detach with fallback unsub so caller can clean up
+    detach = () => {
+      try { fallbackUnsub(); } catch {}
+    };
   };
 
-  // Try ordered query first
+  // Try ordered query first (fast & indexed)
   detach = onSnapshot(
     qWithOrder,
     (snap) => cb(mapRows(snap.docs as any)),
     (err: any) => {
       if (err?.code === 'failed-precondition') {
+        // Index missing (or still building) -> fall back to client-side sort
         console.warn(
           'Missing composite index for rewards; using client-side sort fallback.\n',
           err?.message ?? err
         );
-        try { detach && detach(); } catch {}
+        safeDetach();
         attachNoOrder();
-      } else if (err?.code === 'permission-denied') {
-        console.warn('listenRewards permission-denied; returning empty list.');
-        cb([]);
-      } else {
-        console.error('listenRewards error:', err);
+        return;
       }
+      if (err?.code === 'permission-denied') {
+        // Access revoked mid-flight (e.g., unlink) -> tear down and clear UI
+        safeDetach();
+        cb([]);
+        return;
+      }
+      console.error('listenRewards error:', err);
     }
   );
 
   return () => {
-    try { detach && detach(); } catch {}
+    safeDetach();
   };
 }
 

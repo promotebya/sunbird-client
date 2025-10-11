@@ -2,15 +2,15 @@
 import {
   addDoc,
   collection,
+  onSnapshot,
   orderBy,
   query,
   serverTimestamp,
+  Unsubscribe,
   where,
-  type Unsubscribe,
 } from 'firebase/firestore';
 import { getDownloadURL, getStorage, ref, uploadBytes } from 'firebase/storage';
 import { db } from '../firebaseConfig';
-import { listenQuery } from './snap';
 
 export type MemoryKind = 'text' | 'milestone' | 'photo';
 
@@ -33,6 +33,8 @@ const rid = () => `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 /**
  * Subscribe to memories. If a pairId is provided, shows the shared feed;
  * otherwise shows only the user's own memories.
+ *
+ * Hardened to tear down quietly on permission changes (e.g., unlink).
  */
 export function subscribeMemories(
   uid: string,
@@ -41,12 +43,19 @@ export function subscribeMemories(
 ): Unsubscribe {
   const pairId = (opts as any)?.pairId ?? null;
 
+  // If we don't have a scope yet, return a no-op unsub and clear UI.
+  if (!uid || (!pairId && uid.length === 0)) {
+    onData([]);
+    return () => {};
+  }
+
   const col = collection(db, 'memories');
   const q = pairId
     ? query(col, where('pairId', '==', pairId), orderBy('createdAt', 'desc'))
     : query(col, where('ownerId', '==', uid), orderBy('createdAt', 'desc'));
 
-  return listenQuery(
+  let unsub: Unsubscribe = () => {};
+  unsub = onSnapshot(
     q,
     (snap) => {
       const list: MemoryDoc[] = snap.docs.map((d) => ({
@@ -55,8 +64,20 @@ export function subscribeMemories(
       }));
       onData(list);
     },
-    'memories'
+    (err: any) => {
+      if (err?.code === 'permission-denied') {
+        // Access revoked mid-stream (likely unlinked) — stop and clear.
+        try { unsub(); } catch {}
+        onData([]);
+        return;
+      }
+      console.warn('[memories] snapshot error:', err);
+    }
   );
+
+  return () => {
+    try { unsub(); } catch {}
+  };
 }
 
 /**

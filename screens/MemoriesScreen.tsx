@@ -1,3 +1,4 @@
+// MemoriesScreen.tsx
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import { useNavigation } from '@react-navigation/native';
@@ -325,20 +326,15 @@ const MemoriesScreen: React.FC = () => {
     </>
   );
 
+  // ⬇️ Tutorial: now only 4 steps; removed the 5th step (card/empty-tip)
   const tourSteps = useMemo<SpotlightStep[]>(() => {
-    const base: SpotlightStep[] = [
+    return [
       { id: 'mem-welcome', targetId: null, title: 'Memories 📸', text: 'Save sweet moments as photos or notes. Quick 20-second tour?', placement: 'bottom', allowBackdropTapToNext: true },
       { id: 'mem-prompt', targetId: 'mem-prompt-card', title: 'Today’s prompt', text: 'Use these ideas to quickly capture a moment.', placement: 'top', padding: 10 },
       { id: 'mem-shuffle-step', targetId: 'mem-shuffle', title: 'Shuffle', text: 'Tap to get a different idea.', placement: 'top', padding: 10 },
       { id: 'mem-add', targetId: 'mem-add-section', title: 'Add memory', text: 'Create a new memory with a photo or a quick note.', placement: 'top', padding: 12 },
     ];
-    if (items.length > 0) {
-      base.push({ id: 'mem-card', targetId: 'mem-first-card', title: 'Memory card', text: 'Tap to view details. Long-press for quick actions.', placement: 'top', padding: 12 });
-    } else {
-      base.push({ id: 'mem-empty-tip', targetId: 'mem-empty', title: 'Your timeline', text: 'New memories will appear here after you add one.', placement: 'top', padding: 12 });
-    }
-    return base;
-  }, [items.length]);
+  }, []);
 
   const goalDone = weekCount >= GOAL; // ⬅️ new
 
@@ -347,7 +343,7 @@ const MemoriesScreen: React.FC = () => {
       {burstKey ? <ConfettiTiny key={burstKey} /> : null}
 
       <FlatList
-        data={filteredItems}                                    // ⬅️ filter applied
+        data={filteredItems}
         keyExtractor={(it) => it.id}
         ItemSeparatorComponent={() => <View style={{ height: t.spacing.s }} />}
         renderItem={renderItem}
@@ -364,7 +360,6 @@ const MemoriesScreen: React.FC = () => {
               <ThemedText variant="display">Memories</ThemedText>
               <Button label="Settings" variant="outline" onPress={() => nav.navigate('Settings')} />
             </View>
-
 
             {/* Add-type selector (top) */}
             <View style={s.segmented}>
@@ -559,7 +554,6 @@ const MemoriesScreen: React.FC = () => {
             </View>
           </SpotlightTarget>
         }
-        
       />
       <SpotlightAutoStarter uid={user?.uid ?? null} steps={tourSteps} persistKey="memories-first-run" />
     </Screen>

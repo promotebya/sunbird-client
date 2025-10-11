@@ -23,7 +23,7 @@ import Input from '../components/Input';
 import ThemedText from '../components/ThemedText';
 import { useTokens, type ThemeTokens } from '../components/ThemeProvider';
 
-import { addDoc, collection, serverTimestamp } from 'firebase/firestore';
+import { collection, doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { db } from '../firebaseConfig';
 import useAuthListener from '../hooks/useAuthListener';
 import { getPairId, getPartnerUid } from '../utils/partner';
@@ -133,14 +133,17 @@ const LoveNotesScreen: React.FC = () => {
         console.warn('[push] partner has no tokens yet');
         return;
       }
-      const { tickets, receipts } = await sendToTokens(tokens, {
+      // High-priority / time-sensitive push (does not block UI)
+      const message: any = {
         title: 'New love note 💌',
         body: bodyText,
         data: { kind: 'lp:loveNote', noteId, fromUid: user?.uid ?? null, pairId },
         channelId: ANDROID_CHANNEL_ID,
-      });
-      console.log('[push] tickets:', tickets);
-      console.log('[push] receipts:', receipts);
+        priority: 'high',                // Android hint
+        interruptionLevel: 'timeSensitive', // iOS 15+ hint
+      };
+      // Fire-and-forget to avoid waiting for network/receipt latency
+      sendToTokens(tokens, message).catch((e: any) => console.warn('[push] send error', e));
     } catch (e) {
       console.warn('[push] send error', e);
     }
@@ -158,7 +161,11 @@ const LoveNotesScreen: React.FC = () => {
       return;
     }
     try {
-      const ref = await addDoc(collection(db, 'notes'), {
+      // Prepare a document reference up-front and push in parallel
+      const noteRef = doc(collection(db, 'notes'));
+      const partnerUidPromise = getPartnerUid(user.uid);
+
+      const writePromise = setDoc(noteRef, {
         ownerId: user.uid,
         pairId,
         text: tText,
@@ -166,12 +173,12 @@ const LoveNotesScreen: React.FC = () => {
         updatedAt: serverTimestamp(),
       });
 
-      const partnerUid = await getPartnerUid(user.uid);
-      if (partnerUid) {
-        await sendPushToPartner(partnerUid, tText, ref.id);
-      } else {
+      const pushPromise = partnerUidPromise.then((pUid) => {
+        if (pUid) return sendPushToPartner(pUid, tText, noteRef.id);
         console.warn('[push] no partnerUid found');
-      }
+      });
+
+      await Promise.all([writePromise, pushPromise]);
 
       setText('');
       Keyboard.dismiss();
@@ -276,7 +283,7 @@ const LoveNotesScreen: React.FC = () => {
                 ref={inputRef}
                 value={text}
                 onChangeText={setText}
-                placeholder="Write something for both of you…"
+                placeholder="Write something nice for your partner…"
                 returnKeyType="send"
                 onSubmitEditing={sendNote}
               />

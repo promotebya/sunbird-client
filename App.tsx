@@ -3,8 +3,9 @@ import { NavigationContainer } from '@react-navigation/native';
 import Constants from 'expo-constants';
 import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
-import { useEffect } from 'react';
-import { Platform } from 'react-native';
+import * as SplashScreen from 'expo-splash-screen';
+import { useEffect, useRef, useState } from 'react';
+import { Animated, Image, LogBox, Platform, StyleSheet } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
@@ -18,6 +19,17 @@ import AuthNavigator from './navigation/AuthNavigator';
 // Firestore (to save Expo push tokens)
 import { arrayUnion, doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { db } from './firebaseConfig';
+
+// Quiet known noisy logs without hiding real errors
+LogBox.ignoreLogs([
+  'setLayoutAnimationEnabledExperimental is currently a no-op in the New Architecture.',
+  'Uncaught Error in snapshot listener:',
+  'Missing or insufficient permissions.',
+  "WebChannelConnection RPC 'Listen' stream",
+]);
+
+// Keep native splash up until we decide to hide it (we'll hide ASAP on Android)
+SplashScreen.preventAutoHideAsync().catch(() => {});
 
 // ---------- Helpers for “Make their day” nudges ----------
 const NUDGE_PROMPTS: string[] = [
@@ -58,8 +70,8 @@ const randInt = (min: number, max: number) =>
 
 function startOfWeekMonday(d = new Date()) {
   const copy = new Date(d);
-  const day = copy.getDay(); // 0..6 (Sun..Sat)
-  const diffToMon = (day + 6) % 7; // 0=Mon
+  const day = copy.getDay();
+  const diffToMon = (day + 6) % 7;
   copy.setHours(0, 0, 0, 0);
   copy.setDate(copy.getDate() - diffToMon);
   return copy;
@@ -78,7 +90,7 @@ function makeRandomWeeklyTriggers(targetCount: number): Date[] {
     const usedDays = new Set<number>();
 
     for (let i = 0; i < hitsThisWeek && out.length < targetCount; i++) {
-      let day = randInt(0, 6); // 0=Mon..6=Sun
+      let day = randInt(0, 6);
       let guard = 0;
       while (usedDays.has(day) && guard++ < 10) day = randInt(0, 6);
       usedDays.add(day);
@@ -113,21 +125,16 @@ async function registerAndSaveExpoPushToken(uid: string) {
         : (await Notifications.requestPermissionsAsync()).status === 'granted';
     if (!granted) return null;
 
-    // Important: projectId must match app.json -> extra.eas.projectId
     const projectId =
       (Constants as any)?.expoConfig?.extra?.eas?.projectId ??
       (Constants as any)?.easConfig?.projectId;
 
     const token = (await Notifications.getExpoPushTokenAsync({ projectId })).data;
 
-    // Save into an array so a user can have multiple devices
     const userRef = doc(db, 'users', uid);
     await setDoc(
       userRef,
-      {
-        expoPushTokens: arrayUnion(token),
-        lastPushTokenAt: serverTimestamp(),
-      },
+      { expoPushTokens: arrayUnion(token), lastPushTokenAt: serverTimestamp() },
       { merge: true }
     );
 
@@ -151,7 +158,6 @@ function useKindnessNudgesScheduler(userId: string | null | undefined) {
       }
 
       if (Platform.OS === 'android') {
-        // Ensure a default channel exists
         await Notifications.setNotificationChannelAsync('default', {
           name: 'Kindness nudges',
           importance: Notifications.AndroidImportance.DEFAULT,
@@ -161,7 +167,7 @@ function useKindnessNudgesScheduler(userId: string | null | undefined) {
         }).catch(() => {});
       }
 
-      const TARGET = 48; // ~12 weeks @ 4/wk
+      const TARGET = 48;
       const existing = await Notifications.getAllScheduledNotificationsAsync();
       if (cancelled) return;
 
@@ -176,7 +182,6 @@ function useKindnessNudgesScheduler(userId: string | null | undefined) {
           trigger: {
             type: Notifications.SchedulableTriggerInputTypes.DATE,
             date: when,
-            // 👇 Tag a channel for Android reliability
             ...(Platform.OS === 'android' ? { channelId: 'default' } : null),
           } as any,
         });
@@ -189,10 +194,49 @@ function useKindnessNudgesScheduler(userId: string | null | undefined) {
   }, [userId]);
 }
 
+// ---------- ANDROID INTRO OVERLAY (show immediately; fade once nav is ready) ----------
+const SPLASH_SOURCE = require('./assets/splash.png');
+const _src = Image.resolveAssetSource(SPLASH_SOURCE) || { width: 320, height: 100 };
+const SPLASH_AR = _src.width && _src.height ? _src.width / _src.height : 3.2;
+
 export default function App() {
   const { user } = useAuthListener();
 
-  // Global notifications handler (modern fields: banner/list)
+  // Always render overlay on Android; we'll fade it out later
+  const [showIntro, setShowIntro] = useState(Platform.OS === 'android');
+  const introOpacity = useRef(new Animated.Value(1)).current;
+  const [navReady, setNavReady] = useState(false);
+
+  // 🔑 KEY CHANGE: hide native (system) splash **immediately** on Android
+  // so users don't sit on the small system/icon splash. Our overlay covers the gap.
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    const t = setTimeout(() => {
+      SplashScreen.hideAsync().catch(() => {});
+    }, 10); // next tick after first render
+    return () => clearTimeout(t);
+  }, []);
+
+  // iOS: hide native splash when navigation is ready
+  useEffect(() => {
+    if (Platform.OS === 'ios' && navReady) {
+      SplashScreen.hideAsync().catch(() => {});
+    }
+  }, [navReady]);
+
+  // Fade out the Android overlay once navigation is ready
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    if (!navReady) return;
+    Animated.timing(introOpacity, {
+      toValue: 0,
+      duration: 240,
+      delay: 500,
+      useNativeDriver: true,
+    }).start(() => setShowIntro(false));
+  }, [navReady, introOpacity]);
+
+  // Global notifications handler
   useEffect(() => {
     Notifications.setNotificationHandler({
       handleNotification: async () => ({
@@ -242,12 +286,33 @@ export default function App() {
       <SafeAreaProvider>
         <ThemeProvider>
           <SpotlightProvider>
-            <NavigationContainer>
+            <NavigationContainer onReady={() => setNavReady(true)}>
               {user ? <AppNavigator /> : <AuthNavigator />}
             </NavigationContainer>
+
+            {/* Android post-splash overlay with a CENTERED, CONTAINED wordmark */}
+            {showIntro && Platform.OS === 'android' && (
+              <Animated.View style={[styles.splashOverlay, { opacity: introOpacity }]} pointerEvents="none">
+                <Image source={SPLASH_SOURCE} resizeMode="contain" style={styles.splashWordmark} />
+              </Animated.View>
+            )}
           </SpotlightProvider>
         </ThemeProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );
 }
+
+const styles = StyleSheet.create({
+  splashOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  splashWordmark: {
+    width: '72%',
+    maxWidth: 420,
+    aspectRatio: SPLASH_AR,
+  },
+});

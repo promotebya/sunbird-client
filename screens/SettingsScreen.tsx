@@ -24,8 +24,13 @@ import tokens from '../components/tokens';
 import useAuthListener from '../hooks/useAuthListener';
 import usePartnerUid from '../hooks/usePartnerUid';
 
-import { generatePairCode, redeemPairCode, type PairCodeInfo } from '../utils/pairing';
-import { getPairId, unlinkPair } from '../utils/partner';
+import {
+  generatePairCode,
+  getPairId,
+  redeemPairCode,
+  unlinkPair,
+  type PairCodeInfo,
+} from '../utils/pairing';
 import { showOpenSettingsAlert } from '../utils/permissions';
 
 import { useNavigation } from '@react-navigation/native';
@@ -118,7 +123,11 @@ const SettingsScreen: React.FC = () => {
   const t = useTokens();
 
   const { user } = useAuthListener();
-  const partnerUid = usePartnerUid(user?.uid ?? null);
+
+  // When unlinking, pause any partner-related hooks to avoid partner reads
+  const [unlinking, setUnlinking] = useState(false);
+  const partnerUid = usePartnerUid(!unlinking && user ? user.uid : null);
+
   const [pairId, setPairId] = useState<string | null>(null);
 
   // Pairing
@@ -269,12 +278,15 @@ const SettingsScreen: React.FC = () => {
           style: 'destructive',
           onPress: async () => {
             try {
+              setUnlinking(true); // pause partner-related hooks
               await unlinkPair(user.uid);
               setPairId(null);
               setPairInfo(null);
               Alert.alert('Unlinked', 'Pairing removed.');
             } catch (e: any) {
               Alert.alert('Could not unlink', e?.message ?? 'Please try again.');
+            } finally {
+              setUnlinking(false);
             }
           },
         },

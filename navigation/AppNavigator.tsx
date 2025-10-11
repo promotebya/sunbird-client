@@ -214,6 +214,23 @@ function Tabs() {
         }}
       />
       <Tab.Screen
+        name="LoveNotes"
+        component={LoveNotesScreen}
+        options={{
+          title: 'Love Notes',
+          tabBarLabel: Platform.OS === 'ios' ? makeIOSLabel('Love Notes') : undefined,
+          tabBarIcon: ({ color, size }) => <Ionicons name="heart" size={iosIcon(size)} color={color} />,
+        }}
+      />
+      <Tab.Screen
+        name="Tasks"
+        component={TasksScreen}
+        options={{
+          tabBarLabel: Platform.OS === 'ios' ? makeIOSLabel('Tasks') : undefined,
+          tabBarIcon: ({ color, size }) => <Ionicons name="checkmark-done" size={iosIcon(size)} color={color} />,
+        }}
+      />
+      <Tab.Screen
         name="Memories"
         component={MemoriesScreen}
         options={{
@@ -229,23 +246,6 @@ function Tabs() {
           tabBarIcon: ({ color, size }) => <Ionicons name="alarm" size={iosIcon(size)} color={color} />,
           tabBarBadge: badge ?? undefined,
           tabBarBadgeStyle: { backgroundColor: t.colors.primary, color: '#fff' },
-        }}
-      />
-      <Tab.Screen
-        name="LoveNotes"
-        component={LoveNotesScreen}
-        options={{
-          title: 'Love Notes',
-          tabBarLabel: Platform.OS === 'ios' ? makeIOSLabel('Love Notes') : undefined,
-          tabBarIcon: ({ color, size }) => <Ionicons name="heart" size={iosIcon(size)} color={color} />,
-        }}
-      />
-      <Tab.Screen
-        name="Tasks"
-        component={TasksScreen}
-        options={{
-          tabBarLabel: Platform.OS === 'ios' ? makeIOSLabel('Tasks') : undefined,
-          tabBarIcon: ({ color, size }) => <Ionicons name="checkmark-done" size={iosIcon(size)} color={color} />,
         }}
       />
       <Tab.Screen

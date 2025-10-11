@@ -31,9 +31,9 @@
 
     "android": {
       "package": "com.promotebya.lovepoints",
-      "versionCode": 3,
+      "versionCode": 4,
       "adaptiveIcon": {
-        "foregroundImage": "./assets/icon.png",
+        "foregroundImage": "./assets/adaptive/splash_icon_foreground.png",
         "backgroundColor": "#FFFFFF"
       },
       "googleServicesFile": "./google-services.json",
@@ -41,11 +41,16 @@
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",
         "android.permission.POST_NOTIFICATIONS"
-      ]
+      ],
+      "splash": {
+        "image": "./assets/splash.png",
+        "resizeMode": "contain",
+        "backgroundColor": "#FFFFFF"
+      }
     },
 
     "notification": {
-      "icon": "./assets/icon.png",
+      "icon": "./assets/notification-icon.png",
       "color": "#FF4F8B"
     },
 

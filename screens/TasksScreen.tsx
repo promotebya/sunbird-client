@@ -49,7 +49,7 @@ import { db } from '../firebaseConfig';
 import useAuthListener from '../hooks/useAuthListener';
 import usePointsTotal from '../hooks/usePointsTotal';
 
-import { getPairId } from '../utils/partner';
+// import { getPairId } from '../utils/partner';
 import { createPointsEntry, deletePointsEntry } from '../utils/points';
 import { listenDoc } from '../utils/snap';
 import { activateCatchup, isoWeekStr, notifyTaskCompletion } from '../utils/streak';
@@ -92,6 +92,7 @@ const TasksScreen: React.FC = () => {
   const s = useMemo(() => styles(t), [t]);
 
   const [pairId, setPairId] = useState<string | null>(null);
+  const prevPairRef = useRef<string | null>(null);
   const [tasks, setTasks] = useState<TaskDoc[]>([]);
   const [rewards, setRewards] = useState<RewardDoc[]>([]);
 
@@ -126,19 +127,119 @@ const TasksScreen: React.FC = () => {
     }
   }, [route.params, nav]);
 
-  // Load pairId
+  // Live pairId from user doc
   useEffect(() => {
-    (async () => {
-      if (!user) return setPairId(null);
-      const p = await getPairId(user.uid);
-      setPairId(p ?? null);
-    })();
-  }, [user]);
+    if (!user?.uid) {
+      setPairId(null);
+      return;
+    }
+    const ref = doc(db, 'users', user.uid);
+    const off = listenDoc(ref, (snap) => {
+      const nextPair: string | null = snap.exists() ? ((snap.data() as any)?.pairId ?? null) : null;
+      setPairId(nextPair);
+    }, 'user:pairId');
+    return () => off && off();
+  }, [user?.uid]);
 
-  // Rewards listener (lives on Tasks now)
+  // Cleanup on unlink: tasks + rewards
   useEffect(() => {
-    if (!user) return;
-    const off = listenRewards(user.uid, pairId ?? null, setRewards);
+    if (!user?.uid) {
+      prevPairRef.current = null;
+      return;
+    }
+    const prev = prevPairRef.current;
+    if (prev && pairId == null) {
+      void cleanupTasksForPreviousPair(prev, user.uid);
+      void cleanupRewardsForPreviousPair(prev, user.uid);
+      // Make UI drop immediately (Android sometimes keeps last snapshot briefly)
+      setTasks([]);
+      setRewards([]);
+    }
+    prevPairRef.current = pairId ?? null;
+  }, [pairId, user?.uid]);
+
+  async function cleanupTasksForPreviousPair(prevPairId: string, uid: string) {
+    try {
+      const marker = `lp:tasks-cleaned:${prevPairId}:${uid}`;
+      const done = await AsyncStorage.getItem(marker);
+      if (done) return;
+
+      const col = collection(db, 'tasks');
+
+      // Delete MY tasks for that old pair
+      const mineSnap = await getDocs(query(col, where('ownerId', '==', uid), limit(500)));
+      const mineToDelete = mineSnap.docs
+        .filter(d => (d.data() as any)?.pairId === prevPairId)
+        .map(d => d.id);
+      await deleteInChunks(mineToDelete);
+
+      // Best-effort: delete any remaining shared tasks (may be denied; ignore)
+      try {
+        const sharedSnap = await getDocs(query(col, where('pairId', '==', prevPairId)));
+        const sharedIds = sharedSnap.docs.map(d => d.id);
+        await deleteInChunks(sharedIds);
+      } catch (e: any) {
+        console.warn('[tasks cleanup] shared delete skipped:', e?.code ?? e?.message ?? e);
+      }
+
+      await AsyncStorage.setItem(marker, '1');
+    } catch (e) {
+      console.warn('[tasks cleanup] error', e);
+    }
+  }
+
+  // Rewards cleanup mirrors tasks cleanup
+  async function cleanupRewardsForPreviousPair(prevPairId: string, uid: string) {
+    try {
+      const marker = `lp:rewards-cleaned:${prevPairId}:${uid}`;
+      const done = await AsyncStorage.getItem(marker);
+      if (done) return;
+
+      const col = collection(db, 'rewards');
+
+      // Delete MY rewards for that old pair (safe)
+      const mineSnap = await getDocs(query(col, where('ownerId', '==', uid), limit(500)));
+      const myRewards = mineSnap.docs
+        .filter(d => (d.data() as any)?.pairId === prevPairId)
+        .map(d => d.id);
+      await deleteInChunks(myRewards);
+
+      // Best-effort: delete any remaining shared rewards for that pair
+      try {
+        const sharedSnap = await getDocs(query(col, where('pairId', '==', prevPairId)));
+        const sharedIds = sharedSnap.docs.map(d => d.id);
+        await deleteInChunks(sharedIds);
+      } catch (e: any) {
+        console.warn('[rewards cleanup] shared delete skipped:', e?.code ?? e?.message ?? e);
+      }
+
+      await AsyncStorage.setItem(marker, '1');
+    } catch (e) {
+      console.warn('[rewards cleanup] error', e);
+    }
+  }
+
+  async function deleteInChunks(ids: string[], chunkSize = 300) {
+    for (let i = 0; i < ids.length; i += chunkSize) {
+      const slice = ids.slice(i, i + chunkSize);
+      // Keep this best-effort delete tolerant of failures
+      await Promise.all(
+        slice.map(id =>
+          deleteDoc(doc(db, 'rewards', id)).catch(() =>
+            deleteDoc(doc(db, 'tasks', id)).catch(() => {})
+          )
+        )
+      );
+    }
+  }
+
+  // Rewards listener — only when paired; otherwise clear
+  useEffect(() => {
+    if (!user || !pairId) {
+      setRewards([]);
+      return;
+    }
+    const off = listenRewards(user.uid, pairId, setRewards);
     return () => off && off();
   }, [user, pairId]);
 
@@ -352,6 +453,33 @@ const TasksScreen: React.FC = () => {
     }
   };
 
+  // NEW: delete reward (with undo). Honors security rules (only creator can delete if rules enforce it).
+  async function handleDeleteReward(r: RewardDoc) {
+    const backup = { ...r };
+    try {
+      await deleteDoc(doc(db, 'rewards', r.id));
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+      showUndo('Reward deleted', async () => {
+        // Re-create (new id) on undo
+        await addDoc(collection(db, 'rewards'), {
+          ownerId: backup.ownerId,
+          pairId: backup.pairId ?? pairId ?? null,
+          title: backup.title,
+          cost: backup.cost,
+          redeemed: false,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      });
+    } catch (e: any) {
+      const msg =
+        e?.code === 'permission-denied'
+          ? 'Only the creator can delete this reward.'
+          : e?.message ?? 'Please try again.';
+      Alert.alert('Delete failed', msg);
+    }
+  }
+
   const TASKS_TOUR_STEPS: SpotlightStep[] = useMemo(() => {
     const steps: SpotlightStep[] = [
       {
@@ -434,7 +562,6 @@ const TasksScreen: React.FC = () => {
     return !alreadyUsedThisWeek && !alreadyArmedThisWeek && !pending;
   }, [streak]);
 
-  // Rewards section (ABOVE the task input/list)
   const rewardsSection = useMemo(() => {
     if (rewards.length === 0) return null;
     return (
@@ -450,7 +577,19 @@ const TasksScreen: React.FC = () => {
                   Cost {item.cost} pts{!canRedeem ? ` • Need ${item.cost - (total ?? 0)}` : ''}
                 </ThemedText>
               </View>
-              <Button label="Redeem" onPress={() => onRedeem(item)} disabled={!canRedeem} />
+
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <Button label="Redeem" onPress={() => onRedeem(item)} disabled={!canRedeem} />
+                {/* NEW: delete reward */}
+                <Pressable
+                  onPress={() => handleDeleteReward(item)}
+                  style={s.deleteBtn}
+                  hitSlop={8}
+                  accessibilityLabel="Delete reward"
+                >
+                  <Ionicons name="trash-outline" size={20} color="#EF4444" />
+                </Pressable>
+              </View>
             </View>
           );
         })}
@@ -460,7 +599,6 @@ const TasksScreen: React.FC = () => {
 
   const listHeader = (
     <View>
-      {/* Header + Add-reward */}
       <View style={s.headerRow}>
         <ThemedText variant="display" style={{ flexShrink: 1, marginRight: t.spacing.s }}>
           Shared tasks
@@ -470,7 +608,6 @@ const TasksScreen: React.FC = () => {
         </View>
       </View>
 
-      {/* Rewards come first */}
       {rewardsSection}
 
       {!pairId && (
@@ -519,7 +656,6 @@ const TasksScreen: React.FC = () => {
         </View>
       )}
 
-      {/* Task input & suggestions */}
       <Card style={{ marginBottom: t.spacing.md }}>
         <View style={s.inputRow}>
           <SpotlightTarget id="ts-input">
@@ -597,7 +733,6 @@ const TasksScreen: React.FC = () => {
           onHide={() => setToast({ visible: false, msg: '' })}
         />
 
-        {/* Add / create reward */}
         <RedeemModal visible={showAddReward} onClose={() => setShowAddReward(false)} onCreate={onCreateReward} />
 
         <SpotlightAutoStarter uid={user?.uid ?? null} steps={TASKS_TOUR_STEPS} persistKey="tour-tasks-shared-only" />
@@ -622,7 +757,6 @@ const styles = (t: ThemeTokens) =>
   StyleSheet.create({
     screen: { flex: 1, backgroundColor: t.colors.bg },
 
-    // Responsive header row that wraps the button when space is tight
     headerRow: {
       paddingHorizontal: t.spacing.md,
       paddingTop: t.spacing.md,
@@ -635,7 +769,6 @@ const styles = (t: ThemeTokens) =>
       columnGap: 8,
     },
 
-    // (kept for backward compatibility if used elsewhere)
     header: { padding: t.spacing.md, paddingBottom: t.spacing.s },
 
     catchupChip: {
@@ -704,7 +837,6 @@ const styles = (t: ThemeTokens) =>
       borderColor: t.colors.border,
     },
 
-    // Rewards
     rewardRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 10 },
     hairlineTop: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#F0E6EF', marginTop: 10, paddingTop: 10 },
   });

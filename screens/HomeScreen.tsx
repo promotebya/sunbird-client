@@ -1,9 +1,12 @@
 // screens/HomeScreen.tsx
 import { Ionicons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import NetInfo from '@react-native-community/netinfo';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
-import { useFocusEffect, useNavigation } from '@react-navigation/native';
+import { useNavigation } from '@react-navigation/native';
 import {
   collection,
+  doc,
   limit,
   onSnapshot,
   orderBy,
@@ -11,13 +14,13 @@ import {
   where,
 } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Platform, Pressable, StyleSheet, View } from 'react-native';
+import { Alert, Modal, Platform, Pressable, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import Button from '../components/Button';
 import Card from '../components/Card';
+import Input from '../components/Input';
 import ProgressBar from '../components/ProgressBar';
-import RedeemModal from '../components/RedeemModal';
 import Screen from '../components/Screen';
 import ThemedText from '../components/ThemedText';
 import { useTokens, type ThemeTokens } from '../components/ThemeProvider';
@@ -32,13 +35,11 @@ import { db } from '../firebaseConfig';
 import useAuthListener from '../hooks/useAuthListener';
 import usePointsTotal from '../hooks/usePointsTotal';
 import useStreak from '../hooks/useStreak';
-import { getPairId } from '../utils/partner';
-import {
-  addReward,
-  listenRewards,
-  redeemReward,
-  type RewardDoc,
-} from '../utils/rewards';
+import { redeemPairCode } from '../utils/pairing';
+
+// ⬇️ Add reward (create) flow
+import RedeemModal from '../components/RedeemModal';
+import { addReward } from '../utils/rewards';
 
 const WEEK_GOAL = 50;
 const MILESTONES = [5, 10, 25, 50, 100, 200, 500];
@@ -58,7 +59,6 @@ const IDEAS = [
 
 const isIOS = Platform.OS === 'ios';
 
-// Final step: highlight the real tab bar, but lift the tooltip bubble a bit
 const FIRST_RUN_STEPS: SpotlightStep[] = [
   {
     id: 'welcome',
@@ -146,6 +146,8 @@ function nextMilestone(total: number) {
   return { target, remaining: Math.max(0, target - total) };
 }
 
+type PairHint = 'linked' | 'unlinked' | 'unknown';
+
 export default function HomeScreen() {
   const t = useTokens();
   const s = useMemo(() => styles(t), [t]);
@@ -159,44 +161,91 @@ export default function HomeScreen() {
   const streak = useStreak(user?.uid);
 
   const [pairId, setPairId] = useState<string | null>(null);
-  const [rewards, setRewards] = useState<RewardDoc[]>([]);
+  const [pairReady, setPairReady] = useState(false); // true after trustworthy snapshot
+  const [pairHint, setPairHint] = useState<PairHint>('unknown'); // fast local hint
+  const [isOnline, setIsOnline] = useState<boolean | null>(null);
+
   const [recent, setRecent] = useState<PointsItem[]>([]);
   const [showAddReward, setShowAddReward] = useState(false);
 
+  // CODE PROMPT (Android + fallback)
+  const [codePromptVisible, setCodePromptVisible] = useState(false);
+  const [codeText, setCodeText] = useState('');
+  const [codeBusy, setCodeBusy] = useState(false);
+
+  // Spotlight gating so targets are laid out before tour starts
+  const [logReady, setLogReady] = useState(false);
+  const [rewardReady, setRewardReady] = useState(false);
+  const spotlightReady = logReady && rewardReady;
+
+  // ---- Network status
   useEffect(() => {
+    const sub = NetInfo.addEventListener((state) => {
+      setIsOnline(state.isInternetReachable ?? state.isConnected ?? null);
+    });
+    return () => sub();
+  }, []);
+
+  // ---- Load cached pair hint quickly on login
+  useEffect(() => {
+    let cancelled = false;
     (async () => {
-      if (!user) return setPairId(null);
-      setPairId(await getPairId(user.uid));
+      if (!user?.uid) {
+        setPairHint('unknown');
+        return;
+      }
+      try {
+        const v = await AsyncStorage.getItem(`pairState:${user.uid}`);
+        if (!cancelled) {
+          if (v === 'linked' || v === 'unlinked') setPairHint(v);
+          else setPairHint('unknown');
+        }
+      } catch {
+        if (!cancelled) setPairHint('unknown');
+      }
     })();
-  }, [user]);
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.uid]);
 
-  useFocusEffect(
-    useCallback(() => {
-      let active = true;
-      (async () => {
-        if (!user?.uid) {
-          if (active) setPairId(null);
-          return;
-        }
-        try {
-          const pid = await getPairId(user.uid);
-          if (active) setPairId(pid ?? null);
-        } catch {
-          if (active) setPairId(null);
-        }
-      })();
-      return () => {
-        active = false;
-      };
-    }, [user?.uid])
-  );
-
+  // ---- Live pairId (with metadata). Persist result to cache.
   useEffect(() => {
-    if (!user) return;
-    const off = listenRewards(user.uid, pairId ?? null, setRewards);
-    return () => off && off();
-  }, [user, pairId]);
+    if (!user?.uid) {
+      setPairId(null);
+      setPairReady(false);
+      return;
+    }
+    setPairReady(false);
 
+    const unsub = onSnapshot(
+      doc(db, 'users', user.uid),
+      { includeMetadataChanges: true },
+      async (snap) => {
+        const pid = snap.exists() ? (snap.data() as any)?.pairId ?? null : null;
+        setPairId(pid);
+
+        // persist hint for snappy next launch
+        const newHint: PairHint = pid ? 'linked' : 'unlinked';
+        setPairHint(newHint);
+        try { await AsyncStorage.setItem(`pairState:${user.uid}`, newHint); } catch {}
+
+        const fromServer = !snap.metadata.fromCache;
+        const noPending = !snap.metadata.hasPendingWrites;
+        if ((fromServer && noPending) || (isOnline === false && noPending)) {
+          setPairReady(true);
+        }
+      },
+      () => {
+        setPairId(null);
+        setPairReady(false);
+      }
+    );
+
+    return () => unsub();
+  }, [user?.uid, isOnline]);
+
+  // ---- Recent points
   useEffect(() => {
     if (!user) return;
     const q = query(
@@ -220,6 +269,7 @@ export default function HomeScreen() {
     return () => off();
   }, [user]);
 
+  // ---- Day ideas
   const [key, setKey] = useState<number>(() => dayKey());
   useEffect(() => {
     const now = new Date();
@@ -240,6 +290,7 @@ export default function HomeScreen() {
     [nav]
   );
 
+  // ---- Copy tweaks
   const weeklyLeft = Math.max(0, WEEK_GOAL - weekly);
   const nudge =
     weeklyLeft === 0
@@ -250,22 +301,19 @@ export default function HomeScreen() {
       ? 'You’re halfway there—keep going 👏'
       : 'So close! A tiny push and you’re there ✨';
 
-  const onCreateReward = async (title: string, cost: number) => {
-    if (!user) return;
-    await addReward(user.uid, pairId ?? null, title, cost);
-  };
-  const onRedeem = async (r: RewardDoc) => {
-    if (!user) return;
-    await redeemReward(user.uid, pairId ?? null, r);
-  };
-
   const totalPoints = total ?? 0;
   const { target, remaining } = useMemo(
     () => nextMilestone(totalPoints),
     [totalPoints]
   );
 
-  // --- NEW: helper to open the same QR screen as Settings (with graceful fallbacks)
+  // ---- Add reward
+  const onCreateReward = async (title: string, cost: number) => {
+    if (!user) return;
+    await addReward(user.uid, pairId ?? null, title, cost);
+  };
+
+  // ---- QR helpers
   const openPairingQR = useCallback(() => {
     const navRef: any = nav as any;
     const candidates = [
@@ -312,7 +360,6 @@ export default function HomeScreen() {
       }
     }
 
-    // As a last resort, try pushing through Settings if present
     try {
       (navRef.getParent?.() ?? navRef).navigate('Settings', {
         screen: 'Pairing',
@@ -321,11 +368,55 @@ export default function HomeScreen() {
       return;
     } catch {}
 
-    Alert.alert(
-      'Pairing QR',
-      'Open Settings → Pairing to view your QR code.',
-    );
+    Alert.alert('Pairing QR', 'Open Settings → Pairing to view your QR code.');
   }, [nav]);
+
+  const onEnterCode = useCallback(() => {
+    if (!user?.uid) return;
+    if (isIOS && (Alert as any).prompt) {
+      // @ts-ignore iOS-only
+      Alert.prompt('Enter pairing code', 'Paste the code you received to link accounts.', async (code: string) => {
+        if (!code) return;
+        try {
+          await redeemPairCode(user.uid, code.trim());
+          Alert.alert('Linked', 'You are now linked 💞');
+        } catch (e: any) {
+          Alert.alert('Could not link', e?.message ?? 'Try again.');
+        }
+      });
+      return;
+    }
+    // Android (and fallback): open in-app modal
+    setCodePromptVisible(true);
+  }, [user?.uid]);
+
+  const handleRedeemCode = useCallback(async () => {
+    if (!user?.uid) return;
+    const code = codeText.trim();
+    if (!code) {
+      Alert.alert('Enter code', 'Please paste the code.');
+      return;
+    }
+    try {
+      setCodeBusy(true);
+      await redeemPairCode(user.uid, code);
+      setCodePromptVisible(false);
+      setCodeText('');
+      Alert.alert('Linked', 'You are now linked 💞');
+    } catch (e: any) {
+      Alert.alert('Could not link', e?.message ?? 'Try again.');
+    } finally {
+      setCodeBusy(false);
+    }
+  }, [codeText, user?.uid]);
+
+  // ---- Show link card immediately if hint says unlinked, or after trusted snapshot says unlinked
+  const pairCardShouldShow =
+    !!user &&
+    (
+      (pairReady && !pairId) ||
+      (!pairReady && pairHint === 'unlinked')
+    );
 
   return (
     <Screen>
@@ -349,14 +440,16 @@ export default function HomeScreen() {
             </Pill>
           </View>
 
-          <SpotlightTarget id="home-settings">
-            <Button label="Settings" variant="outline" onPress={() => nav.navigate('Settings')} />
-          </SpotlightTarget>
+          <View collapsable={false} style={{ alignSelf: 'flex-start' }}>
+            <SpotlightTarget id="home-settings">
+              <Button label="Settings" variant="outline" onPress={() => nav.navigate('Settings')} />
+            </SpotlightTarget>
+          </View>
         </View>
       </View>
 
-      {/* Partner (Action card) — shown ONLY when not paired */}
-      {!pairId && (
+      {/* Partner (Action card) — instant with cached hint, authoritative once snapshot arrives */}
+      {pairCardShouldShow && (
         <SpotlightTarget id="home-link-partner">
           <Card style={{ marginBottom: 12, paddingVertical: 12, borderWidth: 1, borderColor: HAIRLINE }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
@@ -369,13 +462,12 @@ export default function HomeScreen() {
               </View>
             </View>
 
-            {/* NEW: Scan + Show QR actions */}
             <View style={{ flexDirection: 'row', gap: 12, marginTop: 10, flexWrap: 'wrap' }}>
               <Button
                 label="Scan QR"
                 onPress={() => {
                   try {
-                    nav.navigate('PairingScan');
+                    (nav as any).navigate('PairingScan');
                   } catch {
                     Alert.alert('Pairing', 'Scanner not available. Open Settings → Pairing.');
                   }
@@ -387,6 +479,14 @@ export default function HomeScreen() {
                 onPress={openPairingQR}
               />
             </View>
+
+            <Pressable
+              onPress={onEnterCode}
+              accessibilityRole="button"
+              style={{ alignSelf: 'flex-start', marginTop: 8, paddingVertical: 6, paddingHorizontal: 8 }}
+            >
+              <ThemedText variant="caption" color={t.colors.primary}>Have a code? Enter it here</ThemedText>
+            </Pressable>
           </Card>
         </SpotlightTarget>
       )}
@@ -407,14 +507,20 @@ export default function HomeScreen() {
           <ProgressBar value={totalPoints} max={target} height={6} trackColor="#EDEAF1" />
           <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 4 }}>{remaining} to go • {weekly} this week</ThemedText>
         </View>
-        <View style={{ marginTop: 12, flexDirection: 'row' }}>
-          <SpotlightTarget id="home-log-task">
-            <Button label="Log a task" onPress={() => nav.navigate('Tasks')} />
-          </SpotlightTarget>
+
+        {/* Actions row: Log task + Add reward, with non-collapsible wrappers and layout flags */}
+        <View style={{ marginTop: 12, flexDirection: 'row', alignItems: 'center' }}>
+          <View collapsable={false} style={{ alignSelf: 'flex-start' }} onLayout={() => setLogReady(true)}>
+            <SpotlightTarget id="home-log-task">
+              <Button label="Log a task" onPress={() => nav.navigate('Tasks')} />
+            </SpotlightTarget>
+          </View>
           <View style={{ width: 12 }} />
-          <SpotlightTarget id="home-add-reward">
-            <Button label={rewards.length ? 'Add reward' : 'Add first reward'} variant="outline" onPress={() => setShowAddReward(true)} />
-          </SpotlightTarget>
+          <View collapsable={false} style={{ alignSelf: 'flex-start' }} onLayout={() => setRewardReady(true)}>
+            <SpotlightTarget id="home-add-reward">
+              <Button label="Add reward" variant="outline" onPress={() => setShowAddReward(true)} />
+            </SpotlightTarget>
+          </View>
         </View>
       </Card>
 
@@ -454,23 +560,6 @@ export default function HomeScreen() {
         </View>
       </Card>
 
-      {/* Rewards */}
-      {rewards.length > 0 && (
-        <Card style={{ marginBottom: 12, borderWidth: 1, borderColor: HAIRLINE }}>
-          {rewards.map((item, i) => (
-            <View key={item.id} style={[s.rewardRow, i > 0 && s.hairlineTop]}>
-              <View style={{ flex: 1 }}>
-                <ThemedText variant="title">{item.title}</ThemedText>
-                <ThemedText variant="caption" color={t.colors.textDim}>Cost {item.cost} pts</ThemedText>
-              </View>
-              <Pressable onPress={() => onRedeem(item)} style={s.redeemBtn} accessibilityRole="button">
-                <ThemedText variant="button" color="#fff">Redeem</ThemedText>
-              </Pressable>
-            </View>
-          ))}
-        </Card>
-      )}
-
       {/* Recent */}
       {recent.length > 0 ? (
         <Card style={{ marginBottom: 12, borderWidth: 1, borderColor: HAIRLINE }}>
@@ -498,27 +587,60 @@ export default function HomeScreen() {
         </View>
       </Card>
 
-      {/* Add reward modal */}
-      <RedeemModal visible={showAddReward} onClose={() => setShowAddReward(false)} onCreate={onCreateReward} />
-
-      {/* iOS: highlight matches the tab bar exactly */}
       {isIOS && (
         <SpotlightTarget
           id="tabbar-anchor"
           pointerEvents="none"
-          style={{
-            position: 'absolute',
-            left: 0,
-            right: 0,
-            bottom: 0,
-            height: tabBarHeight,
-          }}
+          style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: tabBarHeight }}
         >
           <View style={{ flex: 1 }} />
         </SpotlightTarget>
       )}
 
-      <SpotlightAutoStarter uid={user?.uid ?? null} steps={FIRST_RUN_STEPS} persistKey="first-run-v3" />
+      {/* Add reward modal */}
+      <RedeemModal visible={showAddReward} onClose={() => setShowAddReward(false)} onCreate={onCreateReward} />
+
+      {/* CODE PROMPT: Android + fallback modal */}
+      <Modal
+        visible={codePromptVisible}
+        animationType="fade"
+        transparent
+        onRequestClose={() => !codeBusy && setCodePromptVisible(false)}
+      >
+        <View style={s.modalOverlay}>
+          <Card style={s.modalCard}>
+            <ThemedText variant="title" style={{ marginBottom: 8 }}>Enter pairing code</ThemedText>
+            <ThemedText variant="caption" color={t.colors.textDim} style={{ marginBottom: 8 }}>
+              Paste the code you received to link accounts.
+            </ThemedText>
+
+            <Input
+              value={codeText}
+              onChangeText={setCodeText}
+              placeholder="Paste code…"
+              autoCapitalize="none"
+              autoCorrect={false}
+              editable={!codeBusy}
+              returnKeyType="done"
+              onSubmitEditing={handleRedeemCode}
+            />
+
+            <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
+              <Button label="Cancel" variant="outline" onPress={() => setCodePromptVisible(false)} disabled={codeBusy} />
+              <Button
+                label={codeBusy ? 'Linking…' : 'Link'}
+                onPress={handleRedeemCode}
+                disabled={!codeText.trim() || codeBusy}
+              />
+            </View>
+          </Card>
+        </View>
+      </Modal>
+
+      {/* Start the tour only after targets are laid out */}
+      {spotlightReady && (
+        <SpotlightAutoStarter uid={user?.uid ?? null} steps={FIRST_RUN_STEPS} persistKey="first-run-v3" />
+      )}
     </Screen>
   );
 }
@@ -540,8 +662,22 @@ const styles = (t: ThemeTokens) =>
       borderWidth: 1,
       borderColor: '#F0E6EF',
     },
-    rewardRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 10 },
     hairlineTop: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#F0E6EF', marginTop: 10, paddingTop: 10 },
-    redeemBtn: { backgroundColor: t.colors.primary, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 14 },
     recentRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 8 },
+    // CODE PROMPT styles
+    modalOverlay: {
+      flex: 1,
+      backgroundColor: 'rgba(0,0,0,0.35)',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 20,
+    },
+    modalCard: {
+      width: '100%',
+      borderWidth: 1,
+      borderColor: HAIRLINE,
+      padding: t.spacing.md,
+      borderRadius: 16,
+      backgroundColor: t.colors.bg,
+    },
   });

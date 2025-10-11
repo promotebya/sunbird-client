@@ -1,7 +1,7 @@
-import { useNavigation } from '@react-navigation/native';
+import { useIsFocused, useNavigation } from '@react-navigation/native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Linking, Platform, Pressable, StyleSheet, View } from 'react-native';
+import { Alert, Linking, Platform, Pressable, StyleSheet, Vibration, View } from 'react-native';
 import Button from '../components/Button';
 import Card from '../components/Card';
 import ThemedText from '../components/ThemedText';
@@ -13,12 +13,14 @@ type BarCode = { data: string; type: string };
 
 export default function PairingScanScreen() {
   const nav = useNavigation<any>();
+  const isFocused = useIsFocused();
   const { user } = useAuthListener();
 
   const [permission, requestPermission] = useCameraPermissions();
-  const [enabled, setEnabled] = useState(true);
+  const [enabled, setEnabled] = useState(true);        // scanning gate
+  const [showCamera, setShowCamera] = useState(true);  // hard unmount cam
   const [last, setLast] = useState<BarCode | null>(null);
-  const handlingRef = useRef(false);
+  const handlingRef = useRef(false);                   // reentrancy guard
 
   useEffect(() => {
     if (!permission?.granted && permission?.canAskAgain) {
@@ -26,18 +28,56 @@ export default function PairingScanScreen() {
     }
   }, [permission, requestPermission]);
 
-  // Accept plain "233812" or JSON {"kind":"pairCode","code":"233812"}
+  // Re-arm scanner only when the screen is focused (prevents background firing)
+  useEffect(() => {
+    if (isFocused) {
+      handlingRef.current = false;
+      setEnabled(true);
+      setShowCamera(true);
+    } else {
+      setShowCamera(false);
+    }
+  }, [isFocused]);
+
+  // Accept:
+  //  - plain digits "233812"
+  //  - JSON {"kind":"pairCode","code":"233812"}
+  //  - URL forms lovepoints://pair?code=233812 or https://...&code=233812
   const parsePossiblePairCode = (raw: string) => {
+    const s = String(raw).trim();
+    if (!s) return '';
+
+    // URL styles
     try {
-      const parsed = JSON.parse(String(raw));
+      const u = new URL(s);
+      const code = u.searchParams.get('code') || u.searchParams.get('pair');
+      if (code) return code.trim();
+    } catch {
+      // not a URL
+    }
+
+    // JSON style
+    try {
+      const parsed = JSON.parse(s);
       if (parsed && typeof parsed === 'object' && parsed.code) {
         return String(parsed.code).trim();
       }
     } catch {
-      // not JSON -> fall through
+      // not JSON
     }
-    return String(raw).trim();
+
+    // raw
+    return s;
   };
+
+  const exitToHome = useCallback(() => {
+    // Prefer going back; if no stack, jump to Home
+    if ((nav as any).canGoBack?.()) {
+      nav.goBack();
+    } else {
+      (nav.getParent?.() ?? nav).navigate('Home');
+    }
+  }, [nav]);
 
   const onBarcodeScanned = useCallback(
     async (code: BarCode) => {
@@ -50,6 +90,7 @@ export default function PairingScanScreen() {
 
       handlingRef.current = true;
       setEnabled(false);
+      setShowCamera(false); // hard stop scanning immediately
       try {
         setLast(code);
 
@@ -58,19 +99,22 @@ export default function PairingScanScreen() {
           throw new Error('That QR code is not a valid pairing code.');
         }
 
+        // Keep your existing signature order (code, uid)
         await redeemPairCode(value, user.uid);
 
-        Alert.alert('Paired!', 'You are now connected with your partner.', [
-          { text: 'OK', onPress: () => nav.goBack() },
-        ]);
+        // Haptic nudge, then bail out right away
+        try { Vibration.vibrate(20); } catch {}
+        exitToHome();
       } catch (e: any) {
-        Alert.alert('Scan failed', e?.message ?? 'Please try again.');
-      } finally {
+        // Re-arm to try again (stay on screen)
         handlingRef.current = false;
-        setTimeout(() => setEnabled(true), 1000);
+        setEnabled(true);
+        setShowCamera(true);
+
+        Alert.alert('Scan failed', e?.message ?? 'Please try again.');
       }
     },
-    [enabled, user, nav]
+    [enabled, user?.uid, exitToHome]
   );
 
   const needsPermission = useMemo(() => !permission || !permission.granted, [permission]);
@@ -109,13 +153,15 @@ export default function PairingScanScreen() {
                 }}
               />
             </View>
-          ) : (
+          ) : isFocused && showCamera ? (
             <CameraView
               style={{ flex: 1 }}
               facing="back"
               barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
               onBarcodeScanned={({ data, type }) => onBarcodeScanned({ data, type })}
             />
+          ) : (
+            <View style={styles.center} />
           )}
         </Card>
       </View>

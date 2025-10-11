@@ -14,11 +14,23 @@ import {
 } from 'firebase/firestore';
 import { db } from '../firebaseConfig';
 
-// 30 minutes validity
-const EXPIRY_MINUTES = 30;
+/** ----------------------------------------------------------------
+ * Pairing helpers for LovePoints (Firestore modular SDK)
+ * ----------------------------------------------------------------
+ * Security rules interplay:
+ * - You (self) can read/update your own /users/{myUid}.
+ * - You MUST NOT read your partner's /users/{partnerUid} (rules forbid it).
+ * - For partner writes, only change `pairId` and `partnerUid` to pass
+ *   the .hasOnly(['pairId','partnerUid'(,'updatedAt')]) checks.
+ * - Unlink uses a writeBatch (no implicit reads like transactions do).
+ * ---------------------------------------------------------------- */
+
+const EXPIRY_MINUTES = 30; // single-use code validity
+
+export type PairCodeInfo = { code: string; expiresAtISO: string };
 
 function randomCode(): string {
-  // 6-digit numeric (easy to share)
+  // 6-digit numeric (easy to share verbally)
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
@@ -26,6 +38,19 @@ function expiryFromNow(minutes = EXPIRY_MINUTES) {
   const d = new Date();
   d.setMinutes(d.getMinutes() + minutes);
   return d;
+}
+
+function pairIdFor(a: string, b: string) {
+  return a <= b ? `${a}_${b}` : `${b}_${a}`;
+}
+
+/** Helper: read my current pairId from /users/{uid} (self-read is allowed). */
+export async function getPairId(uid: string): Promise<string | null> {
+  if (!uid) return null;
+  const snap = await getDoc(doc(db, 'users', uid));
+  if (!snap.exists()) return null;
+  const data = snap.data() as any;
+  return (data?.pairId as string | null) ?? null;
 }
 
 /** Clean up any expired, unused codes for this user. */
@@ -48,17 +73,17 @@ export async function purgeMyExpiredPairCodes(ownerUid: string) {
     }
   }
 
-  // Best-effort clear stale reference on the user doc
+  // Best-effort: clear stale reference on the user doc
   try {
     await updateDoc(doc(db, 'users', ownerUid), {
       pairCode: null,
       pairCodeExpiresAt: null,
       updatedAt: serverTimestamp(),
     });
-  } catch {}
+  } catch {
+    // ignore
+  }
 }
-
-export type PairCodeInfo = { code: string; expiresAtISO: string };
 
 /** Returns the active (non-expired) code stored on the user, if any. */
 export async function getMyActivePairCode(ownerUid: string): Promise<PairCodeInfo | null> {
@@ -92,12 +117,16 @@ export async function generatePairCode(ownerUid: string): Promise<PairCodeInfo> 
         expiresAt: expiresAtISO,
         used: false,
       });
-      // convenience
-      await updateDoc(doc(db, 'users', ownerUid), {
-        pairCode: code,
-        pairCodeExpiresAt: expiresAtISO,
-        updatedAt: serverTimestamp(),
-      }).catch(() => {});
+      // Convenience stash on user
+      try {
+        await updateDoc(doc(db, 'users', ownerUid), {
+          pairCode: code,
+          pairCodeExpiresAt: expiresAtISO,
+          updatedAt: serverTimestamp(),
+        });
+      } catch {
+        // ignore
+      }
       return { code, expiresAtISO };
     }
   }
@@ -107,14 +136,18 @@ export async function generatePairCode(ownerUid: string): Promise<PairCodeInfo> 
 /**
  * Redeem a partner’s code and link both accounts.
  *
- * IMPORTANT: No reads of the partner’s /users doc (your rules forbid that).
- * We do a single batch that:
- *   - upserts /pairs/{pairId}
- *   - sets (merge) my user with partnerUid/pairId and clears my pairCode*
- *   - sets (merge) partner user with ONLY partnerUid/pairId (no updatedAt, no code fields)
- *   - deletes /pairCodes/{code}
+ * IMPORTANT:
+ *  - No reads of the partner’s /users doc (forbidden by rules).
+ *  - Single batch:
+ *      • upsert /pairs/{pairId} (status: 'active')
+ *      • set my user with partnerUid/pairId (+ clear my code fields)
+ *      • set partner user with ONLY partnerUid/pairId (no updatedAt unless rules allow)
+ *      • delete /pairCodes/{code}
  */
-export async function redeemPairCode(myUid: string, code: string): Promise<{ partnerUid: string; pairId: string }> {
+export async function redeemPairCode(
+  myUid: string,
+  code: string
+): Promise<{ partnerUid: string; pairId: string }> {
   if (!myUid || !code) throw new Error('Missing uid or code');
 
   const codeRef = doc(db, 'pairCodes', code);
@@ -132,14 +165,20 @@ export async function redeemPairCode(myUid: string, code: string): Promise<{ par
   }
 
   const partnerUid = data.ownerUid;
-  const pairId = [myUid, partnerUid].sort().join('_');
+  const pairId = pairIdFor(myUid, partnerUid);
 
   const batch = writeBatch(db);
 
-  // Upsert pair
+  // Upsert pair (active)
   batch.set(
     doc(db, 'pairs', pairId),
-    { members: [myUid, partnerUid], createdAt: serverTimestamp() },
+    {
+      members: [myUid, partnerUid],
+      status: 'active',
+      updatedAt: serverTimestamp(),
+      // (Optional) createdAt will be overwritten on re-link; omit if you care about first-created timestamp
+      createdAt: serverTimestamp(),
+    },
     { merge: true }
   );
 
@@ -156,12 +195,13 @@ export async function redeemPairCode(myUid: string, code: string): Promise<{ par
     { merge: true }
   );
 
-  // Partner user — rule only lets us change pairId & partnerUid (no updatedAt/other keys).
+  // Partner user — ONLY change the two keys to satisfy current rules
   batch.set(
     doc(db, 'users', partnerUid),
     {
       partnerUid: myUid,
       pairId,
+      // OPTIONAL: if your deployed rules allow it, add: updatedAt: serverTimestamp(),
     } as any,
     { merge: true }
   );
@@ -171,10 +211,91 @@ export async function redeemPairCode(myUid: string, code: string): Promise<{ par
 
   await batch.commit();
 
-  // Best-effort: hard delete the code doc if still present (race safe)
+  // Best-effort hard delete (race-safe)
   try {
     await deleteDoc(codeRef);
-  } catch {}
+  } catch {
+    // ignore
+  }
 
   return { partnerUid, pairId };
+}
+
+/**
+ * Unlink both accounts (NO partner reads).
+ *
+ * Strategy:
+ *  1) Read my own user (allowed) to get partnerUid & pairId.
+ *  2) Single writeBatch:
+ *      • me: set partnerUid=null, pairId=null, updatedAt=now
+ *      • partner: ONLY set partnerUid=null & pairId=null (rules allow just these keys)
+ *      • pairs/{pairId}: status='inactive', members=[], unlinkedAt=now (best-effort)
+ *
+ * This is idempotent and avoids the "permission-denied on partner read".
+ */
+export async function unlinkPair(
+  myUid: string
+): Promise<{ partnerUid: string | null; pairId: string | null }> {
+  if (!myUid) throw new Error('Missing uid');
+
+  // 1) Read self (allowed)
+  const meRef = doc(db, 'users', myUid);
+  const meSnap = await getDoc(meRef);
+
+  if (!meSnap.exists()) {
+    // If somehow missing, still clear my fields best-effort
+    const batch0 = writeBatch(db);
+    batch0.set(
+      meRef,
+      { partnerUid: null, pairId: null, updatedAt: serverTimestamp() },
+      { merge: true }
+    );
+    await batch0.commit().catch(() => {});
+    return { partnerUid: null, pairId: null };
+  }
+
+  const me = meSnap.data() as any;
+  const partnerUid: string | null = me?.partnerUid ?? null;
+  const pid: string | null = me?.pairId ?? null;
+
+  // 2) Batch writes (no reads of partner)
+  const batch = writeBatch(db);
+
+  // Always clear my own doc
+  batch.set(
+    meRef,
+    { partnerUid: null, pairId: null, updatedAt: serverTimestamp() },
+    { merge: true }
+  );
+
+  if (partnerUid && pid) {
+    // Only change the two allowed fields on the partner doc
+    const partnerRef = doc(db, 'users', partnerUid);
+    batch.set(
+      partnerRef,
+      {
+        partnerUid: null,
+        pairId: null,
+        // OPTIONAL (requires your updated rules): updatedAt: serverTimestamp(),
+      } as any,
+      { merge: true }
+    );
+
+    // Best-effort: mark pair inactive
+    const pairRef = doc(db, 'pairs', pid);
+    batch.set(
+      pairRef,
+      {
+        status: 'inactive',
+        members: [],
+        unlinkedAt: serverTimestamp(),
+        // updatedAt: serverTimestamp(), // allowed by the tightened pairs rule
+      } as any,
+      { merge: true }
+    );
+  }
+
+  await batch.commit();
+
+  return { partnerUid, pairId: pid };
 }
