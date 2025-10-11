@@ -10,7 +10,7 @@
     "icon": "./assets/icon.png",
 
     "splash": {
-      "image": "./assets/images/blank-splash-foreground.png",
+      "image": "./assets/splash.png",
       "resizeMode": "cover",
       "backgroundColor": "#FFFFFF"
     },
@@ -31,9 +31,9 @@
 
     "android": {
       "package": "com.promotebya.lovepoints",
-      "versionCode": 10,
+      "versionCode": 6,
       "adaptiveIcon": {
-        "foregroundImage": "./assets/images/adaptive-foreground-white.png",
+        "foregroundImage": "./assets/icon.png",
         "backgroundColor": "#FFFFFF"
       },
       "googleServicesFile": "./google-services.json",
@@ -41,7 +41,12 @@
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",
         "android.permission.POST_NOTIFICATIONS"
-      ]
+      ],
+      "splash": {
+        "image": "./assets/splash.png",
+        "resizeMode": "cover",
+        "backgroundColor": "#FFFFFF"
+      }
     },
 
     "notification": {
@@ -62,6 +67,14 @@
         "expo-camera",
         {
           "cameraPermission": "Allow LovePoints to use the camera to scan QR codes and take photos."
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#FFFFFF",
+          "image": "./assets/splash.png",
+          "resizeMode": "cover"
         }
       ],
       "expo-notifications"

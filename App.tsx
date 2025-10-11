@@ -4,8 +4,8 @@ import Constants from 'expo-constants';
 import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
 import * as SplashScreen from 'expo-splash-screen';
-import { useEffect, useRef, useState } from 'react';
-import { Animated, Image, LogBox, Platform, StyleSheet } from 'react-native';
+import { useEffect, useState } from 'react';
+import { LogBox, Platform } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
@@ -194,47 +194,17 @@ function useKindnessNudgesScheduler(userId: string | null | undefined) {
   }, [userId]);
 }
 
-// ---------- ANDROID INTRO OVERLAY (show immediately; fade once nav is ready) ----------
-const SPLASH_SOURCE = require('./assets/splash.png');
-const _src = Image.resolveAssetSource(SPLASH_SOURCE) || { width: 320, height: 100 };
-const SPLASH_AR = _src.width && _src.height ? _src.width / _src.height : 3.2;
-
 export default function App() {
   const { user } = useAuthListener();
 
-  // Always render overlay on Android; we'll fade it out later
-  const [showIntro, setShowIntro] = useState(Platform.OS === 'android');
-  const introOpacity = useRef(new Animated.Value(1)).current;
   const [navReady, setNavReady] = useState(false);
-
-  // 🔑 KEY CHANGE: hide native (system) splash **immediately** on Android
-  // so users don't sit on the small system/icon splash. Our overlay covers the gap.
-  useEffect(() => {
-    if (Platform.OS !== 'android') return;
-    const t = setTimeout(() => {
-      SplashScreen.hideAsync().catch(() => {});
-    }, 10); // next tick after first render
-    return () => clearTimeout(t);
-  }, []);
 
   // iOS: hide native splash when navigation is ready
   useEffect(() => {
-    if (Platform.OS === 'ios' && navReady) {
+    if (navReady) {
       SplashScreen.hideAsync().catch(() => {});
     }
   }, [navReady]);
-
-  // Fade out the Android overlay once navigation is ready
-  useEffect(() => {
-    if (Platform.OS !== 'android') return;
-    if (!navReady) return;
-    Animated.timing(introOpacity, {
-      toValue: 0,
-      duration: 240,
-      delay: 500,
-      useNativeDriver: true,
-    }).start(() => setShowIntro(false));
-  }, [navReady, introOpacity]);
 
   // Global notifications handler
   useEffect(() => {
@@ -289,30 +259,9 @@ export default function App() {
             <NavigationContainer onReady={() => setNavReady(true)}>
               {user ? <AppNavigator /> : <AuthNavigator />}
             </NavigationContainer>
-
-            {/* Android post-splash overlay with a CENTERED, CONTAINED wordmark */}
-            {showIntro && Platform.OS === 'android' && (
-              <Animated.View style={[styles.splashOverlay, { opacity: introOpacity }]} pointerEvents="none">
-                <Image source={SPLASH_SOURCE} resizeMode="contain" style={styles.splashWordmark} />
-              </Animated.View>
-            )}
           </SpotlightProvider>
         </ThemeProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );
 }
-
-const styles = StyleSheet.create({
-  splashOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: '#FFFFFF',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  splashWordmark: {
-    width: '72%',
-    maxWidth: 420,
-    aspectRatio: SPLASH_AR,
-  },
-});
