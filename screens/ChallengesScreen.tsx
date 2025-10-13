@@ -1,9 +1,10 @@
 // screens/ChallengesScreen.tsx
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
+  DeviceEventEmitter,
   Platform,
   Pressable,
   ScrollView,
@@ -26,22 +27,31 @@ import {
   getWeeklyChallengeSet,
   type SeedChallenge,
 } from '../utils/seedchallenges';
-import { isoWeekStr } from '../utils/streak';
 import { usePro } from '../utils/subscriptions';
 
-// NEW: pair + firestore for partner premium propagation
-import { doc, onSnapshot, serverTimestamp, updateDoc } from 'firebase/firestore';
+// Firestore
+import {
+  addDoc,
+  collection,
+  doc,
+  onSnapshot,
+  orderBy,
+  query,
+  serverTimestamp,
+  Timestamp,
+  updateDoc,
+  where,
+} from 'firebase/firestore';
 import { db } from '../firebaseConfig';
 import { getPairId } from '../utils/partner';
 
-// 👇 Spotlight
+// Spotlight
 import {
   SpotlightAutoStarter,
-  SpotlightTarget,
-  type SpotlightStep,
+  SpotlightTarget
 } from '../components/spotlight';
 
-/* ---------- types & labels ---------- */
+/* ---------- helpers, types & labels ---------- */
 
 type DiffTabKey = 'all' | 'easy' | 'medium' | 'hard' | 'pro';
 type DiffKey = 'easy' | 'medium' | 'hard' | 'pro';
@@ -84,16 +94,13 @@ const CAT_DOT: Record<CatKey, string> = {
   play: '#60A5FA',
 };
 
-/* ---------- helpers ---------- */
-
 function withAlpha(hex: string, alpha: number) {
   const h = hex.replace('#', '');
   const full = h.length === 3 ? h.split('').map((c) => c + c).join('') : h;
   const a = Math.round(alpha * 255).toString(16).padStart(2, '0');
   return `#${full}${a}`;
 }
-
-function mixWithWhite(hex: string, ratio = 0.90) {
+function mixWithWhite(hex: string, ratio = 0.9) {
   const h = hex.replace('#', '');
   const r = parseInt(h.slice(0, 2), 16);
   const g = parseInt(h.slice(2, 4), 16);
@@ -103,6 +110,7 @@ function mixWithWhite(hex: string, ratio = 0.90) {
   return `#${toHex(m(r))}${toHex(m(g))}${toHex(m(b))}`;
 }
 
+// ---------- Difficulty / category extraction (robust to varied seed data) ----------
 function normDiff(raw: any): DiffKey | undefined {
   if (raw == null) return undefined;
   const n = Number(raw);
@@ -114,7 +122,6 @@ function normDiff(raw: any): DiffKey | undefined {
   if (v.startsWith('p')) return 'pro';
   return undefined;
 }
-
 function extractDiffStrict(c: any): DiffKey | undefined {
   const tried = [c?.difficulty, c?.level, c?.diff, c?.difficultyLevel, c?.difficulty_label, c?.difficultyLabel, c?.d];
   for (const t of tried) {
@@ -128,7 +135,8 @@ const extractTitleStrict = (c: any) =>
 const extractDescriptionStrict = (c: any) =>
   c?.description ?? c?.summary ?? c?.body ?? c?.details ?? undefined;
 
-function extractCategoryStrict(c: any): CatKey | undefined {
+type CatKeyMaybe = CatKey | undefined;
+function extractCategoryStrict(c: any): CatKeyMaybe {
   const candidates: Array<string | string[]> = [
     c?.category, c?.cat, c?.type, c?.topic, c?.tag, c?.tags, c?.labels, c?.categories,
   ];
@@ -143,11 +151,11 @@ function extractCategoryStrict(c: any): CatKey | undefined {
     if (Array.isArray(cand)) {
       for (const s of cand) {
         const key = set[String(s).trim().toLowerCase()];
-        if (key) return key;
+        if (key) return key as CatKey;
       }
     } else if (cand != null) {
       const key = set[String(cand).trim().toLowerCase()];
-      if (key) return key;
+      if (key) return key as CatKey;
     }
   }
   return undefined;
@@ -156,9 +164,8 @@ function extractCategoryStrict(c: any): CatKey | undefined {
 function cleanTitleSuffix(raw?: string): string {
   const title = (raw ?? '').trim();
   if (!title) return 'Challenge';
-  // Strip a trailing category in parentheses, e.g. "Title (date)" → "Title"
   const cats = ['date','dates','kindness','conversation','talk','surprise','play'];
-  const re = new RegExp(`\\s*\\(\\s*(?:${cats.join('|')})\\s*\\)$`, 'i');
+  const re = new RegExp(`\\s*(?:${cats.join('|')})\\s*$`, 'i');
   return title.replace(re, '');
 }
 const safeTitle = (c: any) => cleanTitleSuffix(extractTitleStrict(c)) || 'Challenge';
@@ -169,7 +176,6 @@ function rowKey(c: any, suffix: 'V' | 'L', index: number): string {
   const base = c?.id ?? c?.slug ?? `${safeTitle(c)}|${safeCategory(c) ?? 'na'}|${extractDiffStrict(c) ?? 'na'}`;
   return `${String(base)}__${suffix}_${index}`;
 }
-
 function mergePreferBase<T extends Record<string, any>>(base: T, patch: Partial<T>): T {
   const out: any = { ...base };
   for (const [k, v] of Object.entries(patch)) {
@@ -181,6 +187,7 @@ function mergePreferBase<T extends Record<string, any>>(base: T, patch: Partial<
   return out as T;
 }
 
+// ---------- Pair + premium helpers ----------
 function lockMessage(plan: 'free' | 'premium', c: SeedChallenge): string {
   const tier = (c as any)?.tier as 'base' | '10' | '25' | '50' | undefined;
   const d = extractDiffStrict(c);
@@ -192,8 +199,6 @@ function lockMessage(plan: 'free' | 'premium', c: SeedChallenge): string {
   if (tier === '50') return 'Needs 50+ pts';
   return 'Locked';
 }
-
-// Robust partner UID extraction for various pair doc shapes
 function extractPartnerUidFromPairDoc(d: any, myUid: string): string | null {
   if (!d) return null;
   if (d.userA && d.userB) return d.userA === myUid ? d.userB : d.userA;
@@ -202,6 +207,29 @@ function extractPartnerUidFromPairDoc(d: any, myUid: string): string | null {
   if (Array.isArray(d.userIds)) return d.userIds.find((u: string) => u && u !== myUid) ?? null;
   if (d.a && d.b) return d.a === myUid ? d.b : d.a;
   return null;
+}
+
+// ---------- UTC week key (stable across time zones) ----------
+function weekKeyUTC(d = new Date()) {
+  // ISO week-numbering year + week in UTC
+  const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  // Thursday of this week
+  const day = (date.getUTCDay() + 6) % 7; // 0..6 (Mon..Sun)
+  date.setUTCDate(date.getUTCDate() - day + 3);
+  // First Thursday of ISO year
+  const firstThursday = new Date(Date.UTC(date.getUTCFullYear(), 0, 4));
+  const firstDay = (firstThursday.getUTCDay() + 6) % 7;
+  firstThursday.setUTCDate(firstThursday.getUTCDate() - firstDay + 3);
+  const weekNo = 1 + Math.round((date.getTime() - firstThursday.getTime()) / (7 * 24 * 3600 * 1000));
+  const year = date.getUTCFullYear();
+  return `${year}-W${String(weekNo).padStart(2, '0')}`;
+}
+function startOfWeekMondayUTC(d = new Date()) {
+  const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const day = (date.getUTCDay() + 6) % 7; // 0=Mon
+  date.setUTCHours(0, 0, 0, 0);
+  date.setUTCDate(date.getUTCDate() - day);
+  return date;
 }
 
 /* ---------- screen ---------- */
@@ -217,34 +245,36 @@ export default function ChallengesScreen() {
   const { hasPro } = usePro();
   const { total, weekly } = usePointsTotal(user?.uid);
 
-  // NEW: derive partner UID from pair doc and check their premium
+  // Pair state
   const [partnerUid, setPartnerUid] = useState<string | null>(null);
   const [pairId, setPairId] = useState<string | null>(null);
   const [pairPremiumActive, setPairPremiumActive] = useState<boolean>(false);
+  const [pairLoaded, setPairLoaded] = useState<boolean>(false);
 
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
-
     (async () => {
       try {
+        setPairLoaded(false);
         if (!user?.uid) {
           setPartnerUid(null);
           setPairId(null);
+          setPairLoaded(true);
           return;
         }
         const pid = await getPairId(user.uid);
         setPairId(pid ?? null);
         if (!pid) {
           setPartnerUid(null);
-          setPairId(null);
+          setPairLoaded(true);
           return;
         }
         const ref = doc(db, 'pairs', pid);
         unsubscribe = onSnapshot(
           ref,
           (snap) => {
+            setPairLoaded(true);
             if (!snap.exists()) {
-              // Pair doc deleted; clear local pair state
               setPartnerUid(null);
               setPairPremiumActive(false);
               setPairId(null);
@@ -258,82 +288,113 @@ export default function ChallengesScreen() {
             );
             setPairPremiumActive(pairHasPremium);
           },
-          (err) => {
-            console.warn('[pairs.onSnapshot] permission/error', err);
-            // If we lost access (e.g., unlinked), clear local pair state gracefully.
-            // Firestore uses `code: "permission-denied"` for removed access.
-            // @ts-ignore – code is present at runtime
-            if (err?.code === 'permission-denied') {
-              setPartnerUid(null);
-              setPairPremiumActive(false);
-              setPairId(null);
-            }
+          () => {
+            setPairLoaded(true);
+            setPartnerUid(null);
+            setPairPremiumActive(false);
+            setPairId(null);
           }
         );
       } catch {
+        setPairLoaded(true);
         setPartnerUid(null);
         setPairId(null);
       }
     })();
-
-    return () => {
-      if (unsubscribe) unsubscribe();
-    };
+    return () => { if (unsubscribe) unsubscribe(); };
   }, [user?.uid]);
 
   const { isPremium: partnerIsPremium } = usePlanPlus(partnerUid ?? undefined);
 
-  // Keep the pair doc in sync:
-  // Promote to premium when *this* device has it, but never demote from a non‑premium device.
+  // Propagate premium to pair doc (one sub covers both)
   useEffect(() => {
     (async () => {
       try {
         if (!pairId) return;
         const localHasPremium = !!(isPremium || hasPro);
-        // Only write when this device actually has premium; otherwise we could overwrite
-        // the partner's active premium flag.
-        if (!localHasPremium) return;
-        // Already active at pair level → nothing to do.
-        if (pairPremiumActive) return;
+        if (!localHasPremium || pairPremiumActive) return;
         await updateDoc(doc(db, 'pairs', pairId), {
           premiumActive: true,
           premiumUpdatedAt: serverTimestamp(),
           premiumUpdatedBy: user?.uid ?? null,
         });
-      } catch {
-        // ignore
-      }
+      } catch {}
     })();
   }, [pairId, isPremium, hasPro, pairPremiumActive, user?.uid]);
 
-  // Shared weekly seed so both partners see the exact same challenges each week
+  // Shared seed → pair-based + UTC week; solo users fall back to per-user seed
   const weeklySeed = useMemo(() => {
-    const week = isoWeekStr(new Date());
+    const week = weekKeyUTC(new Date());
+    if (!pairLoaded) return `pending:${week}`; // avoid flip-flop while loading
     if (pairId) return `pair:${pairId}:${week}`;
-    // fallback to user-based seed if not paired yet
     return `solo:${user?.uid ?? 'guest'}:${week}`;
-  }, [pairId, user?.uid]);
+  }, [pairId, user?.uid, pairLoaded]);
 
-  // Premium is active if I OR my partner has it (or global Pro or pair doc says so)
+  // Shared weekly total (pair-only, positive values, Monday 00:00 UTC)
+  const [weeklyPairLive, setWeeklyPairLive] = useState<number | null>(null);
+  useEffect(() => {
+    if (!pairId) {
+      setWeeklyPairLive(null);
+      return;
+    }
+    const since = startOfWeekMondayUTC();
+    const sinceTs = Timestamp.fromDate(since);
+    const base = collection(db, 'points');
+
+    let fbUnsub: (() => void) | undefined;
+    const unsub = onSnapshot(
+      query(base, where('pairId', '==', pairId), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')),
+      (snap) => {
+        let sum = 0;
+        for (const d of snap.docs) {
+          const v = Number((d.data() as any)?.value ?? 0);
+          if (Number.isFinite(v) && v > 0) sum += v;
+        }
+        setWeeklyPairLive(sum);
+      },
+      () => {
+        fbUnsub = onSnapshot(query(base, where('pairId', '==', pairId)), (snap) => {
+          let sum = 0;
+          for (const d of snap.docs) {
+            const data: any = d.data();
+            const when: any = data?.createdAt;
+            const dt = typeof when?.toDate === 'function' ? when.toDate() : null;
+            const v = Number(data?.value ?? 0);
+            if (dt && dt >= since && Number.isFinite(v) && v > 0) sum += v;
+          }
+          setWeeklyPairLive(sum);
+        });
+      }
+    );
+    return () => { unsub(); if (fbUnsub) fbUnsub(); };
+  }, [pairId]);
+
+  // Effective “weekly points” used for lock thresholds inside the generator:
+  //  - paired → shared pair total
+  //  - solo   → user’s own weekly points
+  const { weekly: userWeekly } = usePointsTotal(user?.uid);
+  const weeklySafe = Number.isFinite(userWeekly as any) ? Number(userWeekly) : 0;
+  const weeklyForSelection = pairId ? (weeklyPairLive ?? 0) : weeklySafe;
+
+  // Premium plan resolution
   const effectivePremium = !!(isPremium || hasPro || partnerIsPremium || pairPremiumActive);
-
   const safePlan: 'free' | 'premium' = effectivePremium ? 'premium' : 'free';
-  const weeklySafe = Number.isFinite(weekly as any) ? Number(weekly) : 0;
 
   const [tab, setTab] = useState<DiffTabKey>('all');
 
-  // Use pair-and-week based seed so both partners get identical challenges
+  // Build weekly set (same for both in a pair)
   const selection = useMemo(
     () =>
       getWeeklyChallengeSet({
         plan: safePlan,
-        weeklyPoints: weeklySafe,
+        weeklyPoints: weeklyForSelection,
         uid: weeklySeed,
         pool: CHALLENGE_POOL,
       }),
-    [safePlan, weeklySafe, weeklySeed]
+    [safePlan, weeklyForSelection, weeklySeed]
   );
 
+  // Pool map for merging
   const POOL_BY_ID = useMemo(() => {
     const m = new Map<string, any>();
     for (const p of CHALLENGE_POOL) {
@@ -343,10 +404,10 @@ export default function ChallengesScreen() {
     return m;
   }, []);
 
+  // Fallback if pool/selection is empty
   const selectionSafe = useMemo(() => {
     const totalCount = selection.visible.length + selection.locked.length;
     if (totalCount > 0) return selection;
-
     const anyEasy = CHALLENGE_POOL.find((c) => extractDiffStrict(c) === 'easy');
     const anyHard = CHALLENGE_POOL.find((c) => extractDiffStrict(c) === 'hard');
     const vis: SeedChallenge[] = [];
@@ -358,6 +419,44 @@ export default function ChallengesScreen() {
     }
     return { visible: vis, locked: lock };
   }, [selection, safePlan]);
+
+  /* ---------- award points on completion (event-driven) ---------- */
+
+  const awardedKeys = useRef<Set<string>>(new Set()).current;
+  const awardChallengePoints = useCallback(
+    async (payload: { challengeId?: any; points?: any; title?: any; idempotencyKey?: string }) => {
+      try {
+        if (!user?.uid) return;
+        const pts = Number(payload?.points ?? 0);
+        if (!Number.isFinite(pts) || pts <= 0) return;
+
+        const key = payload?.idempotencyKey ?? `${payload?.challengeId ?? 'na'}:${pts}`;
+        if (awardedKeys.has(key)) return;
+        awardedKeys.add(key);
+
+        const reasonBase = (payload?.title ? String(payload.title) : 'Challenge').trim();
+        await addDoc(collection(db, 'points'), {
+          ownerId: user.uid,
+          value: pts,
+          reason: `Challenge: ${reasonBase}`,
+          createdAt: serverTimestamp(),
+          source: 'challenge',
+          challengeId: payload?.challengeId ?? null,
+          pairId: pairId ?? null,
+        });
+      } catch (e) {
+        console.warn('Failed to award challenge points', e);
+      }
+    },
+    [user?.uid, pairId, awardedKeys]
+  );
+
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener('lp.challenge.completed', (payload: any) => {
+      awardChallengePoints(payload ?? {});
+    });
+    return () => { try { sub.remove(); } catch {} };
+  }, [awardChallengePoints]);
 
   /* ---------- rows & sections ---------- */
 
@@ -381,7 +480,6 @@ export default function ChallengesScreen() {
       const merged = decorate(c);
       return { id: rowKey(merged, 'V', i), c: merged, locked: false };
     });
-
     const lock: Row[] = selectionSafe.locked.map((c, i) => {
       const merged = decorate(c);
       return { id: rowKey(merged, 'L', i), c: merged, locked: true };
@@ -410,7 +508,6 @@ export default function ChallengesScreen() {
       .filter((sec) => sec.data.length > 0);
   }, [rowsByDiff, tab]);
 
-  // Find the first locked row key for the current plan/sections
   const firstLockedKey = useMemo(() => {
     for (const sec of sections) {
       for (const row of sec.data) {
@@ -434,12 +531,16 @@ export default function ChallengesScreen() {
     return m;
   }, [allRows]);
 
-  /* ---------- navigation helpers ---------- */
+  /* ---------- navigation ---------- */
 
   const navRef = useNavigation<any>();
   const openChallenge = useCallback(
     (seed: SeedChallenge) => {
-      const params = { challengeId: seed.id, seed };
+      const params = {
+        challengeId: (seed as any)?.id,
+        seed,
+        completionChannel: 'lp.challenge.completed' as const,
+      };
       const targets = ['ChallengeDetail', 'ChallengeDetailScreen', 'Challenge', 'ChallengeDetails'];
       const navigators = [navRef, navRef.getParent?.()].filter(Boolean) as any[];
 
@@ -484,7 +585,7 @@ export default function ChallengesScreen() {
     [navRef]
   );
 
-  /* ---------- header ---------- */
+  /* ---------- header / footer ---------- */
 
   const Header = (
     <View style={s.header}>
@@ -531,35 +632,20 @@ export default function ChallengesScreen() {
     </View>
   );
 
-  /* ---------- footer upsell (only for non-premium) ---------- */
-
   const UpsellFooter = !effectivePremium ? (
     <Card style={[s.upsellCard, { marginTop: t.spacing.lg, marginBottom: insets.bottom + 8 }]}>
       <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
         <View style={s.upsellBadge}>
           <Ionicons name="sparkles" size={18} color="#fff" />
         </View>
-        <ThemedText
-          variant="title"
-          style={{
-            marginLeft: 10,
-            paddingRight: 12,
-            flexGrow: 1,
-            flexShrink: 1,
-            flexBasis: 0,
-            minWidth: 0,
-          }}
-        >
+        <ThemedText variant="title" style={{ marginLeft: 10, paddingRight: 12, flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: 0 }}>
           Bring your relationship to the next level
         </ThemedText>
       </View>
-
       <ThemedText variant="body" color="textDim">
         Go Premium to turn date night into a weekly adventure. Fresh, expert-curated
         challenges you’ll actually look forward to.
       </ThemedText>
-
-      {/* bullets (match Paywall) */}
       <View style={{ marginTop: 12 }}>
         {[
           'Unlock 12 curated challenges every week',
@@ -568,19 +654,11 @@ export default function ChallengesScreen() {
           'One subscription covers both partners',
         ].map((line) => (
           <View key={line} style={s.bulletRow}>
-            <Ionicons
-              name="checkmark-circle"
-              size={16}
-              color={t.colors.primary}
-              style={s.bulletIcon}
-            />
-            <ThemedText variant="body" style={s.bulletText}>
-              {line}
-            </ThemedText>
+            <Ionicons name="checkmark-circle" size={16} color={t.colors.primary} style={s.bulletIcon} />
+            <ThemedText variant="body" style={s.bulletText}>{line}</ThemedText>
           </View>
         ))}
       </View>
-
       <ThemedText variant="caption" color="textDim" style={{ marginTop: 12 }}>
         Upgrade now and instantly unlock +5 more challenges today.
       </ThemedText>
@@ -590,43 +668,20 @@ export default function ChallengesScreen() {
           First look: Urban Photo Essay (date)
         </ThemedText>
       </View>
-
-      {/* themed CTA */}
       <SpotlightTarget id="ch-upsell">
         <Pressable
           onPress={() => {
-            try {
-              (nav.getParent?.() ?? nav).navigate('Paywall', { plan: 'monthly' });
-            } catch {
-              Alert.alert('Premium', 'Purchases are coming soon ✨');
-            }
+            try { (nav.getParent?.() ?? nav).navigate('Paywall', { plan: 'monthly' }); }
+            catch { Alert.alert('Premium', 'Purchases are coming soon ✨'); }
           }}
           accessibilityRole="button"
           style={s.tryPremiumBtn}
         >
-          <ThemedText variant="button" color="#fff">
-            Try Premium
-          </ThemedText>
+          <ThemedText variant="button" color="#fff">Try Premium</ThemedText>
         </Pressable>
       </SpotlightTarget>
     </Card>
   ) : null;
-
-  /* ---------- tutorial steps ---------- */
-
-  const CHALLENGES_TOUR_STEPS: SpotlightStep[] = useMemo(() => {
-    const base: SpotlightStep[] = [
-      { id: 'ch-welcome', targetId: null, title: 'Challenges', text: 'Weekly ideas to date, play and surprise each other.', placement: 'bottom', allowBackdropTapToNext: true },
-      { id: 'ch-tabs', targetId: 'ch-tabs', title: 'Pick a tier', text: 'Browse all or focus on easy → pro.' },
-      { id: 'ch-points', targetId: 'ch-points', title: 'Your points', text: 'Earn points by completing challenges.' },
-      { id: 'ch-legend', targetId: 'ch-legend', title: 'Categories', text: 'Filter mentally by vibe: Dates, Kindness, Talk, Surprise, Play.' },
-      { id: 'ch-start', targetId: 'ch-start', title: 'Open one', text: 'Tap “Start challenge” to see details and begin.', placement: 'top' },
-    ];
-    if (!effectivePremium) {
-      base.push({ id: 'ch-lock', targetId: 'ch-lock', title: 'Unlock more', text: 'Locked cards need Premium or points to open.', placement: 'top', allowBackdropTapToNext: true });
-    }
-    return base;
-  }, [effectivePremium]);
 
   /* ---------- render ---------- */
 
@@ -636,7 +691,6 @@ export default function ChallengesScreen() {
         flex: 1,
         backgroundColor: t.colors.bg,
         paddingTop: insets.top + t.spacing.md,
-        // IMPORTANT: no bottom padding here -> prevents the visible bar under the tab bar
         paddingBottom: 0,
         paddingHorizontal: t.spacing.lg,
       }}
@@ -645,7 +699,7 @@ export default function ChallengesScreen() {
         sections={sections}
         keyExtractor={(item) => item.id}
         ListHeaderComponent={Header}
-        ListFooterComponent={UpsellFooter}
+        ListFooterComponent={!effectivePremium ? UpsellFooter : null}
         renderSectionHeader={({ section }) => (
           <View style={s.sectionHeader}>
             <ThemedText variant="h2">{section.title}</ThemedText>
@@ -654,7 +708,6 @@ export default function ChallengesScreen() {
         ItemSeparatorComponent={() => <View style={{ height: t.spacing.s }} />}
         SectionSeparatorComponent={() => <View style={{ height: t.spacing.s }} />}
         stickySectionHeadersEnabled={false}
-        // Push bottom spacing into the list content instead of the root container
         contentContainerStyle={{ paddingBottom: insets.bottom + t.spacing.xl }}
         showsVerticalScrollIndicator={false}
         renderItem={({ item, index, section }) => {
@@ -669,7 +722,6 @@ export default function ChallengesScreen() {
           const finalLocked = item.locked || lockedForPlan;
           const isFirstLocked = item.id === firstLockedKey;
 
-          // Spotlight only on the very first card of the first visible section
           const isFirstCard =
             sections.length > 0 && section?.key === sections[0]?.key && index === 0;
 
@@ -684,9 +736,7 @@ export default function ChallengesScreen() {
 
                   {!finalLocked ? (
                     <>
-                      {!!desc && (
-                        <Clamp text={desc!} lines={4} dimColor={t.colors.textDim} />
-                      )}
+                      {!!desc && <Clamp text={desc!} lines={4} dimColor={t.colors.textDim} />}
 
                       <View style={s.metaRow}>
                         {!!catKey && (
@@ -732,11 +782,8 @@ export default function ChallengesScreen() {
                             onPress={() => {
                               const msg = lockMessage(safePlan, c);
                               if (msg.includes('Premium')) {
-                                try {
-                                  (nav.getParent?.() ?? nav).navigate('Paywall', { plan: 'monthly' });
-                                } catch {
-                                  Alert.alert('Premium', 'Purchases are coming soon ✨');
-                                }
+                                try { (nav.getParent?.() ?? nav).navigate('Paywall', { plan: 'monthly' }); }
+                                catch { Alert.alert('Premium', 'Purchases are coming soon ✨'); }
                               }
                             }}
                             style={s.lockBtn}
@@ -753,11 +800,8 @@ export default function ChallengesScreen() {
                           onPress={() => {
                             const msg = lockMessage(safePlan, c);
                             if (msg.includes('Premium')) {
-                              try {
-                                (nav.getParent?.() ?? nav).navigate('Paywall', { plan: 'monthly' });
-                              } catch {
-                                Alert.alert('Premium', 'Purchases are coming soon ✨');
-                              }
+                              try { (nav.getParent?.() ?? nav).navigate('Paywall', { plan: 'monthly' }); }
+                              catch { Alert.alert('Premium', 'Purchases are coming soon ✨'); }
                             }
                           }}
                           style={s.lockBtn}
@@ -795,30 +839,19 @@ export default function ChallengesScreen() {
         </View>
       ) : null}
 
-      {/* Auto-start tutorial */}
-      <SpotlightAutoStarter
-        uid={user?.uid ?? null}
-        steps={CHALLENGES_TOUR_STEPS}
-        persistKey="tour-challenges"
-      />
+      <SpotlightAutoStarter uid={user?.uid ?? null} steps={[]} persistKey="tour-challenges" />
     </View>
   );
 }
 
 /* ---------- Clamp (collapsible long text) ---------- */
-
 function Clamp({
   text,
   lines = 4,
   dimColor,
-}: {
-  text: string;
-  lines?: number;
-  dimColor: string;
-}) {
+}: { text: string; lines?: number; dimColor: string }) {
   const [expanded, setExpanded] = useState(false);
   const [showToggle, setShowToggle] = useState<boolean>(text.length > 140);
-
   return (
     <View>
       <ThemedText
@@ -835,14 +868,8 @@ function Clamp({
         {text}
       </ThemedText>
       {showToggle && (
-        <Pressable
-          onPress={() => setExpanded((v) => !v)}
-          accessibilityRole="button"
-          style={{ marginTop: 6 }}
-        >
-          <ThemedText variant="label" color={dimColor}>
-            {expanded ? 'Show less' : 'Read more'}
-          </ThemedText>
+        <Pressable onPress={() => setExpanded((v) => !v)} accessibilityRole="button" style={{ marginTop: 6 }}>
+          <ThemedText variant="label" color={dimColor}>{expanded ? 'Show less' : 'Read more'}</ThemedText>
         </Pressable>
       )}
     </View>
@@ -850,17 +877,10 @@ function Clamp({
 }
 
 /* ---------- styles ---------- */
-
 const styles = (t: ThemeTokens) =>
   StyleSheet.create({
     header: { paddingBottom: t.spacing.s },
-
-    chips: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      marginTop: t.spacing.s,
-      paddingVertical: 4,
-    },
+    chips: { flexDirection: 'row', alignItems: 'center', marginTop: t.spacing.s, paddingVertical: 4 },
     chip: {
       marginRight: 8,
       paddingHorizontal: 10,
@@ -870,16 +890,12 @@ const styles = (t: ThemeTokens) =>
       borderColor: t.colors.border,
       backgroundColor: t.colors.card,
     },
-
     legendRow: { flexDirection: 'row', flexWrap: 'wrap', marginTop: t.spacing.s },
     legendItem: { flexDirection: 'row', alignItems: 'center', marginRight: 12, marginBottom: 6 },
     legendDot: { width: 8, height: 8, borderRadius: 999, marginRight: 6 },
-
     sectionHeader: { marginTop: t.spacing.md, marginBottom: t.spacing.xs },
-
     card: { marginTop: t.spacing.s },
     row: { flexDirection: 'row' },
-
     iconBubble: {
       width: 36,
       height: 36,
@@ -889,7 +905,6 @@ const styles = (t: ThemeTokens) =>
       justifyContent: 'center',
       marginRight: 8,
     },
-
     metaRow: { flexDirection: 'row', alignItems: 'center', marginTop: 6, flexWrap: 'wrap' },
     metaPill: {
       paddingHorizontal: 10,
@@ -900,11 +915,7 @@ const styles = (t: ThemeTokens) =>
       borderWidth: 1,
       borderColor: t.colors.border,
     },
-    levelPill: {
-      backgroundColor: withAlpha(t.colors.primary, 0.08),
-      borderColor: withAlpha(t.colors.primary, 0.18),
-    },
-
+    levelPill: { backgroundColor: withAlpha(t.colors.primary, 0.08), borderColor: withAlpha(t.colors.primary, 0.18) },
     lockBtn: {
       alignSelf: 'flex-start',
       borderRadius: t.radius.pill,
@@ -916,21 +927,12 @@ const styles = (t: ThemeTokens) =>
       flexDirection: 'row',
       alignItems: 'center',
     },
-
     /* Upsell */
     upsellCard: {
-      // Solid baby-blue on Android to avoid the darker rim; subtle tint on iOS
-      backgroundColor:
-        Platform.OS === 'android'
-          ? mixWithWhite(t.colors.primary, 0.90)
-          : withAlpha(t.colors.primary, 0.08),
-      borderColor:
-        Platform.OS === 'android'
-          ? mixWithWhite(t.colors.primary, 0.90) // match fill exactly → border disappears
-          : withAlpha(t.colors.primary, 0.18),
+      backgroundColor: Platform.OS === 'android' ? mixWithWhite(t.colors.primary, 0.9) : withAlpha(t.colors.primary, 0.08),
+      borderColor: Platform.OS === 'android' ? mixWithWhite(t.colors.primary, 0.9) : withAlpha(t.colors.primary, 0.18),
       borderWidth: Platform.OS === 'android' ? StyleSheet.hairlineWidth : 1,
       overflow: 'hidden',
-      // Keep it flat on Android to avoid any shading artifacts
       ...(Platform.OS === 'android' ? { elevation: 0 } : {}),
     },
     upsellBadge: {
@@ -941,21 +943,9 @@ const styles = (t: ThemeTokens) =>
       justifyContent: 'center',
       backgroundColor: t.colors.primary,
     },
-
-    // Bullets exactly like Paywall: left-aligned text, icon aligned to first line
-    bulletRow: {
-      flexDirection: 'row',
-      alignItems: 'flex-start',
-      marginTop: 10,
-    },
+    bulletRow: { flexDirection: 'row', alignItems: 'flex-start', marginTop: 10 },
     bulletIcon: { marginTop: 3 },
-    bulletText: {
-      marginLeft: 8,
-      lineHeight: 22,
-      textAlign: 'left',
-      flex: 1,
-    },
-
+    bulletText: { marginLeft: 8, lineHeight: 22, textAlign: 'left', flex: 1 },
     tryPremiumBtn: {
       marginTop: 12,
       alignSelf: 'stretch',
@@ -965,7 +955,6 @@ const styles = (t: ThemeTokens) =>
       borderRadius: t.radius.lg,
       backgroundColor: t.colors.primary,
     },
-
     premiumBanner: {
       position: 'absolute',
       alignSelf: 'center',

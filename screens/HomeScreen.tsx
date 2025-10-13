@@ -11,10 +11,20 @@ import {
   onSnapshot,
   orderBy,
   query,
+  Timestamp,
   where,
 } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Modal, Platform, Pressable, StyleSheet, View } from 'react-native';
+import {
+  Alert,
+  DeviceEventEmitter,
+  InteractionManager,
+  Modal,
+  Platform,
+  Pressable,
+  StyleSheet,
+  View,
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import Button from '../components/Button';
@@ -58,40 +68,6 @@ const IDEAS = [
 ];
 
 const isIOS = Platform.OS === 'ios';
-
-const FIRST_RUN_STEPS: SpotlightStep[] = [
-  {
-    id: 'welcome',
-    targetId: null,
-    title: 'Welcome to LovePoints 💖',
-    text: 'Quick tour to get you started?',
-    placement: 'bottom',
-    allowBackdropTapToNext: true,
-  },
-  { id: 'link',     targetId: 'home-link-partner', title: 'Pair up',  text: 'Link with your partner to sync points and memories.' },
-  { id: 'log',      targetId: 'home-log-task',     title: 'Log a task', text: 'Track a kind action and earn LovePoints.' },
-  { id: 'reward',   targetId: 'home-add-reward',   title: 'Rewards',  text: 'Add a reward you can redeem with points.' },
-  { id: 'ideas',    targetId: 'home-ideas-anchor', title: 'Ideas for today', text: 'Quick suggestions for easy wins.', placement: 'top', padding: 6 },
-  { id: 'settings', targetId: 'home-settings',     title: 'Settings', text: 'Manage your profile, pairing, and notifications.' },
-  isIOS
-    ? ({
-        id: 'nav',
-        targetId: 'tabbar-anchor',
-        title: 'Navigation',
-        text: 'Use the tabs below to move around: Home, Memories, Reminders, Love Notes, Tasks, Challenges.',
-        placement: 'top',
-        padding: 0,
-        tooltipOffset: 22,
-        allowBackdropTapToNext: true,
-      } as any)
-    : {
-        id: 'nav',
-        targetId: null,
-        title: 'Navigation',
-        text: 'Use the tabs below to move around: Home, Memories, Reminders, Love Notes, Tasks, Challenges.',
-        placement: 'bottom',
-      },
-];
 
 type PointsItem = {
   id: string;
@@ -148,6 +124,16 @@ function nextMilestone(total: number) {
 
 type PairHint = 'linked' | 'unlinked' | 'unknown';
 
+// Monday 00:00 local
+function startOfWeekMonday(d = new Date()) {
+  const copy = new Date(d);
+  const day = copy.getDay();
+  const diffToMon = (day + 6) % 7;
+  copy.setHours(0, 0, 0, 0);
+  copy.setDate(copy.getDate() - diffToMon);
+  return copy;
+}
+
 export default function HomeScreen() {
   const t = useTokens();
   const s = useMemo(() => styles(t), [t]);
@@ -174,9 +160,20 @@ export default function HomeScreen() {
   const [codeBusy, setCodeBusy] = useState(false);
 
   // Spotlight gating so targets are laid out before tour starts
+  const [linkReady, setLinkReady] = useState(false);    // when "Link with your partner" card has a frame
   const [logReady, setLogReady] = useState(false);
   const [rewardReady, setRewardReady] = useState(false);
-  const spotlightReady = logReady && rewardReady;
+  const [settingsReady, setSettingsReady] = useState(false); // ensure Settings is measurable
+  const [interactionsDone, setInteractionsDone] = useState(false); // wait for Android layout/animations to settle
+
+  // 🔴 LIVE weekly computed from Firestore (reconciles after server timestamp resolves)
+  const [weeklyLive, setWeeklyLive] = useState<number | null>(null);
+  // 🔴 LIVE lifetime total (net, includes negatives)
+  const [totalLive, setTotalLive] = useState<number | null>(null);
+
+  // ✅ Optimistic bumps when a challenge completion event fires
+  const [weeklyOptimistic, setWeeklyOptimistic] = useState<{ bump: number; baseline: number } | null>(null);
+  const [totalOptimistic, setTotalOptimistic] = useState<{ bump: number; baseline: number } | null>(null);
 
   // ---- Network status
   useEffect(() => {
@@ -245,16 +242,16 @@ export default function HomeScreen() {
     return () => unsub();
   }, [user?.uid, isOnline]);
 
-  // ---- Recent points
+  // ---- Recent points (top 3)
   useEffect(() => {
     if (!user) return;
-    const q = query(
+    const qRef = query(
       collection(db, 'points'),
       where('ownerId', '==', user.uid),
       orderBy('createdAt', 'desc'),
       limit(3)
     );
-    const off = onSnapshot(q, (snap) => {
+    const off = onSnapshot(qRef, (snap) => {
       const items: PointsItem[] = snap.docs.map((d) => {
         const data = d.data() as any;
         return {
@@ -268,6 +265,112 @@ export default function HomeScreen() {
     });
     return () => off();
   }, [user]);
+
+  // ---- LIVE weekly total for current week (client-side sum; ignores negatives)
+  // Uses pairId when linked so both partners see the same weekly value
+  useEffect(() => {
+    if (!user?.uid) {
+      setWeeklyLive(null);
+      return;
+    }
+
+    const since = startOfWeekMonday();
+    const sinceTs = Timestamp.fromDate(since);
+
+    const baseRef = collection(db, 'points');
+    const primaryQ = pairId
+      ? query(baseRef, where('pairId', '==', pairId), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc'))
+      : query(baseRef, where('ownerId', '==', user.uid), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc'));
+
+    let fallbackUnsub: (() => void) | undefined;
+
+    const primaryUnsub = onSnapshot(
+      primaryQ,
+      (snap) => {
+        let sum = 0;
+        for (const d of snap.docs) {
+          const v = Number((d.data() as any)?.value ?? 0);
+          if (Number.isFinite(v) && v > 0) sum += v; // weekly ignores negatives
+        }
+        setWeeklyLive(sum);
+      },
+      (err) => {
+        console.warn('[weeklyLive] primary query error, falling back:', err?.message);
+        const fbQ = pairId
+          ? query(baseRef, where('pairId', '==', pairId))
+          : query(baseRef, where('ownerId', '==', user.uid));
+
+        fallbackUnsub = onSnapshot(fbQ, (snap) => {
+          let sum = 0;
+          for (const d of snap.docs) {
+            const data: any = d.data();
+            const when: any = data?.createdAt;
+            const v = Number(data?.value ?? 0);
+            const dt = typeof when?.toDate === 'function' ? when.toDate() : null;
+            if (dt && dt >= since && Number.isFinite(v) && v > 0) sum += v;
+          }
+          setWeeklyLive(sum);
+        });
+      }
+    );
+
+    return () => {
+      primaryUnsub();
+      if (fallbackUnsub) fallbackUnsub();
+    };
+  }, [user?.uid, pairId]);
+
+  // ---- LIVE lifetime total (net; includes negatives). Uses pairId for shared total.
+  useEffect(() => {
+    if (!user?.uid) {
+      setTotalLive(null);
+      return;
+    }
+    const baseRef = collection(db, 'points');
+    const qRef = pairId
+      ? query(baseRef, where('pairId', '==', pairId))
+      : query(baseRef, where('ownerId', '==', user.uid));
+
+    const off = onSnapshot(qRef, (snap) => {
+      let sum = 0;
+      for (const d of snap.docs) {
+        const v = Number((d.data() as any)?.value ?? 0);
+        if (Number.isFinite(v)) sum += v; // include negatives for net lifetime
+      }
+      setTotalLive(sum);
+    });
+    return () => off();
+  }, [user?.uid, pairId]);
+
+  // ---- Optimistic bump: listen to challenge completion event and nudge weekly + total immediately
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener('lp.challenge.completed', (payload: any) => {
+      const pts = Number(payload?.points ?? 0);
+      if (!pts) return;
+      const weeklyBaseline = (weeklyLive ?? weekly ?? 0);
+      const totalBaseline = (totalLive ?? total ?? 0);
+      setWeeklyOptimistic({ bump: pts, baseline: weeklyBaseline });
+      setTotalOptimistic({ bump: pts, baseline: totalBaseline });
+    });
+    return () => sub.remove();
+  }, [weekly, weeklyLive, total, totalLive]);
+
+  // Clear the optimistic bumps once the live numbers catch up
+  useEffect(() => {
+    if (weeklyOptimistic) {
+      const live = (weeklyLive ?? weekly ?? 0);
+      const target = weeklyOptimistic.baseline + weeklyOptimistic.bump;
+      if (live >= target) setWeeklyOptimistic(null);
+    }
+  }, [weeklyLive, weekly, weeklyOptimistic]);
+
+  useEffect(() => {
+    if (totalOptimistic) {
+      const live = (totalLive ?? total ?? 0);
+      const target = totalOptimistic.baseline + totalOptimistic.bump;
+      if (live >= target) setTotalOptimistic(null);
+    }
+  }, [totalLive, total, totalOptimistic]);
 
   // ---- Day ideas
   const [key, setKey] = useState<number>(() => dayKey());
@@ -290,21 +393,30 @@ export default function HomeScreen() {
     [nav]
   );
 
+  // ---- Effective weekly for UI (live → hook → optimistic max)
+  const weeklyBase = weeklyLive ?? weekly ?? 0;
+  const weeklyDisplay =
+    weeklyOptimistic ? Math.max(weeklyBase, weeklyOptimistic.baseline + weeklyOptimistic.bump) : weeklyBase;
+
+  // ---- Effective lifetime total for UI (live → hook → optimistic max)
+  const totalBase = totalLive ?? (total ?? 0);
+  const totalDisplay =
+    totalOptimistic ? Math.max(totalBase, totalOptimistic.baseline + totalOptimistic.bump) : totalBase;
+
   // ---- Copy tweaks
-  const weeklyLeft = Math.max(0, WEEK_GOAL - weekly);
+  const weeklyLeft = Math.max(0, WEEK_GOAL - weeklyDisplay);
   const nudge =
     weeklyLeft === 0
       ? 'Weekly goal reached—nice! Keep the streak rolling 🔥'
-      : weekly < WEEK_GOAL / 3
+      : weeklyDisplay < WEEK_GOAL / 3
       ? 'Small steps count—one kind thing today?'
-      : weekly < (2 * WEEK_GOAL) / 3
+      : weeklyDisplay < (2 * WEEK_GOAL) / 3
       ? 'You’re halfway there—keep going 👏'
       : 'So close! A tiny push and you’re there ✨';
 
-  const totalPoints = total ?? 0;
   const { target, remaining } = useMemo(
-    () => nextMilestone(totalPoints),
-    [totalPoints]
+    () => nextMilestone(totalDisplay),
+    [totalDisplay]
   );
 
   // ---- Add reward
@@ -418,6 +530,73 @@ export default function HomeScreen() {
       (!pairReady && pairHint === 'unlinked')
     );
 
+  // Wait for JS interactions/layout to finish (Android can be late)
+  useEffect(() => {
+    const task = InteractionManager.runAfterInteractions(() => setInteractionsDone(true));
+    return () => {
+      // @ts-ignore
+      task?.cancel?.();
+    };
+  }, []);
+
+  // Build steps dynamically — include "link" only if the card is rendered
+  const FIRST_RUN_STEPS: SpotlightStep[] = useMemo(() => {
+    const base: SpotlightStep[] = [
+      {
+        id: 'welcome',
+        targetId: null,
+        title: 'Welcome to LovePoints 💖',
+        text: 'Quick tour to get you started?',
+        placement: 'bottom',
+        allowBackdropTapToNext: true,
+      },
+    ];
+
+    if (pairCardShouldShow) {
+      base.push({
+        id: 'link',
+        targetId: 'home-link-partner',
+        title: 'Pair up',
+        text: 'Link with your partner to sync points and memories.',
+      });
+    }
+
+    base.push(
+      { id: 'log',    targetId: 'home-log-task',   title: 'Log a task', text: 'Track a kind action and earn LovePoints.' },
+      { id: 'reward', targetId: 'home-add-reward', title: 'Rewards',    text: 'Add a reward you can redeem with points.' },
+      { id: 'ideas',  targetId: 'home-ideas-anchor', title: 'Ideas for today', text: 'Quick suggestions for easy wins.', placement: 'top', padding: 6 },
+      { id: 'settings', targetId: 'home-settings', title: 'Settings', text: 'Manage your profile, pairing, and notifications.' },
+      isIOS
+        ? ({
+            id: 'nav',
+            targetId: 'tabbar-anchor',
+            title: 'Navigation',
+            text: 'Use the tabs below to move around: Home, Memories, Reminders, Love Notes, Tasks, Challenges.',
+            placement: 'top',
+            padding: 0,
+            tooltipOffset: 22,
+            allowBackdropTapToNext: true,
+          } as any)
+        : {
+            id: 'nav',
+            targetId: null,
+            title: 'Navigation',
+            text: 'Use the tabs below to move around: Home, Memories, Reminders, Love Notes, Tasks, Challenges.',
+            placement: 'bottom',
+          }
+    );
+
+    return base;
+  }, [pairCardShouldShow, isIOS]);
+
+  // Only start the tour when ALL needed targets are laid out (and interactions finished).
+  const spotlightReady =
+    interactionsDone &&
+    logReady &&
+    rewardReady &&
+    settingsReady &&
+    (!pairCardShouldShow || linkReady);
+
   return (
     <Screen>
       {/* HERO */}
@@ -436,11 +615,16 @@ export default function HomeScreen() {
             </Pill>
             <Pill>
               <Ionicons name="trophy" size={16} color={t.colors.textDim} />
-              <ThemedText variant="label">{totalPoints}</ThemedText>
+              <ThemedText variant="label">{totalDisplay}</ThemedText>
             </Pill>
           </View>
 
-          <View collapsable={false} style={{ alignSelf: 'flex-start' }}>
+          {/* measurable Settings for the tour */}
+          <View
+            collapsable={false}
+            style={{ alignSelf: 'flex-start' }}
+            onLayout={() => setSettingsReady(true)}
+          >
             <SpotlightTarget id="home-settings">
               <Button label="Settings" variant="outline" onPress={() => nav.navigate('Settings')} />
             </SpotlightTarget>
@@ -450,65 +634,74 @@ export default function HomeScreen() {
 
       {/* Partner (Action card) — instant with cached hint, authoritative once snapshot arrives */}
       {pairCardShouldShow && (
-        <SpotlightTarget id="home-link-partner">
-          <Card style={{ marginBottom: 12, paddingVertical: 12, borderWidth: 1, borderColor: HAIRLINE }}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-              <View style={{ width: 36, height: 36, borderRadius: 10, backgroundColor: withAlpha(t.colors.primary, 0.08), alignItems: 'center', justifyContent: 'center' }}>
-                <Ionicons name="link" size={18} color={t.colors.primary} />
+        // ensure this view is measurable before starting the tour
+        <View collapsable={false} onLayout={() => setLinkReady(true)}>
+          <SpotlightTarget id="home-link-partner">
+            <Card style={{ marginBottom: 12, paddingVertical: 12, borderWidth: 1, borderColor: HAIRLINE }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                <View style={{ width: 36, height: 36, borderRadius: 10, backgroundColor: withAlpha(t.colors.primary, 0.08), alignItems: 'center', justifyContent: 'center' }}>
+                  <Ionicons name="link" size={18} color={t.colors.primary} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <ThemedText variant="title">Link with your partner</ThemedText>
+                  <ThemedText variant="caption" color={t.colors.textDim}>Share points and memories together.</ThemedText>
+                </View>
               </View>
-              <View style={{ flex: 1 }}>
-                <ThemedText variant="title">Link with your partner</ThemedText>
-                <ThemedText variant="caption" color={t.colors.textDim}>Share points and memories together.</ThemedText>
+
+              <View style={{ flexDirection: 'row', gap: 12, marginTop: 10, flexWrap: 'wrap' }}>
+                <Button
+                  label="Scan QR"
+                  onPress={() => {
+                    try {
+                      (nav as any).navigate('PairingScan');
+                    } catch {
+                      Alert.alert('Pairing', 'Scanner not available. Open Settings → Pairing.');
+                    }
+                  }}
+                />
+                <Button
+                  label="Show my QR"
+                  variant="outline"
+                  onPress={openPairingQR}
+                />
               </View>
-            </View>
 
-            <View style={{ flexDirection: 'row', gap: 12, marginTop: 10, flexWrap: 'wrap' }}>
-              <Button
-                label="Scan QR"
-                onPress={() => {
-                  try {
-                    (nav as any).navigate('PairingScan');
-                  } catch {
-                    Alert.alert('Pairing', 'Scanner not available. Open Settings → Pairing.');
-                  }
-                }}
-              />
-              <Button
-                label="Show my QR"
-                variant="outline"
-                onPress={openPairingQR}
-              />
-            </View>
-
-            <Pressable
-              onPress={onEnterCode}
-              accessibilityRole="button"
-              style={{ alignSelf: 'flex-start', marginTop: 8, paddingVertical: 6, paddingHorizontal: 8 }}
-            >
-              <ThemedText variant="caption" color={t.colors.primary}>Have a code? Enter it here</ThemedText>
-            </Pressable>
-          </Card>
-        </SpotlightTarget>
+              <Pressable
+                onPress={onEnterCode}
+                accessibilityRole="button"
+                style={{ alignSelf: 'flex-start', marginTop: 8, paddingVertical: 6, paddingHorizontal: 8 }}
+              >
+                <ThemedText variant="caption" color={t.colors.primary}>Have a code? Enter it here</ThemedText>
+              </Pressable>
+            </Card>
+          </SpotlightTarget>
+        </View>
       )}
 
       {/* Weekly goal */}
       <Card style={{ marginBottom: 12, borderWidth: 1, borderColor: HAIRLINE }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
           <ThemedText variant="subtitle" style={{ flex: 1 }}>Weekly goal</ThemedText>
-          <ThemedText variant="caption" color={t.colors.textDim}>{weekly} / {WEEK_GOAL} · {Math.max(0, WEEK_GOAL - weekly)} to go</ThemedText>
+          <ThemedText variant="caption" color={t.colors.textDim}>
+            {weeklyDisplay} / {WEEK_GOAL} · {Math.max(0, WEEK_GOAL - weeklyDisplay)} to go
+          </ThemedText>
         </View>
-        <ProgressBar value={weekly} max={WEEK_GOAL} height={8} trackColor="#EDEAF1" />
-        <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 8 }}>{nudge}</ThemedText>
+        <ProgressBar value={weeklyDisplay} max={WEEK_GOAL} height={8} trackColor="#EDEAF1" />
+        <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 8 }}>
+          {nudge}
+        </ThemedText>
         <View style={{ marginTop: 12 }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
             <ThemedText variant="label" color={t.colors.textDim}>Next milestone</ThemedText>
             <ThemedText variant="label">{target} pts</ThemedText>
           </View>
-          <ProgressBar value={totalPoints} max={target} height={6} trackColor="#EDEAF1" />
-          <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 4 }}>{remaining} to go • {weekly} this week</ThemedText>
+          <ProgressBar value={totalDisplay} max={target} height={6} trackColor="#EDEAF1" />
+          <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 4 }}>
+            {remaining} to go • {weeklyDisplay} this week
+          </ThemedText>
         </View>
 
-        {/* Actions row: Log task + Add reward, with non-collapsible wrappers and layout flags */}
+        {/* Actions row: Log task + Add reward, with measurable wrappers */}
         <View style={{ marginTop: 12, flexDirection: 'row', alignItems: 'center' }}>
           <View collapsable={false} style={{ alignSelf: 'flex-start' }} onLayout={() => setLogReady(true)}>
             <SpotlightTarget id="home-log-task">
@@ -637,9 +830,14 @@ export default function HomeScreen() {
         </View>
       </Modal>
 
-      {/* Start the tour only after targets are laid out */}
+      {/* Start the tour only after targets are laid out (+ interactions settled) */}
       {spotlightReady && (
-        <SpotlightAutoStarter uid={user?.uid ?? null} steps={FIRST_RUN_STEPS} persistKey="first-run-v3" />
+        <SpotlightAutoStarter
+          key={pairCardShouldShow ? 'with-link' : 'no-link'} // re-mount if the step list changes
+          uid={user?.uid ?? null}
+          steps={FIRST_RUN_STEPS}
+          persistKey="first-run-v3"
+        />
       )}
     </Screen>
   );
@@ -664,6 +862,7 @@ const styles = (t: ThemeTokens) =>
     },
     hairlineTop: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#F0E6EF', marginTop: 10, paddingTop: 10 },
     recentRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 8 },
+
     // CODE PROMPT styles
     modalOverlay: {
       flex: 1,

@@ -4,8 +4,8 @@ import Constants from 'expo-constants';
 import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
 import * as SplashScreen from 'expo-splash-screen';
-import { useEffect, useState } from 'react';
-import { LogBox, Platform } from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import { Animated, Easing, Image, LogBox, Platform, StyleSheet } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
@@ -28,7 +28,7 @@ LogBox.ignoreLogs([
   "WebChannelConnection RPC 'Listen' stream",
 ]);
 
-// Keep native splash up until we decide to hide it (we'll hide ASAP on Android)
+// Control native splash ourselves
 SplashScreen.preventAutoHideAsync().catch(() => {});
 
 // ---------- Helpers for “Make their day” nudges ----------
@@ -158,6 +158,7 @@ function useKindnessNudgesScheduler(userId: string | null | undefined) {
       }
 
       if (Platform.OS === 'android') {
+        // Ensure a default channel exists on Android for reliability
         await Notifications.setNotificationChannelAsync('default', {
           name: 'Kindness nudges',
           importance: Notifications.AndroidImportance.DEFAULT,
@@ -167,7 +168,7 @@ function useKindnessNudgesScheduler(userId: string | null | undefined) {
         }).catch(() => {});
       }
 
-      const TARGET = 48;
+      const TARGET = 48; // ~12 weeks @ 4/wk
       const existing = await Notifications.getAllScheduledNotificationsAsync();
       if (cancelled) return;
 
@@ -188,23 +189,65 @@ function useKindnessNudgesScheduler(userId: string | null | undefined) {
         if (cancelled) return;
       }
     })();
+
     return () => {
       cancelled = true;
     };
   }, [userId]);
 }
 
+// ---------- CUSTOM INTRO OVERLAY (fade-in logo, then fade-out overlay) ----------
+const SPLASH_SOURCE = require('./assets/splash.png');
+const _src = Image.resolveAssetSource(SPLASH_SOURCE) || { width: 320, height: 100 };
+const SPLASH_AR = _src.width && _src.height ? _src.width / _src.height : 3.2;
+
 export default function App() {
   const { user } = useAuthListener();
 
+  // Overlay always shown at launch (both iOS & Android). We'll fade the LOGO in, then the OVERLAY out.
+  const [showIntro, setShowIntro] = useState(true);
+  const overlayOpacity = useRef(new Animated.Value(1)).current; // fade OUT to reveal app
+  const logoOpacity = useRef(new Animated.Value(0)).current;    // fade IN to show the wordmark
   const [navReady, setNavReady] = useState(false);
+  const [introInDone, setIntroInDone] = useState(false);        // after logo fade-in + brief hold
 
-  // iOS: hide native splash when navigation is ready
+  // Hide native (system) splash almost immediately so we never show a tiny Android splash
   useEffect(() => {
-    if (navReady) {
+    const t = setTimeout(() => {
       SplashScreen.hideAsync().catch(() => {});
-    }
-  }, [navReady]);
+    }, 10);
+    return () => clearTimeout(t);
+  }, []);
+
+  // Run the logo fade-in once (about ~1s including a short hold)
+  useEffect(() => {
+    if (!showIntro) return;
+    const id = requestAnimationFrame(() => {
+      Animated.timing(logoOpacity, {
+        toValue: 1,
+        duration: 550,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }).start(() => {
+        // small hold to ensure "one second splash image fade in"
+        const hold = setTimeout(() => setIntroInDone(true), 450);
+        return () => clearTimeout(hold);
+      });
+    });
+    return () => cancelAnimationFrame(id);
+  }, [showIntro, logoOpacity]);
+
+  // Once navigation is ready AND our intro-in is done, fade OUT the overlay quickly
+  useEffect(() => {
+    if (!showIntro) return;
+    if (!(navReady && introInDone)) return;
+    Animated.timing(overlayOpacity, {
+      toValue: 0,
+      duration: 240,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start(() => setShowIntro(false));
+  }, [navReady, introInDone, showIntro, overlayOpacity]);
 
   // Global notifications handler
   useEffect(() => {
@@ -259,9 +302,34 @@ export default function App() {
             <NavigationContainer onReady={() => setNavReady(true)}>
               {user ? <AppNavigator /> : <AuthNavigator />}
             </NavigationContainer>
+
+            {/* Fullscreen white overlay (blocks UI); logo fades IN, overlay fades OUT */}
+            {showIntro && (
+              <Animated.View style={[styles.splashOverlay, { opacity: overlayOpacity }]} pointerEvents="none">
+                <Animated.Image
+                  source={SPLASH_SOURCE}
+                  resizeMode="contain"
+                  style={[styles.splashWordmark, { opacity: logoOpacity }]}
+                />
+              </Animated.View>
+            )}
           </SpotlightProvider>
         </ThemeProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );
 }
+
+const styles = StyleSheet.create({
+  splashOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  splashWordmark: {
+    width: '72%',
+    maxWidth: 420,
+    aspectRatio: SPLASH_AR, // keep your wordmark crisp without guessing height
+  },
+});

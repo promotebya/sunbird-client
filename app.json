@@ -9,8 +9,9 @@
 
     "icon": "./assets/icon.png",
 
+    
     "splash": {
-      "image": "./assets/splash.png",
+      "image": "./assets/splash-blank.png",
       "resizeMode": "cover",
       "backgroundColor": "#FFFFFF"
     },
@@ -42,8 +43,9 @@
         "android.permission.RECORD_AUDIO",
         "android.permission.POST_NOTIFICATIONS"
       ],
+      
       "splash": {
-        "image": "./assets/splash.png",
+        "image": "./assets/splash-blank.png",
         "resizeMode": "cover",
         "backgroundColor": "#FFFFFF"
       }
@@ -69,14 +71,7 @@
           "cameraPermission": "Allow LovePoints to use the camera to scan QR codes and take photos."
         }
       ],
-      [
-        "expo-splash-screen",
-        {
-          "backgroundColor": "#FFFFFF",
-          "image": "./assets/splash.png",
-          "resizeMode": "cover"
-        }
-      ],
+      
       "expo-notifications"
     ],
 
