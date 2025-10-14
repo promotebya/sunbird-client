@@ -1,10 +1,9 @@
 // screens/ChallengesScreen.tsx
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert,
-  DeviceEventEmitter,
   Platform,
   Pressable,
   ScrollView,
@@ -31,7 +30,6 @@ import { usePro } from '../utils/subscriptions';
 
 // Firestore
 import {
-  addDoc,
   collection,
   doc,
   onSnapshot,
@@ -420,43 +418,8 @@ export default function ChallengesScreen() {
     return { visible: vis, locked: lock };
   }, [selection, safePlan]);
 
-  /* ---------- award points on completion (event-driven) ---------- */
-
-  const awardedKeys = useRef<Set<string>>(new Set()).current;
-  const awardChallengePoints = useCallback(
-    async (payload: { challengeId?: any; points?: any; title?: any; idempotencyKey?: string }) => {
-      try {
-        if (!user?.uid) return;
-        const pts = Number(payload?.points ?? 0);
-        if (!Number.isFinite(pts) || pts <= 0) return;
-
-        const key = payload?.idempotencyKey ?? `${payload?.challengeId ?? 'na'}:${pts}`;
-        if (awardedKeys.has(key)) return;
-        awardedKeys.add(key);
-
-        const reasonBase = (payload?.title ? String(payload.title) : 'Challenge').trim();
-        await addDoc(collection(db, 'points'), {
-          ownerId: user.uid,
-          value: pts,
-          reason: `Challenge: ${reasonBase}`,
-          createdAt: serverTimestamp(),
-          source: 'challenge',
-          challengeId: payload?.challengeId ?? null,
-          pairId: pairId ?? null,
-        });
-      } catch (e) {
-        console.warn('Failed to award challenge points', e);
-      }
-    },
-    [user?.uid, pairId, awardedKeys]
-  );
-
-  useEffect(() => {
-    const sub = DeviceEventEmitter.addListener('lp.challenge.completed', (payload: any) => {
-      awardChallengePoints(payload ?? {});
-    });
-    return () => { try { sub.remove(); } catch {} };
-  }, [awardChallengePoints]);
+  // Challenge completion points are now written directly in ChallengeDetailScreen
+  // (idempotent setDoc with pairId). No write/listener needed here.
 
   /* ---------- rows & sections ---------- */
 
