@@ -1,7 +1,7 @@
 // screens/ChallengeDetailScreen.tsx
 import { RouteProp, useRoute } from '@react-navigation/native';
-import { useMemo } from 'react';
-import { Alert, DeviceEventEmitter, Image, ScrollView, StyleSheet, View } from 'react-native';
+import { useMemo, useState } from 'react';
+import { DeviceEventEmitter, Image, ScrollView, StyleSheet, View } from 'react-native';
 import Button from '../components/Button';
 import Card from '../components/Card';
 import ThemedText from '../components/ThemedText';
@@ -11,7 +11,14 @@ import { Challenge, useChallenges } from '../hooks/useChallenges';
 import { usePro } from '../utils/subscriptions';
 
 // Firestore
-import { doc, serverTimestamp, setDoc } from 'firebase/firestore';
+import {
+  addDoc,
+  collection,
+  doc,
+  increment,
+  runTransaction,
+  serverTimestamp,
+} from 'firebase/firestore';
 import { db } from '../firebaseConfig';
 import { getPairId } from '../utils/partner';
 
@@ -22,117 +29,144 @@ type Params = {
   seed?: any;                 // if you navigate with a "seed" object instead of "challenge"
 };
 
-// ISO week key in UTC — used for idempotent doc ids per week
-function isoWeekKey(d = new Date()) {
+/** ISO week key (UTC, Monday week) – matches ChallengesScreen logic */
+function weekKeyUTC(d = new Date()) {
   const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-  const day = (date.getUTCDay() + 6) % 7; // Mon=0
-  date.setUTCDate(date.getUTCDate() - day + 3); // Thu of this week
+  const day = (date.getUTCDay() + 6) % 7; // Mon..Sun -> 0..6
+  date.setUTCDate(date.getUTCDate() - day + 3); // Thu anchor
+  const firstThursday = new Date(Date.UTC(date.getUTCFullYear(), 0, 4));
+  const firstDay = (firstThursday.getUTCDay() + 6) % 7;
+  firstThursday.setUTCDate(firstThursday.getUTCDate() - firstDay + 3);
+  // weeks since first Thu
+  const weekNo = 1 + Math.round((date.getTime() - firstThursday.getTime()) / (7 * 24 * 3600 * 1000));
   const year = date.getUTCFullYear();
-  const firstThu = new Date(Date.UTC(year, 0, 4));
-  const firstDay = (firstThu.getUTCDay() + 6) % 7;
-  firstThu.setUTCDate(firstThu.getUTCDate() - firstDay + 3);
-  const week = 1 + Math.round((date.getTime() - firstThu.getTime()) / (7 * 24 * 3600 * 1000));
-  return `${year}-W${String(week).padStart(2, '0')}`;
+  return `${year}-W${String(weekNo).padStart(2, '0')}`;
 }
-
-// Session guard to avoid rapid double writes
-const SESSION_KEYS = new Set<string>();
 
 export default function ChallengeDetailScreen() {
   const route = useRoute<RouteProp<Record<string, Partial<Params>>, string>>();
   const { user } = useAuthListener();
   const { hasPro } = usePro();
 
-  // Accept both legacy `challenge` and optional `seed`
-  const base: Partial<Challenge> | undefined =
-    (route.params?.challenge as Challenge) ?? (route.params?.seed as Challenge) ?? undefined;
+  const [submitting, setSubmitting] = useState(false);
 
-  const startingStatus =
-    (route.params?.status as Params['status']) ?? 'unlocked';
+  // Accept both legacy `challenge` and optional `seed` (from Challenges list)
+  const base: Challenge = (route.params?.challenge as Challenge) ?? (route.params?.seed as Challenge);
+  const startingStatus = (route.params?.status as Params['status']) ?? 'unlocked';
 
   const { myStatuses, mark } = useChallenges(user?.uid, 0, hasPro);
-  const status = useMemo(() => {
-    if (!base?.id) return startingStatus;
-    return myStatuses.find((s) => s.id === base.id)?.status ?? startingStatus;
-  }, [myStatuses, base?.id, startingStatus]);
+  const status = useMemo(
+    () => myStatuses.find((s) => s.id === base.id)?.status ?? startingStatus,
+    [myStatuses, base?.id, startingStatus]
+  );
 
   const completionChannel =
     (route.params?.completionChannel as string) || 'lp.challenge.completed';
 
-  async function awardPoints(pts: number) {
-    if (!user?.uid || !base?.id || !Number.isFinite(pts) || pts <= 0) return;
-
-    const weekKey = isoWeekKey();
-    const idempotentDocId = `${user.uid}:${String(base.id)}:${weekKey}`;
-
-    if (SESSION_KEYS.has(idempotentDocId)) return;
-    SESSION_KEYS.add(idempotentDocId);
-
-    const pairId = await getPairId(user.uid).catch(() => null);
-
-    await setDoc(
-      doc(db, 'points', idempotentDocId),
-      {
-        ownerId: user.uid,
-        pairId: pairId ?? null,
-        value: pts,
-        reason: `Challenge: ${base.title ?? 'Challenge'}`,
-        createdAt: serverTimestamp(),
-        source: 'challenge',
-        challengeId: base.id ?? null,
-        week: weekKey,
-      },
-      { merge: false }
-    );
-  }
-
   async function onStart() {
-    if (!base?.id) return;
-    try {
-      await mark(base.id, 'in_progress');
-    } catch (e: any) {
-      Alert.alert('Could not start', e?.message ?? 'Try again.');
-    }
+    await mark(base.id, 'in_progress');
   }
 
   async function onComplete() {
-    if (!base?.id) return;
+    if (submitting) return;
+    setSubmitting(true);
     try {
       await mark(base.id, 'completed');
 
-      const pts =
+      // Pick points (+ fallback if seed lacks an explicit value)
+      const fallbackPoints =
         typeof (base as any)?.points === 'number'
           ? Number((base as any).points)
           : Math.max(1, Number((base as any)?.tier ?? 1)) * 2;
 
-      await awardPoints(pts);
+      const pts = Number.isFinite(fallbackPoints) ? fallbackPoints : 2;
 
-      const key = `${user?.uid ?? 'nouser'}:${String(base.id)}:${isoWeekKey()}`;
-      DeviceEventEmitter.emit(completionChannel, {
+      const payload = {
         challengeId: base.id,
         points: pts,
         title: base.title,
-        idempotencyKey: key,
-      });
-    } catch (e: any) {
-      Alert.alert('Could not complete', e?.message ?? 'Please try again.');
-    }
-  }
+        idempotencyKey: `${user?.uid ?? 'nouser'}:${base.id}:completed`,
+      };
 
-  // --------- Defensive render: if params are missing, show a safe card, not a crash ----------
-  if (!base?.id) {
-    return (
-      <ScrollView contentContainerStyle={{ padding: tokens.spacing.md, paddingBottom: tokens.spacing.xl }}>
-        <Card>
-          <ThemedText variant="display">Challenge</ThemedText>
-          <ThemedText variant="body" style={{ marginTop: 8 }}>
-            This challenge couldn’t be loaded.
-          </ThemedText>
-          <View style={{ height: tokens.spacing.md }} />
-          <Button label="Back to Challenges" onPress={() => (DeviceEventEmitter.emit('nav.back'), null)} />
-        </Card>
-      </ScrollView>
-    );
+      // 1) Optimistic UI bump (Home/Challenges listeners)
+      DeviceEventEmitter.emit(completionChannel, payload);
+
+      // 2) Persist an activity/points entry (auto ID, cannot collide)
+      try {
+        const pid = user?.uid ? await getPairId(user.uid).catch(() => null) : null;
+        await addDoc(collection(db, 'points'), {
+          ownerId: user?.uid ?? null,
+          pairId: pid ?? null,
+          value: pts,
+          reason: `Challenge: ${base.title ?? 'Challenge'}`,
+          source: 'challenge',
+          challengeId: base.id ?? null,
+          createdAt: serverTimestamp(),
+        });
+
+        // 3) If paired, atomically sync the shared totals on the pair doc
+        if (pid) {
+          const pairRef = doc(db, 'pairs', pid);
+          const ledgerKey = `${base.id}__${user?.uid ?? 'nouser'}`; // per-user per-challenge
+          const ledgerRef = doc(db, 'pairs', pid, 'ledger', ledgerKey);
+          const wk = weekKeyUTC(new Date());
+
+          await runTransaction(db, async (tx) => {
+            // If this completion was already accounted for, bail (idempotent)
+            const already = await tx.get(ledgerRef);
+            if (already.exists()) return;
+
+            // Read pair doc to decide whether to reset weekly
+            const pairSnap = await tx.get(pairRef);
+            const data: any = pairSnap.exists() ? pairSnap.data() : {};
+            const prevWeek: string | undefined = data?.weeklyPointsWeek;
+            const shouldReset = prevWeek && prevWeek !== wk;
+
+            // Record the ledger first (prevents double counting on retries)
+            tx.set(ledgerRef, {
+              challengeId: base.id ?? null,
+              userId: user?.uid ?? null,
+              points: pts,
+              weekKey: wk,
+              createdAt: serverTimestamp(),
+            });
+
+            if (shouldReset) {
+              // Reset weekly bucket, increment total
+              tx.set(
+                pairRef,
+                {
+                  totalPoints: increment(pts),
+                  totalPointsUpdatedAt: serverTimestamp(),
+                  weeklyPoints: pts,
+                  weeklyPointsWeek: wk,
+                  weeklyPointsUpdatedAt: serverTimestamp(),
+                },
+                { merge: true }
+              );
+            } else {
+              // Normal increments
+              tx.set(
+                pairRef,
+                {
+                  totalPoints: increment(pts),
+                  totalPointsUpdatedAt: serverTimestamp(),
+                  weeklyPoints: increment(pts),
+                  weeklyPointsWeek: wk,
+                  weeklyPointsUpdatedAt: serverTimestamp(),
+                },
+                { merge: true }
+              );
+            }
+          });
+        }
+      } catch (e) {
+        // Non-fatal: optimistic UI will still reflect completion; backend will catch up later
+        console.warn('Failed to persist points / sync pair totals', e);
+      }
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   const locked = status === 'locked';
@@ -167,7 +201,7 @@ export default function ChallengeDetailScreen() {
         <View style={{ height: tokens.spacing.md }} />
 
         <ThemedText variant="title">Steps</ThemedText>
-        {((base as any)?.steps ?? ['Make it your own 💞']).map((s: string, i: number) => (
+        {(((base as any)?.steps as string[]) ?? ['Make it your own 💞']).map((s: string, i: number) => (
           <View key={i} style={styles.stepRow}>
             <ThemedText variant="display">•</ThemedText>
             <ThemedText variant="body" style={{ flex: 1 }}>
@@ -181,12 +215,12 @@ export default function ChallengeDetailScreen() {
         {locked ? (
           <View style={styles.lockedBox}>
             <ThemedText variant="body" color="#fff" center>
-              Unlock by earning {(base as any)?.pointsRequired ?? 'enough'} points
-              {(base as any)?.isPremium ? ' (or go Premium)' : ''}.
+              Unlock by earning {(base as any)?.pointsRequired}
+              {(base as any)?.isPremium ? ' (or go Premium)' : ''} points.
             </ThemedText>
           </View>
         ) : status === 'in_progress' ? (
-          <Button label="Mark completed" onPress={onComplete} />
+          <Button label={submitting ? 'Saving…' : 'Mark completed'} onPress={onComplete} disabled={submitting} />
         ) : status === 'completed' ? (
           <View style={styles.donePill}>
             <ThemedText variant="label" color="#065F46">

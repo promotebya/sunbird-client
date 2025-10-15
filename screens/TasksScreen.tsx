@@ -5,6 +5,7 @@ import { useNavigation, useRoute } from '@react-navigation/native';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
+  DeviceEventEmitter,
   FlatList,
   Keyboard,
   KeyboardAvoidingView,
@@ -87,7 +88,7 @@ const TasksScreen: React.FC = () => {
   const route = useRoute<any>();
   const insets = useSafeAreaInsets();
   const { user } = useAuthListener();
-  const { total } = usePointsTotal(user?.uid);
+  const { total } = usePointsTotal(user?.uid); // fallback only
   const t = useTokens();
   const s = useMemo(() => styles(t), [t]);
 
@@ -105,6 +106,33 @@ const TasksScreen: React.FC = () => {
 
   const [showConfetti, setShowConfetti] = useState(false);
   const [showAddReward, setShowAddReward] = useState(false);
+
+  // Persisted fold state for the Rewards section
+  const REWARDS_OPEN_KEY = (uid?: string | null) => `lp:tasks:rewardsOpen:${uid ?? 'anon'}`;
+  const [rewardsOpen, setRewardsOpen] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const stored = await AsyncStorage.getItem(REWARDS_OPEN_KEY(user?.uid));
+        if (stored === '0') setRewardsOpen(false);
+        else if (stored === '1') setRewardsOpen(true);
+      } catch {}
+    })();
+  }, [user?.uid]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        await AsyncStorage.setItem(REWARDS_OPEN_KEY(user?.uid), rewardsOpen ? '1' : '0');
+      } catch {}
+    })();
+  }, [rewardsOpen, user?.uid]);
+
+  const toggleRewardsOpen = () => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setRewardsOpen((v) => !v);
+  };
 
   const [streak, setStreak] = useState<{
     current?: number;
@@ -313,6 +341,111 @@ const TasksScreen: React.FC = () => {
     return () => off && off();
   }, [user]);
 
+  // -------- Pair-aware LIVE total (union of pair points + my no-pair points) + optimistic bump
+  const [totalLive, setTotalLive] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!user?.uid) {
+      setTotalLive(null);
+      return;
+    }
+
+    // maps of id -> value so we can union safely
+    let ownerUnsub: (() => void) | undefined;
+    let pairUnsub:  (() => void) | undefined;
+
+    const ownerMap = new Map<string, number>();
+    const pairMap  = new Map<string, number>();
+
+    const recompute = () => {
+      // union: all pair docs + owner docs that do NOT have a pairId
+      let sum = 0;
+      // pair docs (all)
+      for (const v of pairMap.values()) sum += v;
+      // owner docs (only those with no pairId)
+      for (const [id, v] of ownerMap) {
+        // ownerMap stores no-pair docs only (see listener)
+        sum += v;
+      }
+      setTotalLive(sum);
+    };
+
+    // Listen to all my docs; keep only those with null/undefined pairId in ownerMap
+    ownerUnsub = onSnapshot(
+      query(collection(db, 'points'), where('ownerId', '==', user.uid)),
+      (snap) => {
+        ownerMap.clear();
+        for (const d of snap.docs) {
+          const data: any = d.data();
+          const v = Number(data?.value ?? 0);
+          const pid = data?.pairId ?? null;
+          if ((pid === null || pid === undefined) && Number.isFinite(v)) {
+            ownerMap.set(d.id, v);
+          }
+        }
+        recompute();
+      },
+      () => {
+        ownerMap.clear();
+        recompute();
+      }
+    );
+
+    // If paired, also listen to all docs for this pair
+    if (pairId) {
+      pairUnsub = onSnapshot(
+        query(collection(db, 'points'), where('pairId', '==', pairId)),
+        (snap) => {
+          pairMap.clear();
+          for (const d of snap.docs) {
+            const v = Number((d.data() as any)?.value ?? 0);
+            if (Number.isFinite(v)) pairMap.set(d.id, v);
+          }
+          recompute();
+        },
+        () => {
+          pairMap.clear();
+          recompute();
+        }
+      );
+    } else {
+      // if not paired, clear pair map
+      pairMap.clear();
+      recompute();
+    }
+
+    return () => {
+      try { ownerUnsub && ownerUnsub(); } catch {}
+      try { pairUnsub && pairUnsub(); } catch {}
+    };
+  }, [user?.uid, pairId]);
+
+  // Optimistic bump on challenge completion
+  const [totalOptimistic, setTotalOptimistic] = useState<{ bump: number; baseline: number } | null>(null);
+
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener('lp.challenge.completed', (payload: any) => {
+      const pts = Number(payload?.points ?? 0);
+      if (!pts) return;
+      const baseline = (totalLive ?? total ?? 0);
+      setTotalOptimistic({ bump: pts, baseline });
+    });
+    return () => sub.remove();
+  }, [total, totalLive]);
+
+  useEffect(() => {
+    if (totalOptimistic) {
+      const live = (totalLive ?? total ?? 0);
+      const target = totalOptimistic.baseline + totalOptimistic.bump;
+      if (live >= target) setTotalOptimistic(null);
+    }
+  }, [totalLive, total, totalOptimistic]);
+
+  const totalBase = totalLive ?? (total ?? 0);
+  const totalDisplay = totalOptimistic
+    ? Math.max(totalBase, totalOptimistic.baseline + totalOptimistic.bump)
+    : totalBase;
+
   async function handleAddTask() {
     if (!user) return;
     const trimmed = title.trim();
@@ -437,7 +570,7 @@ const TasksScreen: React.FC = () => {
 
   const onRedeem = async (r: RewardDoc) => {
     if (!user) return;
-    const current = total ?? 0;
+    const current = totalDisplay; // union + optimistic
     if (current < r.cost) {
       const short = r.cost - current;
       Alert.alert(
@@ -564,38 +697,61 @@ const TasksScreen: React.FC = () => {
 
   const rewardsSection = useMemo(() => {
     if (rewards.length === 0) return null;
+
     return (
       <Card style={{ marginBottom: 12, borderWidth: 1, borderColor: '#F0E6EF' }}>
-        <ThemedText variant="subtitle" style={{ marginBottom: 8 }}>Rewards</ThemedText>
-        {rewards.map((item, i) => {
-          const canRedeem = (total ?? 0) >= item.cost;
-          return (
-            <View key={item.id} style={[s.rewardRow, i > 0 && s.hairlineTop]}>
-              <View style={{ flex: 1 }}>
-                <ThemedText variant="title">{item.title}</ThemedText>
-                <ThemedText variant="caption" color={t.colors.textDim}>
-                  Cost {item.cost} pts{!canRedeem ? ` • Need ${item.cost - (total ?? 0)}` : ''}
-                </ThemedText>
-              </View>
+        {/* Fold header */}
+        <Pressable onPress={toggleRewardsOpen} accessibilityRole="button" style={s.foldHeader}>
+          <ThemedText variant="subtitle" style={{ flex: 1 }}>
+            Rewards {rewards.length ? `(${rewards.length})` : ''}
+          </ThemedText>
+          <Ionicons
+            name="chevron-down"
+            size={18}
+            color={t.colors.textDim}
+            style={[s.foldChevron, rewardsOpen && { transform: [{ rotate: '180deg' }] }]}
+          />
+        </Pressable>
 
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                <Button label="Redeem" onPress={() => onRedeem(item)} disabled={!canRedeem} />
-                {/* NEW: delete reward */}
-                <Pressable
-                  onPress={() => handleDeleteReward(item)}
-                  style={s.deleteBtn}
-                  hitSlop={8}
-                  accessibilityLabel="Delete reward"
-                >
-                  <Ionicons name="trash-outline" size={20} color="#EF4444" />
-                </Pressable>
-              </View>
+        {rewardsOpen && (
+          <>
+            {rewards.map((item, i) => {
+              const canRedeem = (totalDisplay) >= item.cost;
+              return (
+                <View key={item.id} style={[s.rewardRow, i > 0 && s.hairlineTop]}>
+                  <View style={{ flex: 1 }}>
+                    <ThemedText variant="title">{item.title}</ThemedText>
+                    <ThemedText variant="caption" color={t.colors.textDim}>
+                      Cost {item.cost} pts{!canRedeem ? ` • Need ${item.cost - (totalDisplay)}` : ''}
+                    </ThemedText>
+                  </View>
+
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <Button label="Redeem" onPress={() => onRedeem(item)} disabled={!canRedeem} />
+                    {/* Delete reward */}
+                    <Pressable
+                      onPress={() => handleDeleteReward(item)}
+                      style={s.deleteBtn}
+                      hitSlop={8}
+                      accessibilityLabel="Delete reward"
+                    >
+                      <Ionicons name="trash-outline" size={20} color="#EF4444" />
+                    </Pressable>
+                  </View>
+                </View>
+              );
+            })}
+            {/* balance footer */}
+            <View style={[s.hairlineTop, { paddingTop: 8 }]}>
+              <ThemedText variant="caption" color={t.colors.textDim}>
+                You have {totalDisplay} pt{totalDisplay === 1 ? '' : 's'} available.
+              </ThemedText>
             </View>
-          );
-        })}
+          </>
+        )}
       </Card>
     );
-  }, [rewards, t.colors.textDim, s.rewardRow, s.hairlineTop, total]);
+  }, [rewards, rewardsOpen, totalDisplay, t.colors.textDim]);
 
   const listHeader = (
     <View>
@@ -839,6 +995,16 @@ const styles = (t: ThemeTokens) =>
 
     rewardRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 10 },
     hairlineTop: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#F0E6EF', marginTop: 10, paddingTop: 10 },
+
+    foldHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingVertical: 6,
+    },
+    foldChevron: {
+      marginLeft: 8,
+    },
   });
 
 export default TasksScreen;

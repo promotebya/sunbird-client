@@ -13,6 +13,11 @@ import {
   query,
   Timestamp,
   where,
+  type DocumentData,
+  type DocumentSnapshot,
+  type FirestoreError,
+  type Query,
+  type QuerySnapshot,
 } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
@@ -47,7 +52,6 @@ import usePointsTotal from '../hooks/usePointsTotal';
 import useStreak from '../hooks/useStreak';
 import { redeemPairCode } from '../utils/pairing';
 
-// ⬇️ Add reward (create) flow
 import RedeemModal from '../components/RedeemModal';
 import { addReward } from '../utils/rewards';
 
@@ -75,6 +79,38 @@ type PointsItem = {
   reason?: string | null;
   createdAt?: any;
 };
+
+// ---- Normalizers shared with Challenges ----
+function getPointValue(data: any): number {
+  const candidates = [data?.value, data?.points, data?.point, data?.amount, data?.delta, data?.score];
+  for (const c of candidates) {
+    const n = Number(c);
+    if (Number.isFinite(n)) return n;
+  }
+  return 0;
+}
+
+function getDocDate(data: any): Date | null {
+  const fields = ['createdAt', 'timestamp', 'ts', 'time', 'date'];
+  for (const k of fields) {
+    const v: any = data?.[k];
+    if (!v) continue;
+    try {
+      if (typeof v?.toDate === 'function') {
+        const d = v.toDate();
+        if (!Number.isNaN(+d)) return d;
+      } else if (typeof v === 'number') {
+        const ms = v > 1e12 ? v : v * 1000; // support seconds
+        const d = new Date(ms);
+        if (!Number.isNaN(+d)) return d;
+      } else if (typeof v === 'string') {
+        const d = new Date(v);
+        if (!Number.isNaN(+d)) return d;
+      }
+    } catch {}
+  }
+  return null;
+}
 
 function greeting() {
   const h = new Date().getHours();
@@ -124,14 +160,37 @@ function nextMilestone(total: number) {
 
 type PairHint = 'linked' | 'unlinked' | 'unknown';
 
-// Monday 00:00 local
-function startOfWeekMonday(d = new Date()) {
+/** Monday 00:00 UTC (ISO-week) */
+function startOfWeekMondayUTC(d = new Date()) {
   const copy = new Date(d);
-  const day = copy.getDay();
+  const day = copy.getUTCDay(); // 0=Sun..6=Sat
   const diffToMon = (day + 6) % 7;
-  copy.setHours(0, 0, 0, 0);
-  copy.setDate(copy.getDate() - diffToMon);
+  copy.setUTCHours(0, 0, 0, 0);
+  copy.setUTCDate(copy.getUTCDate() - diffToMon);
   return copy;
+}
+
+function weekKeyUTC(d = new Date()) {
+  const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const day = (date.getUTCDay() + 6) % 7; // Mon..Sun
+  date.setUTCDate(date.getUTCDate() - day + 3); // Thu
+  const firstThursday = new Date(Date.UTC(date.getUTCFullYear(), 0, 4));
+  const firstDay = (firstThursday.getUTCDay() + 6) % 7;
+  firstThursday.setUTCDate(firstThursday.getUTCDate() - firstDay + 3);
+  const weekNo = 1 + Math.round((date.getTime() - firstThursday.getTime()) / (7 * 24 * 3600 * 1000));
+  const year = date.getUTCFullYear();
+  return `${year}-W${String(weekNo).padStart(2, '0')}`;
+}
+
+// ---------- partner UID helper ----------
+function extractPartnerUidFromPairDoc(d: any, myUid: string): string | null {
+  if (!d) return null;
+  if (d.userA && d.userB) return d.userA === myUid ? d.userB : d.userA;
+  if (d.ownerId && d.partnerId) return d.ownerId === myUid ? d.partnerId : d.ownerId;
+  if (Array.isArray(d.members)) return d.members.find((u: string) => u && u !== myUid) ?? null;
+  if (Array.isArray(d.userIds)) return d.userIds.find((u: string) => u && u !== myUid) ?? null;
+  if (d.a && d.b) return d.a === myUid ? d.b : d.a;
+  return null;
 }
 
 export default function HomeScreen() {
@@ -147,8 +206,9 @@ export default function HomeScreen() {
   const streak = useStreak(user?.uid);
 
   const [pairId, setPairId] = useState<string | null>(null);
-  const [pairReady, setPairReady] = useState(false); // true after trustworthy snapshot
-  const [pairHint, setPairHint] = useState<PairHint>('unknown'); // fast local hint
+  const [partnerUid, setPartnerUid] = useState<string | null>(null);
+  const [pairReady, setPairReady] = useState(false);
+  const [pairHint, setPairHint] = useState<PairHint>('unknown');
   const [isOnline, setIsOnline] = useState<boolean | null>(null);
 
   const [recent, setRecent] = useState<PointsItem[]>([]);
@@ -159,19 +219,18 @@ export default function HomeScreen() {
   const [codeText, setCodeText] = useState('');
   const [codeBusy, setCodeBusy] = useState(false);
 
-  // Spotlight gating so targets are laid out before tour starts
-  const [linkReady, setLinkReady] = useState(false);    // when "Link with your partner" card has a frame
+  // Spotlight gating
+  const [linkReady, setLinkReady] = useState(false);
   const [logReady, setLogReady] = useState(false);
   const [rewardReady, setRewardReady] = useState(false);
-  const [settingsReady, setSettingsReady] = useState(false); // ensure Settings is measurable
-  const [interactionsDone, setInteractionsDone] = useState(false); // wait for Android layout/animations to settle
+  const [settingsReady, setSettingsReady] = useState(false);
+  const [interactionsDone, setInteractionsDone] = useState(false);
 
-  // 🔴 LIVE weekly computed from Firestore (reconciles after server timestamp resolves)
+  // 🔴 LIVE weekly & total
   const [weeklyLive, setWeeklyLive] = useState<number | null>(null);
-  // 🔴 LIVE lifetime total (net, includes negatives)
   const [totalLive, setTotalLive] = useState<number | null>(null);
 
-  // ✅ Optimistic bumps when a challenge completion event fires
+  // ✅ Optimistic bumps
   const [weeklyOptimistic, setWeeklyOptimistic] = useState<{ bump: number; baseline: number } | null>(null);
   const [totalOptimistic, setTotalOptimistic] = useState<{ bump: number; baseline: number } | null>(null);
 
@@ -206,7 +265,7 @@ export default function HomeScreen() {
     };
   }, [user?.uid]);
 
-  // ---- Live pairId (with metadata). Persist result to cache.
+  // ---- Live pairId from user doc
   useEffect(() => {
     if (!user?.uid) {
       setPairId(null);
@@ -222,7 +281,6 @@ export default function HomeScreen() {
         const pid = snap.exists() ? (snap.data() as any)?.pairId ?? null : null;
         setPairId(pid);
 
-        // persist hint for snappy next launch
         const newHint: PairHint = pid ? 'linked' : 'unlinked';
         setPairHint(newHint);
         try { await AsyncStorage.setItem(`pairState:${user.uid}`, newHint); } catch {}
@@ -242,7 +300,29 @@ export default function HomeScreen() {
     return () => unsub();
   }, [user?.uid, isOnline]);
 
-  // ---- Recent points (top 3)
+  // ---- Partner UID from pair doc
+  useEffect(() => {
+    if (!user?.uid || !pairId) {
+      setPartnerUid(null);
+      return;
+    }
+    const ref = doc(db, 'pairs', pairId);
+    const off = onSnapshot(
+      ref,
+      (snap: DocumentSnapshot<DocumentData>) => {
+        if (!snap.exists()) {
+          setPartnerUid(null);
+          return;
+        }
+        const data = snap.data();
+        setPartnerUid(extractPartnerUidFromPairDoc(data, user.uid));
+      },
+      () => setPartnerUid(null)
+    );
+    return () => off();
+  }, [user?.uid, pairId]);
+
+  // ---- Recent (your last 3)
   useEffect(() => {
     if (!user) return;
     const qRef = query(
@@ -251,7 +331,7 @@ export default function HomeScreen() {
       orderBy('createdAt', 'desc'),
       limit(3)
     );
-    const off = onSnapshot(qRef, (snap) => {
+    const off = onSnapshot(qRef, (snap: QuerySnapshot<DocumentData>) => {
       const items: PointsItem[] = snap.docs.map((d) => {
         const data = d.data() as any;
         return {
@@ -266,83 +346,156 @@ export default function HomeScreen() {
     return () => off();
   }, [user]);
 
-  // ---- LIVE weekly total for current week (client-side sum; ignores negatives)
-  // Uses pairId when linked so both partners see the same weekly value
+  // ---- LIVE weekly total — UNION (pairId + my ownerId + partner ownerId) with de-dupe; ignores negatives
   useEffect(() => {
     if (!user?.uid) {
       setWeeklyLive(null);
       return;
     }
 
-    const since = startOfWeekMonday();
+    // ✅ Use ISO week window in UTC so both devices share the same boundaries
+    const since = startOfWeekMondayUTC();
+    const until = new Date(since);
+    until.setUTCDate(until.getUTCDate() + 7);
+
     const sinceTs = Timestamp.fromDate(since);
-
     const baseRef = collection(db, 'points');
-    const primaryQ = pairId
-      ? query(baseRef, where('pairId', '==', pairId), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc'))
-      : query(baseRef, where('ownerId', '==', user.uid), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc'));
 
-    let fallbackUnsub: (() => void) | undefined;
-
-    const primaryUnsub = onSnapshot(
-      primaryQ,
-      (snap) => {
-        let sum = 0;
-        for (const d of snap.docs) {
-          const v = Number((d.data() as any)?.value ?? 0);
-          if (Number.isFinite(v) && v > 0) sum += v; // weekly ignores negatives
-        }
-        setWeeklyLive(sum);
-      },
-      (err) => {
-        console.warn('[weeklyLive] primary query error, falling back:', err?.message);
-        const fbQ = pairId
-          ? query(baseRef, where('pairId', '==', pairId))
-          : query(baseRef, where('ownerId', '==', user.uid));
-
-        fallbackUnsub = onSnapshot(fbQ, (snap) => {
-          let sum = 0;
-          for (const d of snap.docs) {
-            const data: any = d.data();
-            const when: any = data?.createdAt;
-            const v = Number(data?.value ?? 0);
-            const dt = typeof when?.toDate === 'function' ? when.toDate() : null;
-            if (dt && dt >= since && Number.isFinite(v) && v > 0) sum += v;
-          }
-          setWeeklyLive(sum);
-        });
+    const buf = new Map<string, any>();
+    const recompute = () => {
+      let sum = 0;
+      for (const data of buf.values()) {
+        const v = getPointValue(data);
+        const dt = getDocDate(data);
+        if (dt && dt >= since && dt < until && Number.isFinite(v) && v > 0) sum += v;
       }
+      setWeeklyLive(sum);
+    };
+
+    const unsubs: Array<() => void> = [];
+
+    const add = (qRef: Query<DocumentData>, fbRef?: Query<DocumentData>) =>
+      onSnapshot(
+        qRef,
+        (snap: QuerySnapshot<DocumentData>) => {
+          for (const d of snap.docs) buf.set(d.id, d.data());
+          recompute();
+        },
+        (_err: FirestoreError) => {
+          if (!fbRef) return;
+          const off = onSnapshot(fbRef, (snap2: QuerySnapshot<DocumentData>) => {
+            for (const d of snap2.docs) buf.set(d.id, d.data());
+            recompute();
+          });
+          unsubs.push(off);
+        }
+      );
+
+    // mine (ownerId)
+    unsubs.push(
+      add(
+        query(baseRef, where('ownerId', '==', user.uid), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')),
+        query(baseRef, where('ownerId', '==', user.uid))
+      )
     );
 
-    return () => {
-      primaryUnsub();
-      if (fallbackUnsub) fallbackUnsub();
-    };
-  }, [user?.uid, pairId]);
+    // shared pair docs
+    if (pairId) {
+      unsubs.push(
+        add(
+          query(baseRef, where('pairId', '==', pairId), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')),
+          query(baseRef, where('pairId', '==', pairId))
+        )
+      );
+    }
 
-  // ---- LIVE lifetime total (net; includes negatives). Uses pairId for shared total.
+    // partner legacy owner-only
+    if (partnerUid) {
+      unsubs.push(
+        add(
+          query(baseRef, where('ownerId', '==', partnerUid), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')),
+          query(baseRef, where('ownerId', '==', partnerUid))
+        )
+      );
+    }
+
+    // optional subcollection: /pairs/{pairId}/points
+    if (pairId) {
+      const offSub = onSnapshot(
+        collection(db, 'pairs', pairId, 'points'),
+        (snap) => {
+          for (const d of snap.docs) buf.set(`sub:${d.id}`, d.data());
+          recompute();
+        }
+      );
+      unsubs.push(offSub);
+    }
+
+    // listen for immediate updates emitted by Challenges
+    const offEvt = DeviceEventEmitter.addListener('lp.weekly.points', (payload: any) => {
+      try {
+        if (!payload || payload.pairId !== pairId) return;
+        const wk = weekKeyUTC(new Date());
+        if (payload.week !== wk) return;
+        setWeeklyLive((prev) => (typeof prev === 'number' ? Math.max(prev, Number(payload.points) || 0) : Number(payload.points) || 0));
+      } catch {}
+    });
+    unsubs.push(() => offEvt.remove());
+
+    return () => { unsubs.forEach((u) => u()); };
+  }, [user?.uid, pairId, partnerUid]);
+
+  // ---- LIVE lifetime total (net; includes negatives) — UNION (pairId + both owners)
   useEffect(() => {
     if (!user?.uid) {
       setTotalLive(null);
       return;
     }
     const baseRef = collection(db, 'points');
-    const qRef = pairId
-      ? query(baseRef, where('pairId', '==', pairId))
-      : query(baseRef, where('ownerId', '==', user.uid));
-
-    const off = onSnapshot(qRef, (snap) => {
+    const buf = new Map<string, any>();
+    const recompute = () => {
       let sum = 0;
-      for (const d of snap.docs) {
-        const v = Number((d.data() as any)?.value ?? 0);
-        if (Number.isFinite(v)) sum += v; // include negatives for net lifetime
+      for (const data of buf.values()) {
+        const v = getPointValue(data);
+        if (Number.isFinite(v)) sum += v;
       }
       setTotalLive(sum);
-    });
-    return () => off();
-  }, [user?.uid, pairId]);
+    };
 
-  // ---- Optimistic bump: listen to challenge completion event and nudge weekly + total immediately
+    const unsubs: Array<() => void> = [];
+    const add = (qRef: Query<DocumentData>) =>
+      onSnapshot(
+        qRef,
+        (snap: QuerySnapshot<DocumentData>) => {
+          for (const d of snap.docs) buf.set(d.id, d.data());
+          recompute();
+        },
+        (_err: FirestoreError) => {}
+      );
+
+    // mine
+    unsubs.push(add(query(baseRef, where('ownerId', '==', user.uid))));
+    // partner legacy
+    if (partnerUid) unsubs.push(add(query(baseRef, where('ownerId', '==', partnerUid))));
+    // shared pair
+    if (pairId) unsubs.push(add(query(baseRef, where('pairId', '==', pairId))));
+
+    // optional subcollection: /pairs/{pairId}/points
+    if (pairId) {
+      const offSub = onSnapshot(
+        collection(db, 'pairs', pairId, 'points'),
+        (snap) => {
+          for (const d of snap.docs) buf.set(`sub:${d.id}`, d.data());
+          recompute();
+        }
+      );
+      unsubs.push(offSub);
+    }
+
+    return () => { unsubs.forEach((u) => u()); };
+  }, [user?.uid, pairId, partnerUid]);
+
+  // ---- Optimistic bump on challenge completion
   useEffect(() => {
     const sub = DeviceEventEmitter.addListener('lp.challenge.completed', (payload: any) => {
       const pts = Number(payload?.points ?? 0);
@@ -355,7 +508,7 @@ export default function HomeScreen() {
     return () => sub.remove();
   }, [weekly, weeklyLive, total, totalLive]);
 
-  // Clear the optimistic bumps once the live numbers catch up
+  // ---- Clear optimistic bumps
   useEffect(() => {
     if (weeklyOptimistic) {
       const live = (weeklyLive ?? weekly ?? 0);
@@ -393,12 +546,13 @@ export default function HomeScreen() {
     [nav]
   );
 
-  // ---- Effective weekly for UI (live → hook → optimistic max)
+  // ---- Effective UI numbers
   const weeklyBase = weeklyLive ?? weekly ?? 0;
-  const weeklyDisplay =
+  const weeklyDisplayRaw =
     weeklyOptimistic ? Math.max(weeklyBase, weeklyOptimistic.baseline + weeklyOptimistic.bump) : weeklyBase;
+  // Cap weekly progress at WEEK_GOAL (50)
+  const weeklyDisplay = Math.min(weeklyDisplayRaw, WEEK_GOAL);
 
-  // ---- Effective lifetime total for UI (live → hook → optimistic max)
   const totalBase = totalLive ?? (total ?? 0);
   const totalDisplay =
     totalOptimistic ? Math.max(totalBase, totalOptimistic.baseline + totalOptimistic.bump) : totalBase;
@@ -407,7 +561,7 @@ export default function HomeScreen() {
   const weeklyLeft = Math.max(0, WEEK_GOAL - weeklyDisplay);
   const nudge =
     weeklyLeft === 0
-      ? 'Weekly goal reached—nice! Keep the streak rolling 🔥'
+      ? 'Weekly goal reached — you’re a dream team! 💞'
       : weeklyDisplay < WEEK_GOAL / 3
       ? 'Small steps count—one kind thing today?'
       : weeklyDisplay < (2 * WEEK_GOAL) / 3
@@ -498,7 +652,6 @@ export default function HomeScreen() {
       });
       return;
     }
-    // Android (and fallback): open in-app modal
     setCodePromptVisible(true);
   }, [user?.uid]);
 
@@ -522,7 +675,6 @@ export default function HomeScreen() {
     }
   }, [codeText, user?.uid]);
 
-  // ---- Show link card immediately if hint says unlinked, or after trusted snapshot says unlinked
   const pairCardShouldShow =
     !!user &&
     (
@@ -530,7 +682,6 @@ export default function HomeScreen() {
       (!pairReady && pairHint === 'unlinked')
     );
 
-  // Wait for JS interactions/layout to finish (Android can be late)
   useEffect(() => {
     const task = InteractionManager.runAfterInteractions(() => setInteractionsDone(true));
     return () => {
@@ -539,7 +690,6 @@ export default function HomeScreen() {
     };
   }, []);
 
-  // Build steps dynamically — include "link" only if the card is rendered
   const FIRST_RUN_STEPS: SpotlightStep[] = useMemo(() => {
     const base: SpotlightStep[] = [
       {
@@ -589,7 +739,6 @@ export default function HomeScreen() {
     return base;
   }, [pairCardShouldShow, isIOS]);
 
-  // Only start the tour when ALL needed targets are laid out (and interactions finished).
   const spotlightReady =
     interactionsDone &&
     logReady &&
@@ -619,7 +768,6 @@ export default function HomeScreen() {
             </Pill>
           </View>
 
-          {/* measurable Settings for the tour */}
           <View
             collapsable={false}
             style={{ alignSelf: 'flex-start' }}
@@ -632,9 +780,8 @@ export default function HomeScreen() {
         </View>
       </View>
 
-      {/* Partner (Action card) — instant with cached hint, authoritative once snapshot arrives */}
+      {/* Partner action card */}
       {pairCardShouldShow && (
-        // ensure this view is measurable before starting the tour
         <View collapsable={false} onLayout={() => setLinkReady(true)}>
           <SpotlightTarget id="home-link-partner">
             <Card style={{ marginBottom: 12, paddingVertical: 12, borderWidth: 1, borderColor: HAIRLINE }}>
@@ -680,16 +827,40 @@ export default function HomeScreen() {
 
       {/* Weekly goal */}
       <Card style={{ marginBottom: 12, borderWidth: 1, borderColor: HAIRLINE }}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
-          <ThemedText variant="subtitle" style={{ flex: 1 }}>Weekly goal</ThemedText>
-          <ThemedText variant="caption" color={t.colors.textDim}>
-            {weeklyDisplay} / {WEEK_GOAL} · {Math.max(0, WEEK_GOAL - weeklyDisplay)} to go
-          </ThemedText>
+        {/* Title row + optional right counter */}
+        <View style={{ marginBottom: 8 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <ThemedText variant="subtitle" style={{ flexShrink: 0 }}>Weekly goal</ThemedText>
+
+            {weeklyLeft > 0 && (
+              <ThemedText
+                variant="caption"
+                color={t.colors.textDim}
+                style={{ marginLeft: 8, flexGrow: 1, textAlign: 'right' }}
+                numberOfLines={1}
+              >
+                {weeklyDisplay} / {WEEK_GOAL} · {weeklyLeft} to go
+              </ThemedText>
+            )}
+          </View>
+
+          {/* Celebration line appears under the title when goal is reached */}
+          {weeklyLeft === 0 && (
+            <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 4 }}>
+              Weekly goal reached — you’re a dream team! 💞
+            </ThemedText>
+          )}
         </View>
+
         <ProgressBar value={weeklyDisplay} max={WEEK_GOAL} height={8} trackColor="#EDEAF1" />
-        <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 8 }}>
-          {nudge}
-        </ThemedText>
+
+        {/* Hide the generic nudge once the goal is reached */}
+        {weeklyLeft > 0 && (
+          <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 8 }}>
+            {nudge}
+          </ThemedText>
+        )}
+
         <View style={{ marginTop: 12 }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
             <ThemedText variant="label" color={t.colors.textDim}>Next milestone</ThemedText>
@@ -701,7 +872,6 @@ export default function HomeScreen() {
           </ThemedText>
         </View>
 
-        {/* Actions row: Log task + Add reward, with measurable wrappers */}
         <View style={{ marginTop: 12, flexDirection: 'row', alignItems: 'center' }}>
           <View collapsable={false} style={{ alignSelf: 'flex-start' }} onLayout={() => setLogReady(true)}>
             <SpotlightTarget id="home-log-task">
@@ -793,7 +963,7 @@ export default function HomeScreen() {
       {/* Add reward modal */}
       <RedeemModal visible={showAddReward} onClose={() => setShowAddReward(false)} onCreate={onCreateReward} />
 
-      {/* CODE PROMPT: Android + fallback modal */}
+      {/* CODE PROMPT */}
       <Modal
         visible={codePromptVisible}
         animationType="fade"
@@ -830,10 +1000,9 @@ export default function HomeScreen() {
         </View>
       </Modal>
 
-      {/* Start the tour only after targets are laid out (+ interactions settled) */}
       {spotlightReady && (
         <SpotlightAutoStarter
-          key={pairCardShouldShow ? 'with-link' : 'no-link'} // re-mount if the step list changes
+          key={pairCardShouldShow ? 'with-link' : 'no-link'}
           uid={user?.uid ?? null}
           steps={FIRST_RUN_STEPS}
           persistKey="first-run-v3"
@@ -862,8 +1031,6 @@ const styles = (t: ThemeTokens) =>
     },
     hairlineTop: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#F0E6EF', marginTop: 10, paddingTop: 10 },
     recentRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 8 },
-
-    // CODE PROMPT styles
     modalOverlay: {
       flex: 1,
       backgroundColor: 'rgba(0,0,0,0.35)',

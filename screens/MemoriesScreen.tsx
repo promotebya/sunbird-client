@@ -1,4 +1,5 @@
 // MemoriesScreen.tsx
+import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import { useNavigation } from '@react-navigation/native';
@@ -35,7 +36,7 @@ import { getPairId } from '../utils/partner';
 import { generateFilename, uploadFileToStorage } from '../utils/storage';
 
 type Tab = 'photo' | 'text' | 'milestone';
-type Filter = 'all' | Tab;               // ⬅️ new: timeline filter
+type Filter = 'all' | Tab; // timeline filter
 type OptMem = MemoryDoc & { optimistic?: true };
 
 const PROMPTS = [
@@ -66,11 +67,7 @@ const MemoriesScreen: React.FC = () => {
   const insets = useSafeAreaInsets();
   const tabBarHeight = useBottomTabBarHeight();
 
-  const FAB_SIZE = 56;
-  const HEADER_Y = insets.top + 58;
-  const ROW_H = 40;
-
-  const [tab, setTab] = useState<Tab>('text');        // add-type selector (top)
+  const [tab, setTab] = useState<Tab>('text'); // add-type selector (top)
   const [filter, setFilter] = useState<Filter>('all'); // timeline filter (top)
   const [pairId, setPairId] = useState<string | null>(null);
   const [serverItems, setServerItems] = useState<MemoryDoc[]>([]);
@@ -134,7 +131,7 @@ const MemoriesScreen: React.FC = () => {
     }).length;
   }, [items]);
 
-  // ⬅️ new: apply timeline filter
+  // apply timeline filter
   const filteredItems = useMemo(
     () => (filter === 'all' ? items : items.filter((m) => m.kind === filter)),
     [items, filter]
@@ -181,9 +178,7 @@ const MemoriesScreen: React.FC = () => {
     const ok = await requestLibrary();
     if (!ok) return;
     const usesNew = (ImagePicker as any).MediaType != null;
-    const media = usesNew
-      ? (ImagePicker as any).MediaType.Images
-      : (ImagePicker as any).MediaTypeOptions.Images;
+    const media = usesNew ? (ImagePicker as any).MediaType.Images : (ImagePicker as any).MediaTypeOptions.Images;
 
     const res = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: media as any,
@@ -197,9 +192,7 @@ const MemoriesScreen: React.FC = () => {
     const ok = await requestCamera();
     if (!ok) return;
     const usesNew = (ImagePicker as any).MediaType != null;
-    const media = usesNew
-      ? (ImagePicker as any).MediaType.Images
-      : (ImagePicker as any).MediaTypeOptions.Images;
+    const media = usesNew ? (ImagePicker as any).MediaType.Images : (ImagePicker as any).MediaTypeOptions.Images;
 
     const res = await ImagePicker.launchCameraAsync({
       mediaTypes: media as any,
@@ -297,46 +290,85 @@ const MemoriesScreen: React.FC = () => {
     }
   }
 
-  const renderItem = ({ item, index }: { item: MemoryDoc; index: number }) => (
-    <>
-      <View style={s.itemHeader}>
-        <View
-          style={[
-            s.kindPill,
-            item.kind === 'photo' && { backgroundColor: withAlpha(t.colors.primary, 0.1) },
-            item.kind === 'milestone' && { backgroundColor: withAlpha('#FFB020', 0.18) },
-          ]}
-        >
-          <ThemedText variant="label" color={t.colors.text}>{item.kind}</ThemedText>
+  // ---------- nicer badges + segmented metadata ----------
+  const KIND_META: Record<
+    MemoryKind,
+    { label: string; icon: keyof typeof Ionicons.glyphMap; tint: string; bg: string }
+  > = {
+    photo:     { label: 'Photo',     icon: 'image-outline',               tint: t.colors.primary, bg: withAlpha(t.colors.primary, 0.12) },
+    text:      { label: 'Note',      icon: 'chatbubble-ellipses-outline', tint: '#8B5CF6',       bg: withAlpha('#8B5CF6', 0.12) },
+    milestone: { label: 'Milestone', icon: 'trophy-outline',              tint: '#F59E0B',       bg: withAlpha('#F59E0B', 0.16) },
+  };
+
+  const FILTER_META: Record<Filter, { label: string; icon: keyof typeof Ionicons.glyphMap }> = {
+    all:       { label: 'All',       icon: 'apps-outline' },
+    photo:     { label: 'Photo',     icon: 'image-outline' },
+    text:      { label: 'Text',      icon: 'chatbubble-ellipses-outline' },
+    milestone: { label: 'Milestone', icon: 'trophy-outline' },
+  };
+
+  const ADD_META: Record<Tab, { label: string; icon: keyof typeof Ionicons.glyphMap }> = {
+    photo:     { label: 'Photo',     icon: 'image-outline' },
+    text:      { label: 'Text',      icon: 'create-outline' },
+    milestone: { label: 'Milestone', icon: 'trophy-outline' },
+  };
+
+  const renderItem = ({ item, index }: { item: MemoryDoc; index: number }) => {
+    const km = KIND_META[item.kind];
+    return (
+      <>
+        <View style={s.itemHeader}>
+          <View style={[s.kindBadge]}>
+            <View style={[s.kindIconWrap, { backgroundColor: km.bg }]}>
+              <Ionicons name={km.icon} size={14} color={km.tint} />
+            </View>
+            <ThemedText variant="label" style={{ marginLeft: 6 }}>{km.label}</ThemedText>
+          </View>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <Ionicons name="time-outline" size={14} color={t.colors.textDim} />
+            <ThemedText variant="caption" color={t.colors.textDim} style={{ marginLeft: 4 }}>
+              {timeAgo(item.createdAt)}
+            </ThemedText>
+          </View>
         </View>
-        <ThemedText variant="caption" color={t.colors.textDim}>{timeAgo(item.createdAt)}</ThemedText>
-      </View>
 
-      {index === 0 ? (
-        <SpotlightTarget id="mem-first-card">
-          <Card>
-            <MemoryShareCard title={item.title ?? undefined} note={item.note ?? undefined} photoURL={item.photoURL ?? undefined} />
+        {index === 0 ? (
+          <SpotlightTarget id="mem-first-card">
+            <Card style={s.timelineCard}>
+              <MemoryShareCard
+                title={item.title ?? undefined}
+                note={item.note ?? undefined}
+                photoURL={item.photoURL ?? undefined}
+                {...({ accentColor: t.colors.primary } as any)}  // themed Share button
+              />
+            </Card>
+          </SpotlightTarget>
+        ) : (
+          <Card style={s.timelineCard}>
+            <MemoryShareCard
+              title={item.title ?? undefined}
+              note={item.note ?? undefined}
+              photoURL={item.photoURL ?? undefined}
+              {...({ accentColor: t.colors.primary } as any)}  // themed Share button
+            />
           </Card>
-        </SpotlightTarget>
-      ) : (
-        <Card>
-          <MemoryShareCard title={item.title ?? undefined} note={item.note ?? undefined} photoURL={item.photoURL ?? undefined} />
-        </Card>
-      )}
-    </>
-  );
+        )}
+      </>
+    );
+  };
 
-  // ⬇️ Tutorial: now only 4 steps; removed the 5th step (card/empty-tip)
-  const tourSteps = useMemo<SpotlightStep[]>(() => {
-    return [
+  // Tutorial
+  const tourSteps = useMemo<SpotlightStep[]>(
+    () => [
       { id: 'mem-welcome', targetId: null, title: 'Memories 📸', text: 'Save sweet moments as photos or notes. Quick 20-second tour?', placement: 'bottom', allowBackdropTapToNext: true },
       { id: 'mem-prompt', targetId: 'mem-prompt-card', title: 'Today’s prompt', text: 'Use these ideas to quickly capture a moment.', placement: 'top', padding: 10 },
       { id: 'mem-shuffle-step', targetId: 'mem-shuffle', title: 'Shuffle', text: 'Tap to get a different idea.', placement: 'top', padding: 10 },
       { id: 'mem-add', targetId: 'mem-add-section', title: 'Add memory', text: 'Create a new memory with a photo or a quick note.', placement: 'top', padding: 12 },
-    ];
-  }, []);
+    ],
+    []
+  );
 
-  const goalDone = weekCount >= GOAL; // ⬅️ new
+  const goalDone = weekCount >= GOAL;
 
   return (
     <Screen scroll={false} style={{ paddingBottom: 0 }}>
@@ -361,10 +393,11 @@ const MemoriesScreen: React.FC = () => {
               <Button label="Settings" variant="outline" onPress={() => nav.navigate('Settings')} />
             </View>
 
-            {/* Add-type selector (top) */}
+            {/* Add-type selector (top) with icons */}
             <View style={s.segmented}>
               {(['photo', 'text', 'milestone'] as const).map((key) => {
                 const active = tab === key;
+                const meta = ADD_META[key];
                 return (
                   <Pressable
                     key={key}
@@ -372,9 +405,17 @@ const MemoriesScreen: React.FC = () => {
                     accessibilityRole="button"
                     style={[s.segment, active && s.segmentActive]}
                   >
-                    <ThemedText variant="label" color={active ? t.colors.text : t.colors.textDim}>
-                      {key.charAt(0).toUpperCase() + key.slice(1)}
-                    </ThemedText>
+                    <View style={s.segInner}>
+                      <Ionicons name={meta.icon} size={16} color={active ? t.colors.text : t.colors.textDim} />
+                      <ThemedText
+                        variant="label"
+                        color={active ? t.colors.text : t.colors.textDim}
+                        style={{ marginLeft: 6 }}
+                        numberOfLines={1}
+                      >
+                        {meta.label}
+                      </ThemedText>
+                    </View>
                   </Pressable>
                 );
               })}
@@ -411,7 +452,7 @@ const MemoriesScreen: React.FC = () => {
                   ))}
                 </View>
 
-                {/* Weekly goal: show progress or “done” message */}
+                {/* Weekly goal */}
                 <View style={{ marginTop: 12 }}>
                   {goalDone ? (
                     <View style={s.goalDoneBox}>
@@ -521,12 +562,13 @@ const MemoriesScreen: React.FC = () => {
               </Card>
             </SpotlightTarget>
 
-            {/* Timeline filter (above timeline) */}
+            {/* Timeline filter (above timeline) with icons */}
             <Card style={{ marginTop: t.spacing.md }}>
               <ThemedText variant="subtitle" style={{ marginBottom: 8 }}>Show</ThemedText>
               <View style={s.segmented}>
                 {(['all', 'photo', 'text', 'milestone'] as const).map((key) => {
                   const active = filter === key;
+                  const meta = FILTER_META[key];
                   return (
                     <Pressable
                       key={key}
@@ -534,9 +576,17 @@ const MemoriesScreen: React.FC = () => {
                       accessibilityRole="button"
                       style={[s.segment, active && s.segmentActive]}
                     >
-                      <ThemedText variant="label" color={active ? t.colors.text : t.colors.textDim}>
-                        {key.charAt(0).toUpperCase() + key.slice(1)}
-                      </ThemedText>
+                      <View style={s.segInner}>
+                        <Ionicons name={meta.icon} size={16} color={active ? t.colors.text : t.colors.textDim} />
+                        <ThemedText
+                          variant="label"
+                          color={active ? t.colors.text : t.colors.textDim}
+                          style={{ marginLeft: 6 }}
+                          numberOfLines={1}
+                        >
+                          {meta.label}
+                        </ThemedText>
+                      </View>
                     </Pressable>
                   );
                 })}
@@ -570,16 +620,24 @@ function withAlpha(hex: string, alpha: number) {
 const styles = (t: ThemeTokens) =>
   StyleSheet.create({
     headerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
-    segmented: { flexDirection: 'row', gap: 8, marginBottom: 12 },
+
+    // Segmented controls (chips)
+    segmented: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',           // allow content to stay inside borders on small screens
+      gap: 8,
+      marginBottom: 12,
+    },
     segment: {
-      flex: 1,
       alignItems: 'center',
       justifyContent: 'center',
       paddingVertical: 10,
+      paddingHorizontal: 14,      // explicit horizontal padding
       borderRadius: 14,
       backgroundColor: CHIP_BG,
       borderWidth: 1,
       borderColor: HAIRLINE,
+      minWidth: 0,                // enable text to respect container width
     },
     segmentActive: {
       backgroundColor: '#FFFFFF',
@@ -590,7 +648,10 @@ const styles = (t: ThemeTokens) =>
       shadowOffset: { width: 0, height: 4 },
       elevation: 3,
     },
+    segInner: { flexDirection: 'row', alignItems: 'center', maxWidth: '100%' },
+
     rowBetween: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+
     shufflePill: {
       flexDirection: 'row',
       alignItems: 'center',
@@ -606,6 +667,7 @@ const styles = (t: ThemeTokens) =>
       shadowOffset: { width: 0, height: 3 },
       elevation: 2,
     },
+
     tagWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: t.spacing.s },
     tag: {
       paddingHorizontal: 12,
@@ -615,6 +677,7 @@ const styles = (t: ThemeTokens) =>
       borderWidth: 1,
       borderColor: HAIRLINE,
     },
+
     input: {
       minHeight: 44,
       paddingVertical: t.spacing.s,
@@ -628,6 +691,8 @@ const styles = (t: ThemeTokens) =>
     photoPickRow: { flexDirection: 'row', gap: 8 },
     preview: { width: '100%', height: 200, borderRadius: 12, resizeMode: 'cover' },
     progressRow: { flexDirection: 'row', alignItems: 'center', marginTop: t.spacing.s },
+
+    // Timeline item chrome
     itemHeader: {
       paddingHorizontal: t.spacing.md,
       flexDirection: 'row',
@@ -635,7 +700,32 @@ const styles = (t: ThemeTokens) =>
       justifyContent: 'space-between',
       marginBottom: t.spacing.xs,
     },
-    kindPill: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: CHIP_BG, borderWidth: 1, borderColor: HAIRLINE },
+    kindBadge: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+      borderRadius: 999,
+      backgroundColor: '#FFFFFF',
+      borderWidth: 1,
+      borderColor: HAIRLINE,
+    },
+    kindIconWrap: {
+      width: 20,
+      height: 20,
+      borderRadius: 999,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    timelineCard: {
+      overflow: 'hidden',
+      shadowColor: 'rgba(16,24,40,0.06)',
+      shadowOpacity: 1,
+      shadowRadius: 8,
+      shadowOffset: { width: 0, height: 4 },
+      elevation: 2,
+    },
+
     empty: { paddingVertical: t.spacing.lg, alignItems: 'center' },
     goalDoneBox: {
       paddingVertical: 10,

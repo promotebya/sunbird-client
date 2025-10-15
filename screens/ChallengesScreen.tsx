@@ -1,9 +1,10 @@
 // screens/ChallengesScreen.tsx
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
+  DeviceEventEmitter,
   Platform,
   Pressable,
   ScrollView,
@@ -20,7 +21,6 @@ import { useTokens, type ThemeTokens } from '../components/ThemeProvider';
 
 import useAuthListener from '../hooks/useAuthListener';
 import { usePlanPlus } from '../hooks/usePlan';
-import usePointsTotal from '../hooks/usePointsTotal';
 import {
   CHALLENGE_POOL,
   getWeeklyChallengeSet,
@@ -36,6 +36,7 @@ import {
   orderBy,
   query,
   serverTimestamp,
+  setDoc,
   Timestamp,
   updateDoc,
   where,
@@ -46,7 +47,8 @@ import { getPairId } from '../utils/partner';
 // Spotlight
 import {
   SpotlightAutoStarter,
-  SpotlightTarget
+  SpotlightTarget,
+  type SpotlightStep,
 } from '../components/spotlight';
 
 /* ---------- helpers, types & labels ---------- */
@@ -108,7 +110,7 @@ function mixWithWhite(hex: string, ratio = 0.9) {
   return `#${toHex(m(r))}${toHex(m(g))}${toHex(m(b))}`;
 }
 
-// ---------- Difficulty / category extraction (robust to varied seed data) ----------
+// ---------- Difficulty / category extraction ----------
 function normDiff(raw: any): DiffKey | undefined {
   if (raw == null) return undefined;
   const n = Number(raw);
@@ -186,15 +188,29 @@ function mergePreferBase<T extends Record<string, any>>(base: T, patch: Partial<
 }
 
 // ---------- Pair + premium helpers ----------
-function lockMessage(plan: 'free' | 'premium', c: SeedChallenge): string {
-  const tier = (c as any)?.tier as 'base' | '10' | '25' | '50' | undefined;
+function lockMessage(
+  plan: 'free' | 'premium',
+  c: SeedChallenge,
+  weeklyPts?: number
+): string {
+  const tierRaw = (c as any)?.tier as 'base' | '10' | '25' | '50' | number | undefined;
   const d = extractDiffStrict(c);
-  if (plan === 'free' && (tier === 'base' || tier === undefined) && d && d !== 'easy') {
-    return 'Premium required';
+
+  const toNum = (tr: any): number | null => {
+    if (typeof tr === 'number') return tr;
+    if (tr === '10') return 10;
+    if (tr === '25') return 25;
+    if (tr === '50') return 50;
+    return null;
+  };
+
+  const req = toNum(tierRaw);
+  if (req != null) {
+    const have = typeof weeklyPts === 'number' ? weeklyPts : 0;
+    return have >= req ? 'Unlocked' : `Needs ${req}+ pts`;
   }
-  if (tier === '10') return 'Needs 10+ pts';
-  if (tier === '25') return 'Needs 25+ pts';
-  if (tier === '50') return 'Needs 50+ pts';
+
+  if (plan === 'free' && d && d !== 'easy') return 'Premium required';
   return 'Locked';
 }
 function extractPartnerUidFromPairDoc(d: any, myUid: string): string | null {
@@ -207,14 +223,11 @@ function extractPartnerUidFromPairDoc(d: any, myUid: string): string | null {
   return null;
 }
 
-// ---------- UTC week key (stable across time zones) ----------
+// ---------- UTC week helpers ----------
 function weekKeyUTC(d = new Date()) {
-  // ISO week-numbering year + week in UTC
   const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-  // Thursday of this week
-  const day = (date.getUTCDay() + 6) % 7; // 0..6 (Mon..Sun)
-  date.setUTCDate(date.getUTCDate() - day + 3);
-  // First Thursday of ISO year
+  const day = (date.getUTCDay() + 6) % 7; // Mon..Sun
+  date.setUTCDate(date.getUTCDate() - day + 3); // Thu
   const firstThursday = new Date(Date.UTC(date.getUTCFullYear(), 0, 4));
   const firstDay = (firstThursday.getUTCDay() + 6) % 7;
   firstThursday.setUTCDate(firstThursday.getUTCDate() - firstDay + 3);
@@ -241,13 +254,14 @@ export default function ChallengesScreen() {
   const { user } = useAuthListener();
   const { isPremium } = usePlanPlus(user?.uid);
   const { hasPro } = usePro();
-  const { total, weekly } = usePointsTotal(user?.uid);
 
   // Pair state
   const [partnerUid, setPartnerUid] = useState<string | null>(null);
   const [pairId, setPairId] = useState<string | null>(null);
   const [pairPremiumActive, setPairPremiumActive] = useState<boolean>(false);
   const [pairLoaded, setPairLoaded] = useState<boolean>(false);
+  // NEW: pair-level lifetime total aggregate read from pairs doc
+  const [pairTotalAgg, setPairTotalAgg] = useState<number | null>(null);
 
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
@@ -276,6 +290,7 @@ export default function ChallengesScreen() {
               setPartnerUid(null);
               setPairPremiumActive(false);
               setPairId(null);
+              setPairTotalAgg(null);
               return;
             }
             const data = snap.data();
@@ -285,12 +300,16 @@ export default function ChallengesScreen() {
               data?.premiumActive ?? data?.premium ?? data?.proActive ?? data?.plusActive ?? data?.premiumForPair
             );
             setPairPremiumActive(pairHasPremium);
+            // NEW: read pair-level total aggregate if present
+            const tot = Number((data as any)?.totalPoints);
+            setPairTotalAgg(Number.isFinite(tot) ? tot : null);
           },
           () => {
             setPairLoaded(true);
             setPartnerUid(null);
             setPairPremiumActive(false);
             setPairId(null);
+            setPairTotalAgg(null);
           }
         );
       } catch {
@@ -304,7 +323,7 @@ export default function ChallengesScreen() {
 
   const { isPremium: partnerIsPremium } = usePlanPlus(partnerUid ?? undefined);
 
-  // Propagate premium to pair doc (one sub covers both)
+  // Propagate premium to pair doc
   useEffect(() => {
     (async () => {
       try {
@@ -320,59 +339,114 @@ export default function ChallengesScreen() {
     })();
   }, [pairId, isPremium, hasPro, pairPremiumActive, user?.uid]);
 
-  // Shared seed → pair-based + UTC week; solo users fall back to per-user seed
+  // Shared seed
   const weeklySeed = useMemo(() => {
     const week = weekKeyUTC(new Date());
-    if (!pairLoaded) return `pending:${week}`; // avoid flip-flop while loading
+    if (!pairLoaded) return `pending:${week}`;
     if (pairId) return `pair:${pairId}:${week}`;
     return `solo:${user?.uid ?? 'guest'}:${week}`;
   }, [pairId, user?.uid, pairLoaded]);
 
-  // Shared weekly total (pair-only, positive values, Monday 00:00 UTC)
-  const [weeklyPairLive, setWeeklyPairLive] = useState<number | null>(null);
-  useEffect(() => {
-    if (!pairId) {
-      setWeeklyPairLive(null);
-      return;
+  // ----- POINTS NORMALIZER (works across different schemas) -----
+  const getPointValue = (data: any): number => {
+    const candidates = [data?.value, data?.points, data?.point, data?.amount, data?.delta, data?.score];
+    for (const c of candidates) {
+      const n = Number(c);
+      if (Number.isFinite(n)) return n;
     }
+    return 0;
+  };
+
+  // ---- WEEKLY TOTAL (UNION: pairId + both owners) — Monday 00:00 UTC window
+  const [weeklyUnionLive, setWeeklyUnionLive] = useState<number | null>(null);
+
+  // Timestamp normalizer
+  const getPointDate = (data: any): Date | null => {
+    const when: any = data?.createdAt ?? data?.timestamp ?? data?.ts ?? data?.time;
+    if (!when) return null;
+    try {
+      if (typeof when?.toDate === 'function') return when.toDate();
+      const n = Number(when);
+      if (Number.isFinite(n)) return new Date(n);
+      const iso = new Date(String(when));
+      return Number.isFinite(iso.getTime()) ? iso : null;
+    } catch {
+      return null;
+    }
+  };
+
+  useEffect(() => {
+    if (!user?.uid) { setWeeklyUnionLive(null); return; }
+
     const since = startOfWeekMondayUTC();
+    const until = new Date(since);
+    until.setUTCDate(until.getUTCDate() + 7);
     const sinceTs = Timestamp.fromDate(since);
-    const base = collection(db, 'points');
+    const baseRef = collection(db, 'points');
 
-    let fbUnsub: (() => void) | undefined;
-    const unsub = onSnapshot(
-      query(base, where('pairId', '==', pairId), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')),
-      (snap) => {
-        let sum = 0;
-        for (const d of snap.docs) {
-          const v = Number((d.data() as any)?.value ?? 0);
-          if (Number.isFinite(v) && v > 0) sum += v;
-        }
-        setWeeklyPairLive(sum);
-      },
-      () => {
-        fbUnsub = onSnapshot(query(base, where('pairId', '==', pairId)), (snap) => {
-          let sum = 0;
-          for (const d of snap.docs) {
-            const data: any = d.data();
-            const when: any = data?.createdAt;
-            const dt = typeof when?.toDate === 'function' ? when.toDate() : null;
-            const v = Number(data?.value ?? 0);
-            if (dt && dt >= since && Number.isFinite(v) && v > 0) sum += v;
-          }
-          setWeeklyPairLive(sum);
-        });
+    const buf = new Map<string, any>();
+    const recompute = () => {
+      let sum = 0;
+      for (const data of buf.values()) {
+        const v = getPointValue(data);
+        const dt = getPointDate(data);
+        if (dt && dt >= since && dt < until && Number.isFinite(v) && v > 0) sum += v;
       }
-    );
-    return () => { unsub(); if (fbUnsub) fbUnsub(); };
-  }, [pairId]);
+      setWeeklyUnionLive(sum);
+    };
 
-  // Effective “weekly points” used for lock thresholds inside the generator:
-  //  - paired → shared pair total
-  //  - solo   → user’s own weekly points
-  const { weekly: userWeekly } = usePointsTotal(user?.uid);
-  const weeklySafe = Number.isFinite(userWeekly as any) ? Number(userWeekly) : 0;
-  const weeklyForSelection = pairId ? (weeklyPairLive ?? 0) : weeklySafe;
+    const unsubs: Array<() => void> = [];
+
+    const add = (qRef: any, fbRef?: any) =>
+      onSnapshot(
+        qRef,
+        (snap: any) => {
+          for (const d of snap.docs) buf.set(d.id, d.data());
+          recompute();
+        },
+        () => {
+          if (!fbRef) return;
+          const off = onSnapshot(fbRef, (snap2: any) => {
+            for (const d of snap2.docs) buf.set(d.id, d.data());
+            recompute();
+          });
+          unsubs.push(off);
+        }
+      );
+
+    // mine (ownerId)
+    unsubs.push(
+      add(
+        query(baseRef, where('ownerId', '==', user.uid), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')),
+        query(baseRef, where('ownerId', '==', user.uid))
+      )
+    );
+
+    // shared pair docs
+    if (pairId) {
+      unsubs.push(
+        add(
+          query(baseRef, where('pairId', '==', pairId), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')),
+          query(baseRef, where('pairId', '==', pairId))
+        )
+      );
+    }
+
+    // partner legacy owner-only
+    if (partnerUid) {
+      unsubs.push(
+        add(
+          query(baseRef, where('ownerId', '==', partnerUid), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')),
+          query(baseRef, where('ownerId', '==', partnerUid))
+        )
+      );
+    }
+
+    return () => { unsubs.forEach((u) => u()); };
+  }, [user?.uid, pairId, partnerUid]);
+
+  // Effective for generator (union weekly across pair + both owners)
+  const weeklyForSelection = weeklyUnionLive ?? 0;
 
   // Premium plan resolution
   const effectivePremium = !!(isPremium || hasPro || partnerIsPremium || pairPremiumActive);
@@ -380,7 +454,7 @@ export default function ChallengesScreen() {
 
   const [tab, setTab] = useState<DiffTabKey>('all');
 
-  // Build weekly set (same for both in a pair)
+  // Build weekly set
   const selection = useMemo(
     () =>
       getWeeklyChallengeSet({
@@ -418,8 +492,188 @@ export default function ChallengesScreen() {
     return { visible: vis, locked: lock };
   }, [selection, safePlan]);
 
-  // Challenge completion points are now written directly in ChallengeDetailScreen
-  // (idempotent setDoc with pairId). No write/listener needed here.
+  // ---- TOTAL POINTS (pair + owner fallbacks, de-duped) + optimistic bump ----
+  const [totalLive, setTotalLive] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!pairId && !user?.uid) { setTotalLive(null); return; }
+    const master = new Map<string, number>();
+    const apply = () => {
+      let sum = 0;
+      for (const v of master.values()) sum += Number(v) || 0;
+      setTotalLive(Math.max(0, sum));
+    };
+
+    const unsubs: Array<() => void> = [];
+
+    if (pairId) {
+      unsubs.push(onSnapshot(
+        query(collection(db, 'points'), where('pairId', '==', pairId)),
+        (snap) => {
+          for (const d of snap.docs) {
+            master.set(d.id, getPointValue(d.data()));
+          }
+          apply();
+        }
+      ));
+
+      try {
+        unsubs.push(onSnapshot(
+          collection(db, 'pairs', pairId, 'points'),
+          (snap) => {
+            for (const d of snap.docs) {
+              master.set(`sub:${d.id}`, getPointValue(d.data()));
+            }
+            apply();
+          }
+        ));
+      } catch {}
+    }
+
+    if (user?.uid) {
+      unsubs.push(onSnapshot(
+        query(collection(db, 'points'), where('ownerId', '==', user.uid)),
+        (snap) => {
+          for (const d of snap.docs) {
+            master.set(d.id, getPointValue(d.data()));
+          }
+          apply();
+        }
+      ));
+    }
+    if (partnerUid) {
+      unsubs.push(onSnapshot(
+        query(collection(db, 'points'), where('ownerId', '==', partnerUid)),
+        (snap) => {
+          for (const d of snap.docs) {
+            master.set(d.id, getPointValue(d.data()));
+          }
+          apply();
+        }
+      ));
+    }
+
+    return () => { for (const u of unsubs) try { u(); } catch {} };
+  }, [pairId, user?.uid, partnerUid]);
+
+  // Optimistic bump when a challenge completes (TOTAL)
+  const [totalOptimistic, setTotalOptimistic] = useState<{ bump: number; baseline: number } | null>(null);
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener('lp.challenge.completed', (payload: any) => {
+      const pts = Number(payload?.points ?? payload?.value ?? 0);
+      if (!pts) return;
+      const baseline = (totalLive ?? 0);
+      setTotalOptimistic({ bump: pts, baseline });
+    });
+    return () => sub.remove();
+  }, [totalLive]);
+
+  useEffect(() => {
+    if (!totalOptimistic) return;
+    const live = totalLive ?? 0;
+    const target = totalOptimistic.baseline + totalOptimistic.bump;
+    if (live >= target) setTotalOptimistic(null);
+  }, [totalLive, totalOptimistic]);
+
+  const totalDisplay =
+    Math.max(0, totalOptimistic
+      ? Math.max(totalLive ?? 0, totalOptimistic.baseline + totalOptimistic.bump)
+      : (totalLive ?? 0));
+
+  // NEW: coalesce with pair aggregate so both partners always see the same number
+  const totalDisplaySynced = Math.max(totalDisplay, pairTotalAgg ?? 0);
+
+  // NEW: persist + broadcast lifetime total for the pair (de-duped)
+  const lastTotalWriteRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!pairId) return;
+    const val = totalDisplay; // write computed union; both devices compute the same
+    const key = `${pairId}:${val}`;
+    if (lastTotalWriteRef.current === key) return;
+    lastTotalWriteRef.current = key;
+
+    (async () => {
+      try {
+        DeviceEventEmitter.emit('lp.total.points', { pairId, total: val });
+      } catch {}
+
+      try {
+        await updateDoc(doc(db, 'pairs', pairId), {
+          totalPoints: val,
+          totalPointsUpdatedAt: serverTimestamp(),
+        });
+      } catch {}
+
+      try {
+        await setDoc(
+          doc(db, 'pairs', pairId, 'totals', 'lifetime'),
+          { total: val, updatedAt: serverTimestamp() },
+          { merge: true }
+        );
+      } catch {}
+    })();
+  }, [pairId, totalDisplay]);
+
+  // ---- Optimistic WEEKLY + broadcast + persist for Home ----
+  const [weeklyOptimistic, setWeeklyOptimistic] = useState<{ bump: number; baseline: number } | null>(null);
+
+  // Listen for completion to bump weekly optimistically too
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener('lp.challenge.completed', (payload: any) => {
+      const pts = Number(payload?.points ?? payload?.value ?? 0);
+      if (!pts) return;
+      setWeeklyOptimistic({ bump: pts, baseline: weeklyUnionLive ?? 0 });
+    });
+    return () => sub.remove();
+  }, [weeklyUnionLive]);
+
+  // Clear weekly optimistic when Firestore catches up
+  useEffect(() => {
+    if (!weeklyOptimistic) return;
+    const live = weeklyUnionLive ?? 0;
+    const target = weeklyOptimistic.baseline + weeklyOptimistic.bump;
+    if (live >= target) setWeeklyOptimistic(null);
+  }, [weeklyUnionLive, weeklyOptimistic]);
+
+  const weeklyDisplay =
+    Math.max(0, weeklyOptimistic
+      ? Math.max(weeklyUnionLive ?? 0, weeklyOptimistic.baseline + weeklyOptimistic.bump)
+      : (weeklyUnionLive ?? 0));
+
+  // Emit and persist weekly value for Home screen
+  const lastWriteRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!pairId) return;
+    const wk = weekKeyUTC(new Date());
+    const val = weeklyDisplay;
+
+    // Broadcast an app-wide event for Home (and any other listeners)
+    try {
+      DeviceEventEmitter.emit('lp.weekly.points', { pairId, week: wk, points: val });
+    } catch {}
+
+    // Persist to pair doc + weekly subdoc (avoid redundant writes)
+    const key = `${pairId}:${wk}:${val}`;
+    if (lastWriteRef.current === key) return;
+    lastWriteRef.current = key;
+
+    (async () => {
+      try {
+        await updateDoc(doc(db, 'pairs', pairId), {
+          weeklyPoints: val,
+          weeklyPointsWeek: wk,
+          weeklyPointsUpdatedAt: serverTimestamp(),
+        });
+      } catch {}
+      try {
+        await setDoc(
+          doc(db, 'pairs', pairId, 'weekly', wk),
+          { points: val, weekKey: wk, updatedAt: serverTimestamp() },
+          { merge: true }
+        );
+      } catch {}
+    })();
+  }, [pairId, weeklyDisplay]);
 
   /* ---------- rows & sections ---------- */
 
@@ -472,16 +726,23 @@ export default function ChallengesScreen() {
   }, [rowsByDiff, tab]);
 
   const firstLockedKey = useMemo(() => {
+    const toNum = (tr: any): number | null =>
+      typeof tr === 'number' ? tr : tr === '10' ? 10 : tr === '25' ? 25 : tr === '50' ? 50 : null;
+
     for (const sec of sections) {
       for (const row of sec.data) {
         const dKey = extractDiffStrict(row.c) ?? 'easy';
-        const lockedForPlan = safePlan === 'free' && dKey !== 'easy';
-        const finalLocked = row.locked || lockedForPlan;
+        const tier = (row.c as any)?.tier as 'base' | '10' | '25' | '50' | number | undefined;
+        const req = toNum(tier);
+        const unlocksByPoints = req != null;
+        const pointsLock = unlocksByPoints && weeklyForSelection < (req as number);
+        const premiumLock = safePlan === 'free' && !unlocksByPoints && dKey !== 'easy';
+        const finalLocked = premiumLock || pointsLock;
         if (finalLocked) return row.id;
       }
     }
     return null as string | null;
-  }, [sections, safePlan]);
+  }, [sections, safePlan, weeklyForSelection]);
 
   const visibleByCat = useMemo(() => {
     const m: Record<CatKey, number> = { date: 0, kindness: 0, conversation: 0, surprise: 0, play: 0 };
@@ -493,6 +754,23 @@ export default function ChallengesScreen() {
     }
     return m;
   }, [allRows]);
+
+  // Tutorial steps (Spotlight)
+  const tourSteps = useMemo<SpotlightStep[]>(() => {
+    const steps: SpotlightStep[] = [
+      { id: 'ch-welcome', targetId: null, title: 'Weekly challenges ✨', text: 'Unlock fun things to do together. Quick tour?', placement: 'bottom', allowBackdropTapToNext: true },
+      { id: 'ch-points-step', targetId: 'ch-points', title: 'Your points', text: 'Earn points by completing challenges. Points can unlock more.', placement: 'bottom', padding: 10 },
+      { id: 'ch-tabs-step', targetId: 'ch-tabs', title: 'Browse by vibe', text: 'Filter by difficulty to match your mood.', placement: 'bottom', padding: 10 },
+      { id: 'ch-legend-step', targetId: 'ch-legend', title: 'Categories', text: 'See how many challenges are in each category.', placement: 'bottom', padding: 10 },
+    ];
+    if (sections.length > 0) {
+      steps.push({ id: 'ch-start-step', targetId: 'ch-start', title: 'Start here', text: 'Open a challenge, then mark it complete for points!', placement: 'top', padding: 12 });
+    }
+    if (firstLockedKey) {
+      steps.push({ id: 'ch-lock-step', targetId: 'ch-lock', title: 'Locked items', text: 'Some unlock with points or Premium.', placement: 'top', padding: 12 });
+    }
+    return steps;
+  }, [sections.length, firstLockedKey, effectivePremium]);
 
   /* ---------- navigation ---------- */
 
@@ -556,7 +834,7 @@ export default function ChallengesScreen() {
 
       <SpotlightTarget id="ch-points">
         <ThemedText variant="subtitle" color="textDim">
-          Total points: {total}
+          Total points: {totalDisplaySynced}
         </ThemedText>
       </SpotlightTarget>
 
@@ -681,8 +959,14 @@ export default function ChallengesScreen() {
           const title = safeTitle(c);
           const desc = safeDescription(c);
 
-          const lockedForPlan = safePlan === 'free' && dKey !== 'easy';
-          const finalLocked = item.locked || lockedForPlan;
+          const toNum = (tr: any): number | null =>
+            typeof tr === 'number' ? tr : tr === '10' ? 10 : tr === '25' ? 25 : tr === '50' ? 50 : null;
+          const tier = (c as any)?.tier as 'base' | '10' | '25' | '50' | number | undefined;
+          const req = toNum(tier);
+          const unlocksByPoints = req != null;
+          const pointsLock = unlocksByPoints && weeklyForSelection < (req as number);
+          const premiumLock = safePlan === 'free' && !unlocksByPoints && dKey !== 'easy';
+          const finalLocked = premiumLock || pointsLock;
           const isFirstLocked = item.id === firstLockedKey;
 
           const isFirstCard =
@@ -743,7 +1027,7 @@ export default function ChallengesScreen() {
                         <SpotlightTarget id="ch-lock">
                           <Pressable
                             onPress={() => {
-                              const msg = lockMessage(safePlan, c);
+                              const msg = lockMessage(safePlan, c, weeklyDisplay);
                               if (msg.includes('Premium')) {
                                 try { (nav.getParent?.() ?? nav).navigate('Paywall', { plan: 'monthly' }); }
                                 catch { Alert.alert('Premium', 'Purchases are coming soon ✨'); }
@@ -754,14 +1038,14 @@ export default function ChallengesScreen() {
                           >
                             <Ionicons name="lock-closed" size={16} color={t.colors.textDim} />
                             <ThemedText variant="label" color="textDim" style={{ marginLeft: 8 }}>
-                              {lockMessage(safePlan, c)}
+                              {lockMessage(safePlan, c, weeklyDisplay)}
                             </ThemedText>
                           </Pressable>
                         </SpotlightTarget>
                       ) : (
                         <Pressable
                           onPress={() => {
-                            const msg = lockMessage(safePlan, c);
+                            const msg = lockMessage(safePlan, c, weeklyDisplay);
                             if (msg.includes('Premium')) {
                               try { (nav.getParent?.() ?? nav).navigate('Paywall', { plan: 'monthly' }); }
                               catch { Alert.alert('Premium', 'Purchases are coming soon ✨'); }
@@ -772,7 +1056,7 @@ export default function ChallengesScreen() {
                         >
                           <Ionicons name="lock-closed" size={16} color={t.colors.textDim} />
                           <ThemedText variant="label" color="textDim" style={{ marginLeft: 8 }}>
-                            {lockMessage(safePlan, c)}
+                            {lockMessage(safePlan, c, weeklyDisplay)}
                           </ThemedText>
                         </Pressable>
                       )}
@@ -802,7 +1086,7 @@ export default function ChallengesScreen() {
         </View>
       ) : null}
 
-      <SpotlightAutoStarter uid={user?.uid ?? null} steps={[]} persistKey="tour-challenges" />
+      <SpotlightAutoStarter uid={user?.uid ?? null} steps={tourSteps} persistKey="tour-challenges-v4" />
     </View>
   );
 }
