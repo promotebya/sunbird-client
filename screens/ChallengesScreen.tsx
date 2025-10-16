@@ -1,7 +1,7 @@
 // screens/ChallengesScreen.tsx
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   DeviceEventEmitter,
@@ -28,17 +28,19 @@ import {
 } from '../utils/seedchallenges';
 import { usePro } from '../utils/subscriptions';
 
-// Firestore
+// Firestore (read + entitlement mirror)
 import {
   collection,
   doc,
+  DocumentData,
+  getDoc,
   onSnapshot,
   orderBy,
   query,
+  QuerySnapshot,
   serverTimestamp,
   setDoc,
   Timestamp,
-  updateDoc,
   where,
 } from 'firebase/firestore';
 import { db } from '../firebaseConfig';
@@ -187,42 +189,6 @@ function mergePreferBase<T extends Record<string, any>>(base: T, patch: Partial<
   return out as T;
 }
 
-// ---------- Pair + premium helpers ----------
-function lockMessage(
-  plan: 'free' | 'premium',
-  c: SeedChallenge,
-  weeklyPts?: number
-): string {
-  const tierRaw = (c as any)?.tier as 'base' | '10' | '25' | '50' | number | undefined;
-  const d = extractDiffStrict(c);
-
-  const toNum = (tr: any): number | null => {
-    if (typeof tr === 'number') return tr;
-    if (tr === '10') return 10;
-    if (tr === '25') return 25;
-    if (tr === '50') return 50;
-    return null;
-  };
-
-  const req = toNum(tierRaw);
-  if (req != null) {
-    const have = typeof weeklyPts === 'number' ? weeklyPts : 0;
-    return have >= req ? 'Unlocked' : `Needs ${req}+ pts`;
-  }
-
-  if (plan === 'free' && d && d !== 'easy') return 'Premium required';
-  return 'Locked';
-}
-function extractPartnerUidFromPairDoc(d: any, myUid: string): string | null {
-  if (!d) return null;
-  if (d.userA && d.userB) return d.userA === myUid ? d.userB : d.userA;
-  if (d.ownerId && d.partnerId) return d.ownerId === myUid ? d.partnerId : d.ownerId;
-  if (Array.isArray(d.members)) return d.members.find((u: string) => u && u !== myUid) ?? null;
-  if (Array.isArray(d.userIds)) return d.userIds.find((u: string) => u && u !== myUid) ?? null;
-  if (d.a && d.b) return d.a === myUid ? d.b : d.a;
-  return null;
-}
-
 // ---------- UTC week helpers ----------
 function weekKeyUTC(d = new Date()) {
   const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
@@ -258,88 +224,120 @@ export default function ChallengesScreen() {
   // Pair state
   const [partnerUid, setPartnerUid] = useState<string | null>(null);
   const [pairId, setPairId] = useState<string | null>(null);
-  const [pairPremiumActive, setPairPremiumActive] = useState<boolean>(false);
   const [pairLoaded, setPairLoaded] = useState<boolean>(false);
-  // NEW: pair-level lifetime total aggregate read from pairs doc
-  const [pairTotalAgg, setPairTotalAgg] = useState<number | null>(null);
 
+  // Public entitlement (for partner to see my premium and vice versa)
+  const [partnerPublicPremium, setPartnerPublicPremium] = useState<boolean>(false);
+
+  // Load pairId + partnerUid + partner entitlement mirror (read-only)
   useEffect(() => {
-    let unsubscribe: (() => void) | undefined;
+    let unsubscribePair: (() => void) | undefined;
+    let unsubscribePartnerEnt: (() => void) | undefined;
+
     (async () => {
       try {
         setPairLoaded(false);
+        setPartnerPublicPremium(false);
+
         if (!user?.uid) {
           setPartnerUid(null);
           setPairId(null);
           setPairLoaded(true);
+          if (unsubscribePartnerEnt) unsubscribePartnerEnt();
           return;
         }
-        const pid = await getPairId(user.uid);
+
+        const pid = await getPairId(user.uid).catch(() => null);
         setPairId(pid ?? null);
+
         if (!pid) {
           setPartnerUid(null);
           setPairLoaded(true);
+          if (unsubscribePartnerEnt) unsubscribePartnerEnt();
           return;
         }
+
         const ref = doc(db, 'pairs', pid);
-        unsubscribe = onSnapshot(
+        unsubscribePair = onSnapshot(
           ref,
-          (snap) => {
+          async (snap) => {
             setPairLoaded(true);
             if (!snap.exists()) {
               setPartnerUid(null);
-              setPairPremiumActive(false);
               setPairId(null);
-              setPairTotalAgg(null);
+              setPartnerPublicPremium(false);
+              if (unsubscribePartnerEnt) unsubscribePartnerEnt();
               return;
             }
-            const data = snap.data();
-            const other = extractPartnerUidFromPairDoc(data, user.uid);
-            setPartnerUid(other ?? null);
-            const pairHasPremium = !!(
-              data?.premiumActive ?? data?.premium ?? data?.proActive ?? data?.plusActive ?? data?.premiumForPair
-            );
-            setPairPremiumActive(pairHasPremium);
-            // NEW: read pair-level total aggregate if present
-            const tot = Number((data as any)?.totalPoints);
-            setPairTotalAgg(Number.isFinite(tot) ? tot : null);
+
+            const data: any = snap.data();
+            const members: string[] = Array.isArray(data?.members) ? data.members : [];
+            const other = members.find((m) => m && m !== user.uid) ?? null;
+            setPartnerUid(other);
+
+            // Mirror my premium flag into my public doc (so partner can read it)
+            const iAmPremium = !!(isPremium || hasPro);
+            if (iAmPremium) {
+              try {
+                await setDoc(
+                  doc(db, 'users', user.uid, 'public', 'entitlements'),
+                  { premiumActive: true, updatedAt: serverTimestamp() },
+                  { merge: true }
+                );
+              } catch {}
+            }
+
+            // Watch partner's public entitlement
+            if (other) {
+              const entRef = doc(db, 'users', other, 'public', 'entitlements');
+
+              try {
+                const e = await getDoc(entRef);
+                setPartnerPublicPremium(!!e.data()?.premiumActive);
+              } catch {
+                setPartnerPublicPremium(false);
+              }
+
+              if (unsubscribePartnerEnt) unsubscribePartnerEnt();
+              unsubscribePartnerEnt = onSnapshot(
+                entRef,
+                (s2) => setPartnerPublicPremium(!!s2.data()?.premiumActive),
+                () => setPartnerPublicPremium(false)
+              );
+            } else {
+              setPartnerPublicPremium(false);
+              if (unsubscribePartnerEnt) unsubscribePartnerEnt();
+            }
           },
           () => {
             setPairLoaded(true);
             setPartnerUid(null);
-            setPairPremiumActive(false);
             setPairId(null);
-            setPairTotalAgg(null);
+            setPartnerPublicPremium(false);
+            if (unsubscribePartnerEnt) unsubscribePartnerEnt();
           }
         );
       } catch {
         setPairLoaded(true);
         setPartnerUid(null);
         setPairId(null);
+        setPartnerPublicPremium(false);
+        if (unsubscribePartnerEnt) unsubscribePartnerEnt();
       }
     })();
-    return () => { if (unsubscribe) unsubscribe(); };
-  }, [user?.uid]);
+
+    return () => {
+      if (unsubscribePair) unsubscribePair();
+    };
+  }, [user?.uid, isPremium, hasPro]);
 
   const { isPremium: partnerIsPremium } = usePlanPlus(partnerUid ?? undefined);
 
-  // Propagate premium to pair doc
-  useEffect(() => {
-    (async () => {
-      try {
-        if (!pairId) return;
-        const localHasPremium = !!(isPremium || hasPro);
-        if (!localHasPremium || pairPremiumActive) return;
-        await updateDoc(doc(db, 'pairs', pairId), {
-          premiumActive: true,
-          premiumUpdatedAt: serverTimestamp(),
-          premiumUpdatedBy: user?.uid ?? null,
-        });
-      } catch {}
-    })();
-  }, [pairId, isPremium, hasPro, pairPremiumActive, user?.uid]);
+  // Effective plan: my premium OR partner's premium OR partner's mirrored entitlement
+  const effectivePremium = !!(isPremium || hasPro || partnerIsPremium || partnerPublicPremium);
+  const safePlan: 'free' | 'premium' = effectivePremium ? 'premium' : 'free';
 
-  // Shared seed
+  // Shared seed (for weekly selection variety)
   const weeklySeed = useMemo(() => {
     const week = weekKeyUTC(new Date());
     if (!pairLoaded) return `pending:${week}`;
@@ -347,7 +345,7 @@ export default function ChallengesScreen() {
     return `solo:${user?.uid ?? 'guest'}:${week}`;
   }, [pairId, user?.uid, pairLoaded]);
 
-  // ----- POINTS NORMALIZER (works across different schemas) -----
+  // ----- POINTS NORMALIZER -----
   const getPointValue = (data: any): number => {
     const candidates = [data?.value, data?.points, data?.point, data?.amount, data?.delta, data?.score];
     for (const c of candidates) {
@@ -356,11 +354,6 @@ export default function ChallengesScreen() {
     }
     return 0;
   };
-
-  // ---- WEEKLY TOTAL (UNION: pairId + both owners) — Monday 00:00 UTC window
-  const [weeklyUnionLive, setWeeklyUnionLive] = useState<number | null>(null);
-
-  // Timestamp normalizer
   const getPointDate = (data: any): Date | null => {
     const when: any = data?.createdAt ?? data?.timestamp ?? data?.ts ?? data?.time;
     if (!when) return null;
@@ -375,8 +368,11 @@ export default function ChallengesScreen() {
     }
   };
 
+  /* ---------- WEEKLY TOTAL — UNION (pairId + both owners) ---------- */
+  const [weeklyLive, setWeeklyLive] = useState<number | null>(null);
+
   useEffect(() => {
-    if (!user?.uid) { setWeeklyUnionLive(null); return; }
+    if (!user?.uid) { setWeeklyLive(null); return; }
 
     const since = startOfWeekMondayUTC();
     const until = new Date(since);
@@ -392,65 +388,123 @@ export default function ChallengesScreen() {
         const dt = getPointDate(data);
         if (dt && dt >= since && dt < until && Number.isFinite(v) && v > 0) sum += v;
       }
-      setWeeklyUnionLive(sum);
+      setWeeklyLive(sum);
     };
 
     const unsubs: Array<() => void> = [];
-
-    const add = (qRef: any, fbRef?: any) =>
-      onSnapshot(
+    const tryAdd = (qRef: any) => {
+      const off = onSnapshot(
         qRef,
         (snap: any) => {
           for (const d of snap.docs) buf.set(d.id, d.data());
           recompute();
         },
-        () => {
-          if (!fbRef) return;
-          const off = onSnapshot(fbRef, (snap2: any) => {
-            for (const d of snap2.docs) buf.set(d.id, d.data());
-            recompute();
-          });
-          unsubs.push(off);
-        }
+        // Ignore permission or transient errors for this stream; others still contribute.
+        () => {}
       );
+      unsubs.push(off);
+    };
 
-    // mine (ownerId)
-    unsubs.push(
-      add(
-        query(baseRef, where('ownerId', '==', user.uid), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')),
-        query(baseRef, where('ownerId', '==', user.uid))
-      )
-    );
-
-    // shared pair docs
+    // Pair docs
     if (pairId) {
-      unsubs.push(
-        add(
-          query(baseRef, where('pairId', '==', pairId), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')),
-          query(baseRef, where('pairId', '==', pairId))
-        )
-      );
+      tryAdd(query(baseRef, where('pairId', '==', pairId), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')));
     }
-
-    // partner legacy owner-only
-    if (partnerUid) {
-      unsubs.push(
-        add(
-          query(baseRef, where('ownerId', '==', partnerUid), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')),
-          query(baseRef, where('ownerId', '==', partnerUid))
-        )
-      );
+    // My docs
+    tryAdd(query(baseRef, where('ownerId', '==', user.uid), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')));
+    // Partner legacy owner-only docs
+    if (pairId && partnerUid) {
+      tryAdd(query(baseRef, where('ownerId', '==', partnerUid), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')));
     }
 
     return () => { unsubs.forEach((u) => u()); };
   }, [user?.uid, pairId, partnerUid]);
 
-  // Effective for generator (union weekly across pair + both owners)
-  const weeklyForSelection = weeklyUnionLive ?? 0;
+  // Optimistic WEEKLY bump
+  const [weeklyOptimistic, setWeeklyOptimistic] = useState<{ bump: number; baseline: number } | null>(null);
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener('lp.challenge.completed', (payload: any) => {
+      const pts = Number(payload?.points ?? payload?.value ?? 0);
+      if (!pts) return;
+      setWeeklyOptimistic({ bump: pts, baseline: weeklyLive ?? 0 });
+    });
+    return () => sub.remove();
+  }, [weeklyLive]);
+  useEffect(() => {
+    if (!weeklyOptimistic) return;
+    const live = weeklyLive ?? 0;
+    const target = weeklyOptimistic.baseline + weeklyOptimistic.bump;
+    if (live >= target) setWeeklyOptimistic(null);
+  }, [weeklyLive, weeklyOptimistic]);
 
-  // Premium plan resolution
-  const effectivePremium = !!(isPremium || hasPro || partnerIsPremium || pairPremiumActive);
-  const safePlan: 'free' | 'premium' = effectivePremium ? 'premium' : 'free';
+  const weeklyDisplay =
+    Math.max(0, weeklyOptimistic
+      ? Math.max(weeklyLive ?? 0, weeklyOptimistic.baseline + weeklyOptimistic.bump)
+      : (weeklyLive ?? 0));
+
+  /* ---------- TOTAL POINTS — UNION (pairId + both owners) ---------- */
+  const [totalLive, setTotalLive] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!user?.uid) { setTotalLive(null); return; }
+    const baseRef = collection(db, 'points');
+
+    // de-dupe by doc id across streams
+    const master = new Map<string, number>();
+    const apply = () => {
+      let sum = 0;
+      for (const v of master.values()) sum += Number(v) || 0;
+      setTotalLive(Math.max(0, sum));
+    };
+
+    const unsubs: Array<() => void> = [];
+    const tryAdd = (qRef: any) => {
+      const off = onSnapshot(
+        qRef,
+        (snap: QuerySnapshot<DocumentData>) => {
+          for (const d of snap.docs) master.set(d.id, getPointValue(d.data()));
+          apply();
+        },
+        // Ignore per-stream errors; other streams continue
+        () => {}
+      );
+      unsubs.push(off);
+    };
+
+    // Pair (shared)
+    if (pairId) {
+      tryAdd(query(baseRef, where('pairId', '==', pairId)));
+    }
+    // Mine
+    tryAdd(query(baseRef, where('ownerId', '==', user.uid)));
+    // Partner legacy owner-only
+    if (pairId && partnerUid) {
+      tryAdd(query(baseRef, where('ownerId', '==', partnerUid)));
+    }
+
+    return () => { for (const u of unsubs) try { u(); } catch {} };
+  }, [user?.uid, pairId, partnerUid]);
+
+  const [totalOptimistic, setTotalOptimistic] = useState<{ bump: number; baseline: number } | null>(null);
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener('lp.challenge.completed', (payload: any) => {
+      const pts = Number(payload?.points ?? payload?.value ?? 0);
+      if (!pts) return;
+      const baseline = (totalLive ?? 0);
+      setTotalOptimistic({ bump: pts, baseline });
+    });
+    return () => sub.remove();
+  }, [totalLive]);
+  useEffect(() => {
+    if (!totalOptimistic) return;
+    const live = totalLive ?? 0;
+    const target = totalOptimistic.baseline + totalOptimistic.bump;
+    if (live >= target) setTotalOptimistic(null);
+  }, [totalLive, totalOptimistic]);
+
+  const totalDisplay =
+    Math.max(0, totalOptimistic
+      ? Math.max(totalLive ?? 0, totalOptimistic.baseline + totalOptimistic.bump)
+      : (totalLive ?? 0));
 
   const [tab, setTab] = useState<DiffTabKey>('all');
 
@@ -459,11 +513,11 @@ export default function ChallengesScreen() {
     () =>
       getWeeklyChallengeSet({
         plan: safePlan,
-        weeklyPoints: weeklyForSelection,
+        weeklyPoints: weeklyDisplay,
         uid: weeklySeed,
         pool: CHALLENGE_POOL,
       }),
-    [safePlan, weeklyForSelection, weeklySeed]
+    [safePlan, weeklyDisplay, weeklySeed]
   );
 
   // Pool map for merging
@@ -491,189 +545,6 @@ export default function ChallengesScreen() {
     }
     return { visible: vis, locked: lock };
   }, [selection, safePlan]);
-
-  // ---- TOTAL POINTS (pair + owner fallbacks, de-duped) + optimistic bump ----
-  const [totalLive, setTotalLive] = useState<number | null>(null);
-
-  useEffect(() => {
-    if (!pairId && !user?.uid) { setTotalLive(null); return; }
-    const master = new Map<string, number>();
-    const apply = () => {
-      let sum = 0;
-      for (const v of master.values()) sum += Number(v) || 0;
-      setTotalLive(Math.max(0, sum));
-    };
-
-    const unsubs: Array<() => void> = [];
-
-    if (pairId) {
-      unsubs.push(onSnapshot(
-        query(collection(db, 'points'), where('pairId', '==', pairId)),
-        (snap) => {
-          for (const d of snap.docs) {
-            master.set(d.id, getPointValue(d.data()));
-          }
-          apply();
-        }
-      ));
-
-      try {
-        unsubs.push(onSnapshot(
-          collection(db, 'pairs', pairId, 'points'),
-          (snap) => {
-            for (const d of snap.docs) {
-              master.set(`sub:${d.id}`, getPointValue(d.data()));
-            }
-            apply();
-          }
-        ));
-      } catch {}
-    }
-
-    if (user?.uid) {
-      unsubs.push(onSnapshot(
-        query(collection(db, 'points'), where('ownerId', '==', user.uid)),
-        (snap) => {
-          for (const d of snap.docs) {
-            master.set(d.id, getPointValue(d.data()));
-          }
-          apply();
-        }
-      ));
-    }
-    if (partnerUid) {
-      unsubs.push(onSnapshot(
-        query(collection(db, 'points'), where('ownerId', '==', partnerUid)),
-        (snap) => {
-          for (const d of snap.docs) {
-            master.set(d.id, getPointValue(d.data()));
-          }
-          apply();
-        }
-      ));
-    }
-
-    return () => { for (const u of unsubs) try { u(); } catch {} };
-  }, [pairId, user?.uid, partnerUid]);
-
-  // Optimistic bump when a challenge completes (TOTAL)
-  const [totalOptimistic, setTotalOptimistic] = useState<{ bump: number; baseline: number } | null>(null);
-  useEffect(() => {
-    const sub = DeviceEventEmitter.addListener('lp.challenge.completed', (payload: any) => {
-      const pts = Number(payload?.points ?? payload?.value ?? 0);
-      if (!pts) return;
-      const baseline = (totalLive ?? 0);
-      setTotalOptimistic({ bump: pts, baseline });
-    });
-    return () => sub.remove();
-  }, [totalLive]);
-
-  useEffect(() => {
-    if (!totalOptimistic) return;
-    const live = totalLive ?? 0;
-    const target = totalOptimistic.baseline + totalOptimistic.bump;
-    if (live >= target) setTotalOptimistic(null);
-  }, [totalLive, totalOptimistic]);
-
-  const totalDisplay =
-    Math.max(0, totalOptimistic
-      ? Math.max(totalLive ?? 0, totalOptimistic.baseline + totalOptimistic.bump)
-      : (totalLive ?? 0));
-
-  // NEW: coalesce with pair aggregate so both partners always see the same number
-  const totalDisplaySynced = Math.max(totalDisplay, pairTotalAgg ?? 0);
-
-  // NEW: persist + broadcast lifetime total for the pair (de-duped)
-  const lastTotalWriteRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!pairId) return;
-    const val = totalDisplay; // write computed union; both devices compute the same
-    const key = `${pairId}:${val}`;
-    if (lastTotalWriteRef.current === key) return;
-    lastTotalWriteRef.current = key;
-
-    (async () => {
-      try {
-        DeviceEventEmitter.emit('lp.total.points', { pairId, total: val });
-      } catch {}
-
-      try {
-        await updateDoc(doc(db, 'pairs', pairId), {
-          totalPoints: val,
-          totalPointsUpdatedAt: serverTimestamp(),
-        });
-      } catch {}
-
-      try {
-        await setDoc(
-          doc(db, 'pairs', pairId, 'totals', 'lifetime'),
-          { total: val, updatedAt: serverTimestamp() },
-          { merge: true }
-        );
-      } catch {}
-    })();
-  }, [pairId, totalDisplay]);
-
-  // ---- Optimistic WEEKLY + broadcast + persist for Home ----
-  const [weeklyOptimistic, setWeeklyOptimistic] = useState<{ bump: number; baseline: number } | null>(null);
-
-  // Listen for completion to bump weekly optimistically too
-  useEffect(() => {
-    const sub = DeviceEventEmitter.addListener('lp.challenge.completed', (payload: any) => {
-      const pts = Number(payload?.points ?? payload?.value ?? 0);
-      if (!pts) return;
-      setWeeklyOptimistic({ bump: pts, baseline: weeklyUnionLive ?? 0 });
-    });
-    return () => sub.remove();
-  }, [weeklyUnionLive]);
-
-  // Clear weekly optimistic when Firestore catches up
-  useEffect(() => {
-    if (!weeklyOptimistic) return;
-    const live = weeklyUnionLive ?? 0;
-    const target = weeklyOptimistic.baseline + weeklyOptimistic.bump;
-    if (live >= target) setWeeklyOptimistic(null);
-  }, [weeklyUnionLive, weeklyOptimistic]);
-
-  const weeklyDisplay =
-    Math.max(0, weeklyOptimistic
-      ? Math.max(weeklyUnionLive ?? 0, weeklyOptimistic.baseline + weeklyOptimistic.bump)
-      : (weeklyUnionLive ?? 0));
-
-  // Emit and persist weekly value for Home screen
-  const lastWriteRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!pairId) return;
-    const wk = weekKeyUTC(new Date());
-    const val = weeklyDisplay;
-
-    // Broadcast an app-wide event for Home (and any other listeners)
-    try {
-      DeviceEventEmitter.emit('lp.weekly.points', { pairId, week: wk, points: val });
-    } catch {}
-
-    // Persist to pair doc + weekly subdoc (avoid redundant writes)
-    const key = `${pairId}:${wk}:${val}`;
-    if (lastWriteRef.current === key) return;
-    lastWriteRef.current = key;
-
-    (async () => {
-      try {
-        await updateDoc(doc(db, 'pairs', pairId), {
-          weeklyPoints: val,
-          weeklyPointsWeek: wk,
-          weeklyPointsUpdatedAt: serverTimestamp(),
-        });
-      } catch {}
-      try {
-        await setDoc(
-          doc(db, 'pairs', pairId, 'weekly', wk),
-          { points: val, weekKey: wk, updatedAt: serverTimestamp() },
-          { merge: true }
-        );
-      } catch {}
-    })();
-  }, [pairId, weeklyDisplay]);
 
   /* ---------- rows & sections ---------- */
 
@@ -735,14 +606,14 @@ export default function ChallengesScreen() {
         const tier = (row.c as any)?.tier as 'base' | '10' | '25' | '50' | number | undefined;
         const req = toNum(tier);
         const unlocksByPoints = req != null;
-        const pointsLock = unlocksByPoints && weeklyForSelection < (req as number);
+        const pointsLock = unlocksByPoints && weeklyDisplay < (req as number);
         const premiumLock = safePlan === 'free' && !unlocksByPoints && dKey !== 'easy';
         const finalLocked = premiumLock || pointsLock;
         if (finalLocked) return row.id;
       }
     }
     return null as string | null;
-  }, [sections, safePlan, weeklyForSelection]);
+  }, [sections, safePlan, weeklyDisplay]);
 
   const visibleByCat = useMemo(() => {
     const m: Record<CatKey, number> = { date: 0, kindness: 0, conversation: 0, surprise: 0, play: 0 };
@@ -834,7 +705,7 @@ export default function ChallengesScreen() {
 
       <SpotlightTarget id="ch-points">
         <ThemedText variant="subtitle" color="textDim">
-          Total points: {totalDisplaySynced}
+          Total points: {totalDisplay}
         </ThemedText>
       </SpotlightTarget>
 
@@ -964,7 +835,7 @@ export default function ChallengesScreen() {
           const tier = (c as any)?.tier as 'base' | '10' | '25' | '50' | number | undefined;
           const req = toNum(tier);
           const unlocksByPoints = req != null;
-          const pointsLock = unlocksByPoints && weeklyForSelection < (req as number);
+          const pointsLock = unlocksByPoints && weeklyDisplay < (req as number);
           const premiumLock = safePlan === 'free' && !unlocksByPoints && dKey !== 'easy';
           const finalLocked = premiumLock || pointsLock;
           const isFirstLocked = item.id === firstLockedKey;
@@ -1027,7 +898,7 @@ export default function ChallengesScreen() {
                         <SpotlightTarget id="ch-lock">
                           <Pressable
                             onPress={() => {
-                              const msg = lockMessage(safePlan, c, weeklyDisplay);
+                              const msg = premiumLock ? 'Premium required' : `Needs ${req}+ pts`;
                               if (msg.includes('Premium')) {
                                 try { (nav.getParent?.() ?? nav).navigate('Paywall', { plan: 'monthly' }); }
                                 catch { Alert.alert('Premium', 'Purchases are coming soon ✨'); }
@@ -1038,14 +909,14 @@ export default function ChallengesScreen() {
                           >
                             <Ionicons name="lock-closed" size={16} color={t.colors.textDim} />
                             <ThemedText variant="label" color="textDim" style={{ marginLeft: 8 }}>
-                              {lockMessage(safePlan, c, weeklyDisplay)}
+                              {premiumLock ? 'Premium required' : `Needs ${req}+ pts`}
                             </ThemedText>
                           </Pressable>
                         </SpotlightTarget>
                       ) : (
                         <Pressable
                           onPress={() => {
-                            const msg = lockMessage(safePlan, c, weeklyDisplay);
+                            const msg = premiumLock ? 'Premium required' : `Needs ${req}+ pts`;
                             if (msg.includes('Premium')) {
                               try { (nav.getParent?.() ?? nav).navigate('Paywall', { plan: 'monthly' }); }
                               catch { Alert.alert('Premium', 'Purchases are coming soon ✨'); }
@@ -1056,7 +927,7 @@ export default function ChallengesScreen() {
                         >
                           <Ionicons name="lock-closed" size={16} color={t.colors.textDim} />
                           <ThemedText variant="label" color="textDim" style={{ marginLeft: 8 }}>
-                            {lockMessage(safePlan, c, weeklyDisplay)}
+                            {premiumLock ? 'Premium required' : `Needs ${req}+ pts`}
                           </ThemedText>
                         </Pressable>
                       )}
@@ -1086,7 +957,7 @@ export default function ChallengesScreen() {
         </View>
       ) : null}
 
-      <SpotlightAutoStarter uid={user?.uid ?? null} steps={tourSteps} persistKey="tour-challenges-v4" />
+      <SpotlightAutoStarter uid={user?.uid ?? null} steps={tourSteps} persistKey="tour-challenges-v7" />
     </View>
   );
 }

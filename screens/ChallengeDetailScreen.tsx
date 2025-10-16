@@ -11,14 +11,7 @@ import { Challenge, useChallenges } from '../hooks/useChallenges';
 import { usePro } from '../utils/subscriptions';
 
 // Firestore
-import {
-  addDoc,
-  collection,
-  doc,
-  increment,
-  runTransaction,
-  serverTimestamp,
-} from 'firebase/firestore';
+import { addDoc, collection, serverTimestamp } from 'firebase/firestore';
 import { db } from '../firebaseConfig';
 import { getPairId } from '../utils/partner';
 
@@ -29,20 +22,6 @@ type Params = {
   seed?: any;                 // if you navigate with a "seed" object instead of "challenge"
 };
 
-/** ISO week key (UTC, Monday week) – matches ChallengesScreen logic */
-function weekKeyUTC(d = new Date()) {
-  const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-  const day = (date.getUTCDay() + 6) % 7; // Mon..Sun -> 0..6
-  date.setUTCDate(date.getUTCDate() - day + 3); // Thu anchor
-  const firstThursday = new Date(Date.UTC(date.getUTCFullYear(), 0, 4));
-  const firstDay = (firstThursday.getUTCDay() + 6) % 7;
-  firstThursday.setUTCDate(firstThursday.getUTCDate() - firstDay + 3);
-  // weeks since first Thu
-  const weekNo = 1 + Math.round((date.getTime() - firstThursday.getTime()) / (7 * 24 * 3600 * 1000));
-  const year = date.getUTCFullYear();
-  return `${year}-W${String(weekNo).padStart(2, '0')}`;
-}
-
 export default function ChallengeDetailScreen() {
   const route = useRoute<RouteProp<Record<string, Partial<Params>>, string>>();
   const { user } = useAuthListener();
@@ -51,7 +30,8 @@ export default function ChallengeDetailScreen() {
   const [submitting, setSubmitting] = useState(false);
 
   // Accept both legacy `challenge` and optional `seed` (from Challenges list)
-  const base: Challenge = (route.params?.challenge as Challenge) ?? (route.params?.seed as Challenge);
+  const base: Challenge =
+    (route.params?.challenge as Challenge) ?? (route.params?.seed as Challenge);
   const startingStatus = (route.params?.status as Params['status']) ?? 'unlocked';
 
   const { myStatuses, mark } = useChallenges(user?.uid, 0, hasPro);
@@ -71,6 +51,9 @@ export default function ChallengeDetailScreen() {
     if (submitting) return;
     setSubmitting(true);
     try {
+      // Prevent re-awarding if we already marked completed locally
+      if (status === 'completed') return;
+
       await mark(base.id, 'completed');
 
       // Pick points (+ fallback if seed lacks an explicit value)
@@ -91,78 +74,22 @@ export default function ChallengeDetailScreen() {
       // 1) Optimistic UI bump (Home/Challenges listeners)
       DeviceEventEmitter.emit(completionChannel, payload);
 
-      // 2) Persist an activity/points entry (auto ID, cannot collide)
+      // 2) Persist a single points entry with pairId so both partners can read it
       try {
         const pid = user?.uid ? await getPairId(user.uid).catch(() => null) : null;
+
         await addDoc(collection(db, 'points'), {
-          ownerId: user?.uid ?? null,
-          pairId: pid ?? null,
+          ownerId: user?.uid ?? null,     // lets the creator always read/write
+          pairId: pid ?? null,            // enables partner to read via security rules
           value: pts,
           reason: `Challenge: ${base.title ?? 'Challenge'}`,
           source: 'challenge',
           challengeId: base.id ?? null,
           createdAt: serverTimestamp(),
         });
-
-        // 3) If paired, atomically sync the shared totals on the pair doc
-        if (pid) {
-          const pairRef = doc(db, 'pairs', pid);
-          const ledgerKey = `${base.id}__${user?.uid ?? 'nouser'}`; // per-user per-challenge
-          const ledgerRef = doc(db, 'pairs', pid, 'ledger', ledgerKey);
-          const wk = weekKeyUTC(new Date());
-
-          await runTransaction(db, async (tx) => {
-            // If this completion was already accounted for, bail (idempotent)
-            const already = await tx.get(ledgerRef);
-            if (already.exists()) return;
-
-            // Read pair doc to decide whether to reset weekly
-            const pairSnap = await tx.get(pairRef);
-            const data: any = pairSnap.exists() ? pairSnap.data() : {};
-            const prevWeek: string | undefined = data?.weeklyPointsWeek;
-            const shouldReset = prevWeek && prevWeek !== wk;
-
-            // Record the ledger first (prevents double counting on retries)
-            tx.set(ledgerRef, {
-              challengeId: base.id ?? null,
-              userId: user?.uid ?? null,
-              points: pts,
-              weekKey: wk,
-              createdAt: serverTimestamp(),
-            });
-
-            if (shouldReset) {
-              // Reset weekly bucket, increment total
-              tx.set(
-                pairRef,
-                {
-                  totalPoints: increment(pts),
-                  totalPointsUpdatedAt: serverTimestamp(),
-                  weeklyPoints: pts,
-                  weeklyPointsWeek: wk,
-                  weeklyPointsUpdatedAt: serverTimestamp(),
-                },
-                { merge: true }
-              );
-            } else {
-              // Normal increments
-              tx.set(
-                pairRef,
-                {
-                  totalPoints: increment(pts),
-                  totalPointsUpdatedAt: serverTimestamp(),
-                  weeklyPoints: increment(pts),
-                  weeklyPointsWeek: wk,
-                  weeklyPointsUpdatedAt: serverTimestamp(),
-                },
-                { merge: true }
-              );
-            }
-          });
-        }
       } catch (e) {
-        // Non-fatal: optimistic UI will still reflect completion; backend will catch up later
-        console.warn('Failed to persist points / sync pair totals', e);
+        // Non-fatal: optimistic UI will still reflect completion; listeners will update when network succeeds next time
+        console.warn('Failed to persist challenge points', e);
       }
     } finally {
       setSubmitting(false);
