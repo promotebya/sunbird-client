@@ -11,7 +11,13 @@ import { Challenge, useChallenges } from '../hooks/useChallenges';
 import { usePro } from '../utils/subscriptions';
 
 // Firestore
-import { addDoc, collection, serverTimestamp } from 'firebase/firestore';
+import {
+  doc,
+  increment,
+  serverTimestamp,
+  setDoc,
+  updateDoc
+} from 'firebase/firestore';
 import { db } from '../firebaseConfig';
 import { getPairId } from '../utils/partner';
 
@@ -20,7 +26,21 @@ type Params = {
   status: 'locked' | 'unlocked' | 'in_progress' | 'completed';
   completionChannel?: string; // e.g. 'lp.challenge.completed'
   seed?: any;                 // if you navigate with a "seed" object instead of "challenge"
+  pairId?: string | null;     // (optional) pass through from ChallengesScreen for reliability
 };
+
+// ISO week key (Mon-based) like 2025-W42 (UTC)
+function weekKeyUTC(d = new Date()) {
+  const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const day = (date.getUTCDay() + 6) % 7; // Mon..Sun
+  date.setUTCDate(date.getUTCDate() - day + 3); // Thu anchor
+  const firstThursday = new Date(Date.UTC(date.getUTCFullYear(), 0, 4));
+  const firstDay = (firstThursday.getUTCDay() + 6) % 7;
+  firstThursday.setUTCDate(firstThursday.getUTCDate() - firstDay + 3);
+  const weekNo = 1 + Math.round((date.getTime() - firstThursday.getTime()) / (7 * 24 * 3600 * 1000));
+  const year = date.getUTCFullYear();
+  return `${year}-W${String(weekNo).padStart(2, '0')}`;
+}
 
 export default function ChallengeDetailScreen() {
   const route = useRoute<RouteProp<Record<string, Partial<Params>>, string>>();
@@ -30,8 +50,7 @@ export default function ChallengeDetailScreen() {
   const [submitting, setSubmitting] = useState(false);
 
   // Accept both legacy `challenge` and optional `seed` (from Challenges list)
-  const base: Challenge =
-    (route.params?.challenge as Challenge) ?? (route.params?.seed as Challenge);
+  const base: Challenge = (route.params?.challenge as Challenge) ?? (route.params?.seed as Challenge);
   const startingStatus = (route.params?.status as Params['status']) ?? 'unlocked';
 
   const { myStatuses, mark } = useChallenges(user?.uid, 0, hasPro);
@@ -51,9 +70,6 @@ export default function ChallengeDetailScreen() {
     if (submitting) return;
     setSubmitting(true);
     try {
-      // Prevent re-awarding if we already marked completed locally
-      if (status === 'completed') return;
-
       await mark(base.id, 'completed');
 
       // Pick points (+ fallback if seed lacks an explicit value)
@@ -64,33 +80,76 @@ export default function ChallengeDetailScreen() {
 
       const pts = Number.isFinite(fallbackPoints) ? fallbackPoints : 2;
 
-      const payload = {
+      // Resolve pairId (prefer from route -> then util)
+      let pid: string | null = null;
+      try {
+        pid = (route.params?.pairId as string | null) ?? null;
+        if (!pid && user?.uid) pid = await getPairId(user.uid);
+      } catch {
+        pid = null;
+      }
+
+      // A stable idempotency key so a repeated tap cannot double-insert
+      const idempotencyKey = `challenge:${pid ?? 'solo'}:${user?.uid ?? 'nouser'}:${base.id}`;
+
+      // 1) Optimistic UI bump (Home/Challenges listeners)
+      DeviceEventEmitter.emit(completionChannel, {
         challengeId: base.id,
         points: pts,
         title: base.title,
-        idempotencyKey: `${user?.uid ?? 'nouser'}:${base.id}:completed`,
+        idempotencyKey,
+      });
+
+      // 2) Persist the point to shared pair stream (and owner fallback)
+      // Use setDoc with a stable doc id so we can’t double create the same entry.
+      const now = serverTimestamp();
+      const common = {
+        ownerId: user?.uid ?? null,
+        pairId: pid ?? null,
+        value: pts,
+        reason: `Challenge: ${base.title ?? 'Challenge'}`,
+        source: 'challenge',
+        challengeId: base.id ?? null,
+        idempotencyKey,
+        createdAt: now,
       };
 
-      // 1) Optimistic UI bump (Home/Challenges listeners)
-      DeviceEventEmitter.emit(completionChannel, payload);
+      const writes: Promise<any>[] = [];
 
-      // 2) Persist a single points entry with pairId so both partners can read it
-      try {
-        const pid = user?.uid ? await getPairId(user.uid).catch(() => null) : null;
+      // Primary record in global /points with a deterministic id
+      writes.push(setDoc(doc(db, 'points', idempotencyKey), common));
 
-        await addDoc(collection(db, 'points'), {
-          ownerId: user?.uid ?? null,     // lets the creator always read/write
-          pairId: pid ?? null,            // enables partner to read via security rules
-          value: pts,
-          reason: `Challenge: ${base.title ?? 'Challenge'}`,
-          source: 'challenge',
-          challengeId: base.id ?? null,
-          createdAt: serverTimestamp(),
-        });
-      } catch (e) {
-        // Non-fatal: optimistic UI will still reflect completion; listeners will update when network succeeds next time
-        console.warn('Failed to persist challenge points', e);
+      // Mirror into /pairs/{pairId}/points for any screens reading that subcollection
+      if (pid) {
+        writes.push(setDoc(doc(db, 'pairs', pid, 'points', idempotencyKey), common));
+
+        // Also bump pair aggregates atomically so both devices stay in sync
+        const wk = weekKeyUTC(new Date());
+        writes.push(
+          updateDoc(doc(db, 'pairs', pid), {
+            totalPoints: increment(pts),
+            totalPointsUpdatedAt: now,
+          }).catch(() => {
+            // If the doc doesn't exist yet, create it with setDoc
+            return setDoc(
+              doc(db, 'pairs', pid),
+              { totalPoints: pts, totalPointsUpdatedAt: now },
+              { merge: true }
+            );
+          })
+        );
+
+        // Weekly bucket (used by Home weekly goals)
+        writes.push(
+          setDoc(
+            doc(db, 'pairs', pid, 'weekly', wk),
+            { points: increment(pts), weekKey: wk, updatedAt: now },
+            { merge: true }
+          )
+        );
       }
+
+      await Promise.all(writes);
     } finally {
       setSubmitting(false);
     }

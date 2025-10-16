@@ -32,16 +32,18 @@ import { usePro } from '../utils/subscriptions';
 import {
   collection,
   doc,
-  DocumentData,
   getDoc,
   onSnapshot,
   orderBy,
   query,
-  QuerySnapshot,
   serverTimestamp,
   setDoc,
   Timestamp,
   where,
+  type DocumentData,
+  type FirestoreError,
+  type Query,
+  type QuerySnapshot,
 } from 'firebase/firestore';
 import { db } from '../firebaseConfig';
 import { getPairId } from '../utils/partner';
@@ -194,7 +196,7 @@ function weekKeyUTC(d = new Date()) {
   const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
   const day = (date.getUTCDay() + 6) % 7; // Mon..Sun
   date.setUTCDate(date.getUTCDate() - day + 3); // Thu
-  const firstThursday = new Date(Date.UTC(date.getUTCFullYear(), 0, 4));
+  const firstThursday = new Date(Date.UTC(d.getUTCFullYear(), 0, 4));
   const firstDay = (firstThursday.getUTCDay() + 6) % 7;
   firstThursday.setUTCDate(firstThursday.getUTCDate() - firstDay + 3);
   const weekNo = 1 + Math.round((date.getTime() - firstThursday.getTime()) / (7 * 24 * 3600 * 1000));
@@ -326,7 +328,7 @@ export default function ChallengesScreen() {
       }
     })();
 
-    return () => {
+  return () => {
       if (unsubscribePair) unsubscribePair();
     };
   }, [user?.uid, isPremium, hasPro]);
@@ -345,7 +347,7 @@ export default function ChallengesScreen() {
     return `solo:${user?.uid ?? 'guest'}:${week}`;
   }, [pairId, user?.uid, pairLoaded]);
 
-  // ----- POINTS NORMALIZER -----
+  // ----- POINTS NORMALIZER & DEDUPE -----
   const getPointValue = (data: any): number => {
     const candidates = [data?.value, data?.points, data?.point, data?.amount, data?.delta, data?.score];
     for (const c of candidates) {
@@ -367,16 +369,59 @@ export default function ChallengesScreen() {
       return null;
     }
   };
+  const dedupeKey = (data: any, id: string) => String(data?.idempotencyKey ?? id);
 
-  /* ---------- WEEKLY TOTAL — UNION (pairId + both owners) ---------- */
+  /* ---------- MIRROR CHALLENGE COMPLETIONS INTO PAIR-SCOPED POINTS ---------- */
+  useEffect(() => {
+    // Your rules only let BOTH partners read a point if it has the right pairId.
+    // Some challenge writes appear to be owner-only; we mirror them to /points with pairId.
+    const sub = DeviceEventEmitter.addListener('lp.challenge.completed', async (payload: any) => {
+      try {
+        const pts = Number(payload?.points ?? payload?.value ?? payload?.score ?? 0);
+        if (!pts || !user?.uid || !pairId) return;
+
+        // Build a stable idempotency key per completion. Prefer provided one if exists.
+        const chId = String(payload?.challengeId ?? payload?.id ?? payload?.slug ?? 'challenge');
+        const key = String(payload?.idempotencyKey ?? `challenge:${pairId}:${chId}:${Date.now()}`);
+
+        const ref = doc(db, 'points', key);
+        await setDoc(ref, {
+          idempotencyKey: key,
+          value: pts,
+          source: 'challenge',
+          ownerId: user.uid,
+          pairId,
+          createdAt: serverTimestamp(),
+        }, { merge: true });
+
+        // Mirror into subcollection as well for screens that read /pairs/{pairId}/points
+        const subRef = doc(db, 'pairs', pairId, 'points', key);
+        await setDoc(subRef, {
+          idempotencyKey: key,
+          value: pts,
+          source: 'challenge',
+          ownerId: user.uid,
+          pairId,
+          createdAt: serverTimestamp(),
+        }, { merge: true });
+      } catch (e) {
+        console.warn('Pair mirror write failed:', e);
+      }
+    });
+    return () => sub.remove();
+  }, [user?.uid, pairId]);
+
+  /* ---------- WEEKLY TOTAL — UNION (owner + partner legacy + pair root + pair sub) ---------- */
   const [weeklyLive, setWeeklyLive] = useState<number | null>(null);
 
   useEffect(() => {
     if (!user?.uid) { setWeeklyLive(null); return; }
 
+    // ISO week window in UTC
     const since = startOfWeekMondayUTC();
     const until = new Date(since);
     until.setUTCDate(until.getUTCDate() + 7);
+
     const sinceTs = Timestamp.fromDate(since);
     const baseRef = collection(db, 'points');
 
@@ -392,28 +437,62 @@ export default function ChallengesScreen() {
     };
 
     const unsubs: Array<() => void> = [];
-    const tryAdd = (qRef: any) => {
-      const off = onSnapshot(
+
+    const add = (qRef: Query<DocumentData>, fbRef?: Query<DocumentData>) =>
+      onSnapshot(
         qRef,
-        (snap: any) => {
-          for (const d of snap.docs) buf.set(d.id, d.data());
+        (snap: QuerySnapshot<DocumentData>) => {
+          for (const d of snap.docs) buf.set(dedupeKey(d.data(), d.id), d.data());
           recompute();
         },
-        // Ignore permission or transient errors for this stream; others still contribute.
-        () => {}
+        (_err: FirestoreError) => {
+          if (!fbRef) return;
+          const off = onSnapshot(fbRef, (snap2: QuerySnapshot<DocumentData>) => {
+            for (const d of snap2.docs) buf.set(dedupeKey(d.data(), d.id), d.data());
+            recompute();
+          });
+          unsubs.push(off);
+        }
       );
-      unsubs.push(off);
-    };
 
-    // Pair docs
+    // mine (ownerId)
+    unsubs.push(
+      add(
+        query(baseRef, where('ownerId', '==', user.uid), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')) as Query<DocumentData>,
+        query(baseRef, where('ownerId', '==', user.uid)) as Query<DocumentData>
+      )
+    );
+
+    // shared pair docs (root)
     if (pairId) {
-      tryAdd(query(baseRef, where('pairId', '==', pairId), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')));
+      unsubs.push(
+        add(
+          query(baseRef, where('pairId', '==', pairId), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')) as Query<DocumentData>,
+          query(baseRef, where('pairId', '==', pairId)) as Query<DocumentData>
+        )
+      );
     }
-    // My docs
-    tryAdd(query(baseRef, where('ownerId', '==', user.uid), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')));
-    // Partner legacy owner-only docs
-    if (pairId && partnerUid) {
-      tryAdd(query(baseRef, where('ownerId', '==', partnerUid), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')));
+
+    // partner legacy owner-only
+    if (partnerUid) {
+      unsubs.push(
+        add(
+          query(baseRef, where('ownerId', '==', partnerUid), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')) as Query<DocumentData>,
+          query(baseRef, where('ownerId', '==', partnerUid)) as Query<DocumentData>
+        )
+      );
+    }
+
+    // optional mirror subcollection: /pairs/{pairId}/points
+    if (pairId) {
+      const offSub = onSnapshot(
+        collection(db, 'pairs', pairId, 'points'),
+        (snap) => {
+          for (const d of snap.docs) buf.set(dedupeKey(d.data(), d.id), d.data());
+          recompute();
+        }
+      );
+      unsubs.push(offSub);
     }
 
     return () => { unsubs.forEach((u) => u()); };
@@ -441,47 +520,52 @@ export default function ChallengesScreen() {
       ? Math.max(weeklyLive ?? 0, weeklyOptimistic.baseline + weeklyOptimistic.bump)
       : (weeklyLive ?? 0));
 
-  /* ---------- TOTAL POINTS — UNION (pairId + both owners) ---------- */
+  /* ---------- TOTAL POINTS — UNION (owner + partner legacy + pair root + pair sub) ---------- */
   const [totalLive, setTotalLive] = useState<number | null>(null);
 
   useEffect(() => {
     if (!user?.uid) { setTotalLive(null); return; }
-    const baseRef = collection(db, 'points');
 
-    // de-dupe by doc id across streams
-    const master = new Map<string, number>();
-    const apply = () => {
+    const baseRef = collection(db, 'points');
+    const buf = new Map<string, any>();
+    const recompute = () => {
       let sum = 0;
-      for (const v of master.values()) sum += Number(v) || 0;
+      for (const data of buf.values()) {
+        const v = getPointValue(data);
+        if (Number.isFinite(v)) sum += v;
+      }
       setTotalLive(Math.max(0, sum));
     };
 
     const unsubs: Array<() => void> = [];
-    const tryAdd = (qRef: any) => {
-      const off = onSnapshot(
+    const add = (qRef: Query<DocumentData>) =>
+      onSnapshot(
         qRef,
         (snap: QuerySnapshot<DocumentData>) => {
-          for (const d of snap.docs) master.set(d.id, getPointValue(d.data()));
-          apply();
-        },
-        // Ignore per-stream errors; other streams continue
-        () => {}
+          for (const d of snap.docs) buf.set(dedupeKey(d.data(), d.id), d.data());
+          recompute();
+        }
       );
-      unsubs.push(off);
-    };
 
-    // Pair (shared)
+    // mine
+    unsubs.push(add(query(baseRef, where('ownerId', '==', user.uid)) as Query<DocumentData>));
+    // partner legacy
+    if (partnerUid) unsubs.push(add(query(baseRef, where('ownerId', '==', partnerUid)) as Query<DocumentData>));
+    // shared pair (root)
+    if (pairId) unsubs.push(add(query(baseRef, where('pairId', '==', pairId)) as Query<DocumentData>));
+    // optional mirror subcollection
     if (pairId) {
-      tryAdd(query(baseRef, where('pairId', '==', pairId)));
-    }
-    // Mine
-    tryAdd(query(baseRef, where('ownerId', '==', user.uid)));
-    // Partner legacy owner-only
-    if (pairId && partnerUid) {
-      tryAdd(query(baseRef, where('ownerId', '==', partnerUid)));
+      const offSub = onSnapshot(
+        collection(db, 'pairs', pairId, 'points'),
+        (snap) => {
+          for (const d of snap.docs) buf.set(dedupeKey(d.data(), d.id), d.data());
+          recompute();
+        }
+      );
+      unsubs.push(offSub);
     }
 
-    return () => { for (const u of unsubs) try { u(); } catch {} };
+    return () => { unsubs.forEach((u) => u()); };
   }, [user?.uid, pairId, partnerUid]);
 
   const [totalOptimistic, setTotalOptimistic] = useState<{ bump: number; baseline: number } | null>(null);
@@ -652,6 +736,7 @@ export default function ChallengesScreen() {
         challengeId: (seed as any)?.id,
         seed,
         completionChannel: 'lp.challenge.completed' as const,
+        pairId, // ensure detail screen can write pair-scoped points
       };
       const targets = ['ChallengeDetail', 'ChallengeDetailScreen', 'Challenge', 'ChallengeDetails'];
       const navigators = [navRef, navRef.getParent?.()].filter(Boolean) as any[];
@@ -694,7 +779,7 @@ export default function ChallengesScreen() {
         Alert.alert('Challenge', 'Opening the challenge requires a "ChallengeDetail" screen in your navigator.');
       }
     },
-    [navRef]
+    [navRef, pairId]
   );
 
   /* ---------- header / footer ---------- */
@@ -957,7 +1042,7 @@ export default function ChallengesScreen() {
         </View>
       ) : null}
 
-      <SpotlightAutoStarter uid={user?.uid ?? null} steps={tourSteps} persistKey="tour-challenges-v7" />
+      <SpotlightAutoStarter uid={user?.uid ?? null} steps={tourSteps} persistKey="tour-challenges-v11" />
     </View>
   );
 }
@@ -978,7 +1063,7 @@ function Clamp({
         style={{ marginTop: 4 }}
         numberOfLines={expanded ? undefined : lines}
         onTextLayout={(e) => {
-          const n = e?.nativeEvent?.lines?.length ?? 0;
+          const n = (e?.nativeEvent?.lines?.length ?? 0);
           if (n > lines) setShowToggle(true);
         }}
         ellipsizeMode="tail"
@@ -990,6 +1075,7 @@ function Clamp({
           <ThemedText variant="label" color={dimColor}>{expanded ? 'Show less' : 'Read more'}</ThemedText>
         </Pressable>
       )}
+      {expanded && <View style={{ height: 4 }} />}
     </View>
   );
 }

@@ -11,6 +11,8 @@ import {
   onSnapshot,
   orderBy,
   query,
+  serverTimestamp,
+  setDoc,
   Timestamp,
   where,
   type DocumentData,
@@ -110,6 +112,11 @@ function getDocDate(data: any): Date | null {
     } catch {}
   }
   return null;
+}
+
+// Use a stable id across global + subcollection (prefers idempotencyKey)
+function dedupeKey(data: any, id: string) {
+  return String(data?.idempotencyKey ?? id);
 }
 
 function greeting() {
@@ -378,13 +385,13 @@ export default function HomeScreen() {
       onSnapshot(
         qRef,
         (snap: QuerySnapshot<DocumentData>) => {
-          for (const d of snap.docs) buf.set(d.id, d.data());
+          for (const d of snap.docs) buf.set(dedupeKey(d.data(), d.id), d.data());
           recompute();
         },
         (_err: FirestoreError) => {
           if (!fbRef) return;
           const off = onSnapshot(fbRef, (snap2: QuerySnapshot<DocumentData>) => {
-            for (const d of snap2.docs) buf.set(d.id, d.data());
+            for (const d of snap2.docs) buf.set(dedupeKey(d.data(), d.id), d.data());
             recompute();
           });
           unsubs.push(off);
@@ -424,7 +431,7 @@ export default function HomeScreen() {
       const offSub = onSnapshot(
         collection(db, 'pairs', pairId, 'points'),
         (snap) => {
-          for (const d of snap.docs) buf.set(`sub:${d.id}`, d.data());
+          for (const d of snap.docs) buf.set(dedupeKey(d.data(), d.id), d.data());
           recompute();
         }
       );
@@ -467,7 +474,7 @@ export default function HomeScreen() {
       onSnapshot(
         qRef,
         (snap: QuerySnapshot<DocumentData>) => {
-          for (const d of snap.docs) buf.set(d.id, d.data());
+          for (const d of snap.docs) buf.set(dedupeKey(d.data(), d.id), d.data());
           recompute();
         },
         (_err: FirestoreError) => {}
@@ -485,7 +492,7 @@ export default function HomeScreen() {
       const offSub = onSnapshot(
         collection(db, 'pairs', pairId, 'points'),
         (snap) => {
-          for (const d of snap.docs) buf.set(`sub:${d.id}`, d.data());
+          for (const d of snap.docs) buf.set(dedupeKey(d.data(), d.id), d.data());
           recompute();
         }
       );
@@ -494,6 +501,42 @@ export default function HomeScreen() {
 
     return () => { unsubs.forEach((u) => u()); };
   }, [user?.uid, pairId, partnerUid]);
+
+  // ---- Mirror challenge completions into shared pair points (root + subcollection)
+  useEffect(() => {
+    if (!user?.uid) return;
+
+    const sub = DeviceEventEmitter.addListener('lp.challenge.completed', async (payload: any) => {
+      try {
+        const pts = Number(payload?.points ?? payload?.value ?? payload?.score ?? 0);
+        if (!pts) return;
+
+        const chId = String(payload?.challengeId ?? payload?.id ?? payload?.slug ?? 'challenge');
+        const key = String(payload?.idempotencyKey ?? `challenge:${pairId ?? 'solo'}:${user.uid}:${chId}`);
+
+        const base = {
+          idempotencyKey: key,
+          value: pts,
+          source: 'challenge',
+          ownerId: user.uid,
+          pairId: pairId ?? null,
+          createdAt: serverTimestamp(),
+        };
+
+        // Root doc (merge so we can upgrade an owner-only write to pair-scoped)
+        await setDoc(doc(db, 'points', key), base, { merge: true });
+
+        // Subcollection mirror for any screens that read /pairs/{pairId}/points
+        if (pairId) {
+          await setDoc(doc(db, 'pairs', pairId, 'points', key), base, { merge: true });
+        }
+      } catch (e) {
+        console.warn('[home] pair mirror write failed:', e);
+      }
+    });
+
+    return () => sub.remove();
+  }, [user?.uid, pairId]);
 
   // ---- Optimistic bump on challenge completion
   useEffect(() => {
