@@ -1,12 +1,9 @@
 // navigation/AppNavigator.tsx
 import { Ionicons } from '@expo/vector-icons';
-import {
-  createBottomTabNavigator,
-  type BottomTabBarButtonProps,
-} from '@react-navigation/bottom-tabs';
+import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import React, { useState } from 'react';
-import { Alert, Platform, Pressable, ScrollView, Text, View } from 'react-native';
+import { Alert, Platform, ScrollView, Text, View } from 'react-native';
 
 import ChallengesScreen from '../screens/ChallengesScreen';
 import HomeScreen from '../screens/HomeScreen';
@@ -21,7 +18,7 @@ import RemindersStack from './RemindersStack';
 
 import Button from '../components/Button';
 import Card from '../components/Card';
-import { SpotlightProvider } from '../components/spotlight';
+import { SpotlightProvider, SpotlightTarget } from '../components/spotlight';
 import ThemedText from '../components/ThemedText';
 import { useTokens } from '../components/ThemeProvider';
 import useAuthListener from '../hooks/useAuthListener';
@@ -133,21 +130,11 @@ function ChallengeDetailScreen({ route, navigation }: any) {
   );
 }
 
-function withAlpha(hex: string, alpha: number) {
-  const h = hex.replace('#', '');
-  const full = h.length === 3 ? h.split('').map((c) => c + c).join('') : h;
-  const r = parseInt(full.substring(0, 2), 16);
-  const g = parseInt(full.substring(2, 4), 16);
-  const b = parseInt(full.substring(4, 6), 16);
-  return `rgba(${r},${g},${b},${alpha})`;
-}
-
 function Tabs() {
   const { user } = useAuthListener();
   const { badge } = usePendingRemindersBadge(user?.uid ?? null);
   const t = useTokens();
 
-  // Slightly bigger iOS icon; smaller label that auto-shrinks to fit
   const iosIcon = (fallback: number) => (Platform.OS === 'ios' ? 23 : fallback);
   const makeIOSLabel =
     (text: string) =>
@@ -164,45 +151,41 @@ function Tabs() {
         </Text>
       );
 
-  const renderTabBarButton = (props: BottomTabBarButtonProps) =>
-    Platform.OS === 'android' ? (
-      <Pressable
-        {...(props as any)}
-        android_ripple={{ color: withAlpha(t.colors.primary, 0.14), radius: 46, borderless: false }}
-        style={[props.style, { overflow: 'hidden', borderRadius: 24 }]}
-      />
-    ) : (
-      (props as any).children
-    );
-
   return (
     <Tab.Navigator
       initialRouteName="Home"
       backBehavior="history"
       screenOptions={() => ({
         headerShown: false,
-
         tabBarActiveTintColor: t.colors.primary,
         tabBarInactiveTintColor: t.colors.textDim,
 
-        tabBarStyle:
-          Platform.OS === 'ios'
-            ? { backgroundColor: t.colors.card, borderTopColor: t.colors.border }
-            : { backgroundColor: t.colors.card, borderTopColor: t.colors.border, height: 60, paddingTop: 6 },
+        // Make the real tab bar the Spotlight target on iOS so we can highlight it.
+        tabBarBackground: () =>
+          Platform.OS === 'ios' ? (
+            <SpotlightTarget id="tabbar" style={{ flex: 1 }}>
+              <View style={{ flex: 1, backgroundColor: t.colors.card }} />
+            </SpotlightTarget>
+          ) : (
+            <View style={{ flex: 1, backgroundColor: t.colors.card }} />
+          ),
 
-        tabBarItemStyle: Platform.OS === 'android' ? { paddingVertical: 2 } : undefined,
-        tabBarIconStyle: undefined,
+        tabBarStyle: {
+          backgroundColor: 'transparent',
+          borderTopColor: t.colors.border,
+        },
 
-        // Android uses default label style; iOS labels are custom components above
-        tabBarLabelStyle: Platform.OS === 'android'
-          ? { fontSize: 12, fontWeight: '600', letterSpacing: 0.2 }
-          : undefined,
+        tabBarItemStyle: Platform.OS === 'android' ? { paddingVertical: 0 } : undefined,
+        tabBarLabelStyle:
+          Platform.OS === 'android'
+            ? { fontSize: 12, fontWeight: '600', letterSpacing: 0.2, includeFontPadding: false }
+            : undefined,
 
         tabBarAllowFontScaling: Platform.OS !== 'ios',
-        tabBarButton: Platform.OS === 'android' ? renderTabBarButton : undefined,
         tabBarHideOnKeyboard: true,
         lazy: true,
         detachInactiveScreens: true,
+        sceneContainerStyle: { backgroundColor: t.colors.bg },
       })}
     >
       <Tab.Screen

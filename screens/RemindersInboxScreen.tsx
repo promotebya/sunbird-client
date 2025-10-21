@@ -70,75 +70,113 @@ export default function RemindersInboxScreen() {
     undo?: () => Promise<void> | void;
   }>({ visible: false, msg: '' });
 
+  // 🔁 Keep inbox lists in sync. Filter OUT dismissed items so they vanish after "Dismiss".
   useEffect(() => {
     if (!user) return;
     const unsub = subscribeRemindersForUid(user.uid, (p, sList) => {
-      setPending(p);
-      setScheduled(sList);
+      const onlyPending = (p ?? []).filter((r: any) => (r?.status ?? 'pending') === 'pending');
+      const onlyScheduled = (sList ?? []).filter((r: any) => (r?.status ?? 'scheduled') === 'scheduled');
+      setPending(onlyPending);
+      setScheduled(onlyScheduled); // NOTE: dismissed items are intentionally excluded
     });
     return () => unsub && unsub();
   }, [user]);
 
-  const renderRightActions = (
-    _progress: Animated.AnimatedInterpolation<number>,
-    _dragX: Animated.AnimatedInterpolation<number>,
-    item: ReminderDoc,
-    isPending: boolean
-  ) => {
-    if (isPending) {
-      return (
-        <View style={s.actionsRow}>
-          <ActionButton color={t.colors.primary} label="Schedule" onPress={() => onSchedule(item)} />
-          <ActionButton color="#EF4444" label="Delete" onPress={() => onDelete(item)} />
-        </View>
-      );
-    }
-    return (
-      <View style={s.actionsRow}>
-        <ActionButton color="#6B7280" label="Dismiss" onPress={() => onDismiss(item)} />
-      </View>
-    );
-  };
+  // Optimistic helpers
+  const removeFromPending = (id: string) =>
+    setPending(prev => prev.filter(r => r.id !== id));
+  const removeFromScheduled = (id: string) =>
+    setScheduled(prev => prev.filter(r => r.id !== id));
+  const movePendingToScheduled = (id: string) =>
+    setPending(prev => prev.filter(r => r.id !== id));
 
   async function onSchedule(item: ReminderDoc) {
-    await updateReminderStatus(item.id, 'scheduled');
-    setToast({ visible: true, msg: 'Scheduled', undo: async () => updateReminderStatus(item.id, 'pending') });
+    // optimistic: move out of pending (server sub will populate scheduled)
+    movePendingToScheduled(item.id);
+    try {
+      await updateReminderStatus(item.id, 'scheduled');
+      setToast({ visible: true, msg: 'Scheduled', undo: async () => updateReminderStatus(item.id, 'pending') });
+    } catch (e: any) {
+      // revert
+      setPending(prev => [item, ...prev]);
+      Alert.alert('Could not schedule', e?.message ?? 'Please try again.');
+    }
   }
 
   async function onDelete(item: ReminderDoc) {
     const backup = item;
-    await removeReminder(item.id);
-    setToast({
-      visible: true,
-      msg: 'Reminder deleted',
-      undo: async () => {
-        const { id, ...payload } = backup as any;
-        await addDoc(collection(db, 'reminders'), { ...payload, status: 'pending' });
-      },
-    });
+    // optimistic remove from pending list
+    removeFromPending(item.id);
+    try {
+      await removeReminder(item.id);
+      setToast({
+        visible: true,
+        msg: 'Reminder deleted',
+        undo: async () => {
+          const { id, ...payload } = backup as any;
+          await addDoc(collection(db, 'reminders'), { ...payload, status: 'pending' });
+        },
+      });
+    } catch (e: any) {
+      // revert
+      setPending(prev => [backup, ...prev]);
+      Alert.alert('Could not delete', e?.message ?? 'Please try again.');
+    }
   }
 
   async function onDismiss(item: ReminderDoc) {
-    await updateReminderStatus(item.id, 'dismissed');
-    setToast({ visible: true, msg: 'Dismissed', undo: async () => updateReminderStatus(item.id, 'scheduled') });
+    // optimistic remove from scheduled list; subscription will NOT re-add (we filter dismissed)
+    removeFromScheduled(item.id);
+    try {
+      await updateReminderStatus(item.id, 'dismissed');
+      setToast({ visible: true, msg: 'Dismissed', undo: async () => updateReminderStatus(item.id, 'scheduled') });
+    } catch (_e) {
+      // Fallback to hard delete if status update not supported
+      try {
+        await removeReminder(item.id);
+        setToast({ visible: true, msg: 'Dismissed', undo: undefined });
+      } catch (e2: any) {
+        // revert on failure
+        setScheduled(prev => [item, ...prev]);
+        Alert.alert('Could not dismiss', e2?.message ?? 'Please try again.');
+      }
+    }
   }
 
-  // bulk helpers to make the screen purposeful
+  // bulk helpers
   async function scheduleAll() {
     if (!pending.length) return;
-    for (const r of pending) await updateReminderStatus(r.id, 'scheduled');
-    setToast({ visible: true, msg: `Scheduled ${pending.length} reminder${pending.length === 1 ? '' : 's'}` });
+    const toRun = [...pending];
+    // optimistic: clear pending
+    setPending([]);
+    try {
+      for (const r of toRun) await updateReminderStatus(r.id, 'scheduled');
+      setToast({ visible: true, msg: `Scheduled ${toRun.length} reminder${toRun.length === 1 ? '' : 's'}` });
+    } catch (e: any) {
+      // revert if anything fails
+      setPending(toRun);
+      Alert.alert('Could not schedule all', e?.message ?? 'Please try again.');
+    }
   }
+
   async function deleteAll() {
     if (!pending.length) return;
-    Alert.alert('Delete all pending?', `Remove ${pending.length} reminder${pending.length === 1 ? '' : 's'}?`, [
+    const toRun = [...pending];
+    Alert.alert('Delete all pending?', `Remove ${toRun.length} reminder${toRun.length === 1 ? '' : 's'}?`, [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Delete',
         style: 'destructive',
         onPress: async () => {
-          for (const r of pending) await removeReminder(r.id);
-          setToast({ visible: true, msg: 'Pending reminders deleted' });
+          // optimistic
+          setPending([]);
+          try {
+            for (const r of toRun) await removeReminder(r.id);
+            setToast({ visible: true, msg: 'Pending reminders deleted' });
+          } catch (e: any) {
+            setPending(toRun);
+            Alert.alert('Could not delete all', e?.message ?? 'Please try again.');
+          }
         },
       },
     ]);
@@ -147,14 +185,39 @@ export default function RemindersInboxScreen() {
   const Row = ({ item, isPending }: { item: ReminderDoc; isPending: boolean }) => {
     const swipeRef = useRef<Swipeable>(null);
     const dot = isPending ? t.colors.primary : '#6B7280';
+
+    // Close the row before acting to ensure the tap isn't swallowed by gesture state.
+    const closeSwipe = () => swipeRef.current?.close();
+
+    const onScheduleRow = () => { closeSwipe(); onSchedule(item); };
+    const onDeleteRow   = () => { closeSwipe(); onDelete(item); };
+    const onDismissRow  = () => { closeSwipe(); onDismiss(item); };
+
+    const renderRightActions = (
+      _progress: Animated.AnimatedInterpolation<number>,
+      _dragX: Animated.AnimatedInterpolation<number>,
+    ) => {
+      if (isPending) {
+        return (
+          <View style={s.actionsRow}>
+            <ActionButton color={t.colors.primary} label="Schedule" onPress={onScheduleRow} />
+            <ActionButton color="#EF4444" label="Delete" onPress={onDeleteRow} />
+          </View>
+        );
+      }
+      return (
+        <View style={s.actionsRow}>
+          <ActionButton color="#6B7280" label="Dismiss" onPress={onDismissRow} />
+        </View>
+      );
+    };
+
     return (
       <Swipeable
         ref={swipeRef}
         friction={2}
         rightThreshold={40}
-        renderRightActions={(progress, dragX) =>
-          renderRightActions(progress, dragX, item, isPending)
-        }
+        renderRightActions={renderRightActions}
       >
         <Card>
           <View style={s.row}>
@@ -168,14 +231,14 @@ export default function RemindersInboxScreen() {
 
             {isPending ? (
               <>
-                <Pressable onPress={() => onSchedule(item)} style={[s.btn, s.btnPrimary]} accessibilityRole="button">
+                <Pressable onPress={onScheduleRow} style={[s.btn, s.btnPrimary]} accessibilityRole="button">
                   <ThemedText variant="button" color="#fff">Schedule</ThemedText>
                 </Pressable>
                 <Pressable
                   onPress={() =>
                     Alert.alert('Delete?', 'Remove this reminder?', [
                       { text: 'Cancel', style: 'cancel' },
-                      { text: 'Delete', style: 'destructive', onPress: () => onDelete(item) },
+                      { text: 'Delete', style: 'destructive', onPress: onDeleteRow },
                     ])
                   }
                   style={[s.btn, s.btnGhost]}
@@ -185,7 +248,7 @@ export default function RemindersInboxScreen() {
                 </Pressable>
               </>
             ) : (
-              <Pressable onPress={() => onDismiss(item)} style={[s.btn, s.btnGhost]} accessibilityRole="button">
+              <Pressable onPress={onDismissRow} style={[s.btn, s.btnGhost]} accessibilityRole="button">
                 <ThemedText variant="button">Dismiss</ThemedText>
               </Pressable>
             )}
@@ -195,18 +258,18 @@ export default function RemindersInboxScreen() {
     );
   };
 
-  // build sections based on filter
+  // build sections based on filter (dismissed are already filtered out)
   const sections = useMemo(() => {
     const base: { title: string; data: ReminderDoc[]; isPending: boolean }[] = [];
     const add = (title: string, data: ReminderDoc[], isPending: boolean) => base.push({ title, data, isPending });
 
     if (filter === 'all') {
       add('Pending', pending, true);
-      add('Scheduled / Handled', scheduled, false);
+      add('Scheduled', scheduled, false);
     } else if (filter === 'pending') {
       add('Pending', pending, true);
     } else {
-      add('Scheduled / Handled', scheduled, false);
+      add('Scheduled', scheduled, false);
     }
     return base;
   }, [filter, pending, scheduled]);

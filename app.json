@@ -5,11 +5,10 @@
     "scheme": "lovepoints",
     "version": "1.0.0",
     "orientation": "portrait",
-    "userInterfaceStyle": "automatic",
+    "userInterfaceStyle": "light",
 
     "icon": "./assets/icon.png",
 
-    
     "splash": {
       "image": "./assets/splash-blank.png",
       "resizeMode": "cover",
@@ -21,7 +20,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.promotebya.LovePointsApp",
-      "buildNumber": "1.0.2",
+      "buildNumber": "1.0.5",
       "infoPlist": {
         "NSPhotoLibraryUsageDescription": "We need access to your photos to add memories.",
         "NSCameraUsageDescription": "We use your camera to capture memory photos and scan QR codes.",
@@ -43,12 +42,21 @@
         "android.permission.RECORD_AUDIO",
         "android.permission.POST_NOTIFICATIONS"
       ],
-      
       "splash": {
         "image": "./assets/splash-blank.png",
         "resizeMode": "cover",
         "backgroundColor": "#FFFFFF"
       }
+    },
+
+    "androidStatusBar": {
+      "barStyle": "dark-content",
+      "backgroundColor": "#FFFFFF",
+      "translucent": false
+    },
+    "androidNavigationBar": {
+      "backgroundColor": "#FFFFFF",
+      "barStyle": "dark-content"
     },
 
     "notification": {
@@ -71,7 +79,6 @@
           "cameraPermission": "Allow LovePoints to use the camera to scan QR codes and take photos."
         }
       ],
-      
       "expo-notifications"
     ],
 

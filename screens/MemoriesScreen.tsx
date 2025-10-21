@@ -35,8 +35,8 @@ import { createMemory, subscribeMemories, type MemoryDoc, type MemoryKind } from
 import { getPairId } from '../utils/partner';
 import { generateFilename, uploadFileToStorage } from '../utils/storage';
 
-type Tab = 'photo' | 'text' | 'milestone';
-type Filter = 'all' | Tab; // timeline filter
+type Tab = 'photo' | 'milestone';              // ❌ removed 'text'
+type Filter = 'all' | 'photo' | 'milestone';   // ❌ removed 'text'
 type OptMem = MemoryDoc & { optimistic?: true };
 
 const PROMPTS = [
@@ -67,8 +67,8 @@ const MemoriesScreen: React.FC = () => {
   const insets = useSafeAreaInsets();
   const tabBarHeight = useBottomTabBarHeight();
 
-  const [tab, setTab] = useState<Tab>('text'); // add-type selector (top)
-  const [filter, setFilter] = useState<Filter>('all'); // timeline filter (top)
+  const [tab, setTab] = useState<Tab>('photo');    // 👉 default to 'photo'
+  const [filter, setFilter] = useState<Filter>('all');
   const [pairId, setPairId] = useState<string | null>(null);
   const [serverItems, setServerItems] = useState<MemoryDoc[]>([]);
   const [optimistic, setOptimistic] = useState<OptMem[]>([]);
@@ -212,8 +212,9 @@ const MemoriesScreen: React.FC = () => {
     setSaving(true);
     try {
       const clientTag = randid();
-      if (tab === 'text' || tab === 'milestone') {
-        const kind: MemoryKind = tab;
+
+      if (tab === 'milestone') {
+        // ➕ Milestone only
         const tTitle = title.trim();
         const tNote = note.trim();
         if (!tTitle && !tNote) {
@@ -224,7 +225,7 @@ const MemoriesScreen: React.FC = () => {
             clientTag,
             ownerId: user.uid,
             pairId,
-            kind,
+            kind: 'milestone',
             title: tTitle,
             note: tNote,
             photoURL: null,
@@ -232,11 +233,12 @@ const MemoriesScreen: React.FC = () => {
             optimistic: true,
           };
           setOptimistic((prev) => [opt, ...prev]);
-          await createMemory({ ownerId: user.uid, pairId, kind, title: tTitle, note: tNote, clientTag });
+          await createMemory({ ownerId: user.uid, pairId, kind: 'milestone', title: tTitle, note: tNote, clientTag });
           setTitle('');
           setNote('');
         }
       } else {
+        // ➕ Photo (optional title/note)
         if (!imageUri) {
           Alert.alert('Pick or capture a photo', 'Choose or capture a photo to upload.');
         } else {
@@ -290,26 +292,24 @@ const MemoriesScreen: React.FC = () => {
     }
   }
 
-  // ---------- nicer badges + segmented metadata ----------
+  // ---------- badges/meta ----------
   const KIND_META: Record<
     MemoryKind,
     { label: string; icon: keyof typeof Ionicons.glyphMap; tint: string; bg: string }
   > = {
     photo:     { label: 'Photo',     icon: 'image-outline',               tint: t.colors.primary, bg: withAlpha(t.colors.primary, 0.12) },
-    text:      { label: 'Note',      icon: 'chatbubble-ellipses-outline', tint: '#8B5CF6',       bg: withAlpha('#8B5CF6', 0.12) },
+    text:      { label: 'Note',      icon: 'chatbubble-ellipses-outline', tint: '#8B5CF6',       bg: withAlpha('#8B5CF6', 0.12) }, // keep for existing items
     milestone: { label: 'Milestone', icon: 'trophy-outline',              tint: '#F59E0B',       bg: withAlpha('#F59E0B', 0.16) },
   };
 
   const FILTER_META: Record<Filter, { label: string; icon: keyof typeof Ionicons.glyphMap }> = {
     all:       { label: 'All',       icon: 'apps-outline' },
     photo:     { label: 'Photo',     icon: 'image-outline' },
-    text:      { label: 'Text',      icon: 'chatbubble-ellipses-outline' },
     milestone: { label: 'Milestone', icon: 'trophy-outline' },
   };
 
   const ADD_META: Record<Tab, { label: string; icon: keyof typeof Ionicons.glyphMap }> = {
     photo:     { label: 'Photo',     icon: 'image-outline' },
-    text:      { label: 'Text',      icon: 'create-outline' },
     milestone: { label: 'Milestone', icon: 'trophy-outline' },
   };
 
@@ -339,7 +339,7 @@ const MemoriesScreen: React.FC = () => {
                 title={item.title ?? undefined}
                 note={item.note ?? undefined}
                 photoURL={item.photoURL ?? undefined}
-                {...({ accentColor: t.colors.primary } as any)}  // themed Share button
+                {...({ accentColor: t.colors.primary } as any)}
               />
             </Card>
           </SpotlightTarget>
@@ -349,7 +349,7 @@ const MemoriesScreen: React.FC = () => {
               title={item.title ?? undefined}
               note={item.note ?? undefined}
               photoURL={item.photoURL ?? undefined}
-              {...({ accentColor: t.colors.primary } as any)}  // themed Share button
+              {...({ accentColor: t.colors.primary } as any)}
             />
           </Card>
         )}
@@ -357,13 +357,13 @@ const MemoriesScreen: React.FC = () => {
     );
   };
 
-  // Tutorial
+  // Tutorial (copy tweaked: photo or milestone)
   const tourSteps = useMemo<SpotlightStep[]>(
     () => [
-      { id: 'mem-welcome', targetId: null, title: 'Memories 📸', text: 'Save sweet moments as photos or notes. Quick 20-second tour?', placement: 'bottom', allowBackdropTapToNext: true },
+      { id: 'mem-welcome', targetId: null, title: 'Memories 📸', text: 'Save sweet moments as photos or milestones. Quick 20-second tour?', placement: 'bottom', allowBackdropTapToNext: true },
       { id: 'mem-prompt', targetId: 'mem-prompt-card', title: 'Today’s prompt', text: 'Use these ideas to quickly capture a moment.', placement: 'top', padding: 10 },
       { id: 'mem-shuffle-step', targetId: 'mem-shuffle', title: 'Shuffle', text: 'Tap to get a different idea.', placement: 'top', padding: 10 },
-      { id: 'mem-add', targetId: 'mem-add-section', title: 'Add memory', text: 'Create a new memory with a photo or a quick note.', placement: 'top', padding: 12 },
+      { id: 'mem-add', targetId: 'mem-add-section', title: 'Add memory', text: 'Create a new memory with a photo or milestone.', placement: 'top', padding: 12 },
     ],
     []
   );
@@ -393,9 +393,9 @@ const MemoriesScreen: React.FC = () => {
               <Button label="Settings" variant="outline" onPress={() => nav.navigate('Settings')} />
             </View>
 
-            {/* Add-type selector (top) with icons */}
+            {/* Add-type selector (photo | milestone) */}
             <View style={s.segmented}>
-              {(['photo', 'text', 'milestone'] as const).map((key) => {
+              {(['photo', 'milestone'] as const).map((key) => {
                 const active = tab === key;
                 const meta = ADD_META[key];
                 return (
@@ -537,7 +537,7 @@ const MemoriesScreen: React.FC = () => {
                     <TextInput
                       value={title}
                       onChangeText={setTitle}
-                      placeholder={tab === 'text' ? 'Title' : 'Milestone title'}
+                      placeholder="Milestone title"
                       placeholderTextColor={t.colors.textDim}
                       style={s.input}
                       editable={!!pairId}
@@ -562,11 +562,11 @@ const MemoriesScreen: React.FC = () => {
               </Card>
             </SpotlightTarget>
 
-            {/* Timeline filter (above timeline) with icons */}
+            {/* Timeline filter (all | photo | milestone) */}
             <Card style={{ marginTop: t.spacing.md }}>
               <ThemedText variant="subtitle" style={{ marginBottom: 8 }}>Show</ThemedText>
               <View style={s.segmented}>
-                {(['all', 'photo', 'text', 'milestone'] as const).map((key) => {
+                {(['all', 'photo', 'milestone'] as const).map((key) => {
                   const active = filter === key;
                   const meta = FILTER_META[key];
                   return (
@@ -624,7 +624,7 @@ const styles = (t: ThemeTokens) =>
     // Segmented controls (chips)
     segmented: {
       flexDirection: 'row',
-      flexWrap: 'wrap',           // allow content to stay inside borders on small screens
+      flexWrap: 'wrap',
       gap: 8,
       marginBottom: 12,
     },
@@ -632,12 +632,12 @@ const styles = (t: ThemeTokens) =>
       alignItems: 'center',
       justifyContent: 'center',
       paddingVertical: 10,
-      paddingHorizontal: 14,      // explicit horizontal padding
+      paddingHorizontal: 14,
       borderRadius: 14,
       backgroundColor: CHIP_BG,
       borderWidth: 1,
       borderColor: HAIRLINE,
-      minWidth: 0,                // enable text to respect container width
+      minWidth: 0,
     },
     segmentActive: {
       backgroundColor: '#FFFFFF',

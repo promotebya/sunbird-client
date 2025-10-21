@@ -7,10 +7,14 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Linking,
+  Modal,
+  Platform,
   Pressable,
   ScrollView,
   Share,
   StyleSheet,
+  TextInput,
   View,
 } from 'react-native';
 
@@ -34,7 +38,8 @@ import {
 import { showOpenSettingsAlert } from '../utils/permissions';
 
 import { useNavigation } from '@react-navigation/native';
-import { signOut } from 'firebase/auth';
+import { deleteUser, EmailAuthProvider, linkWithCredential, signOut } from 'firebase/auth';
+import ToastUndo from '../components/ToastUndo'; // ✅ use same toast component as Tasks
 import { auth } from '../firebaseConfig';
 
 /** Local alias to avoid TS namespace issues */
@@ -123,6 +128,7 @@ const SettingsScreen: React.FC = () => {
   const t = useTokens();
 
   const { user } = useAuthListener();
+  const isDemo = !!user?.isAnonymous;
 
   // When unlinking, pause any partner-related hooks to avoid partner reads
   const [unlinking, setUnlinking] = useState(false);
@@ -142,6 +148,18 @@ const SettingsScreen: React.FC = () => {
   // Camera permission via expo-camera
   const [camPerm, requestCamPermission] = useCameraPermissions();
   const camStatus: SimplePermissionStatus = camPerm?.status ?? 'checking';
+
+  // Upgrade (demo → real) modal state
+  const [showUpgrade, setShowUpgrade] = useState(false);
+  const [upgradeEmail, setUpgradeEmail] = useState('');
+  const [upgradePassword, setUpgradePassword] = useState('');
+  const [upgradeLoading, setUpgradeLoading] = useState(false);
+
+  // Toast (same API as TasksScreen)
+  const [toast, setToast] = useState<{ visible: boolean; msg: string; undo?: () => Promise<void> | void; }>(
+    { visible: false, msg: '' }
+  );
+  const showToast = (message: string) => setToast({ visible: true, msg: message });
 
   useEffect(() => {
     (async () => {
@@ -249,7 +267,31 @@ const SettingsScreen: React.FC = () => {
     return 'Not linked yet';
   }, [linked, pairId, pairInfo]);
 
+  // Demo-aware sign out confirmation
   function onConfirmSignOut() {
+    if (isDemo) {
+      Alert.alert(
+        'Sign out of demo?',
+        "You're using a demo account. If you sign out now, your current data won't be saved to any real account.",
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Create account', onPress: () => setShowUpgrade(true) },
+          {
+            text: 'Sign out anyway',
+            style: 'destructive',
+            onPress: async () => {
+              try {
+                await signOut(auth);
+              } catch (e: any) {
+                Alert.alert('Sign out failed', e?.message ?? 'Please try again.');
+              }
+            },
+          },
+        ]
+      );
+      return;
+    }
+
     Alert.alert('Sign out', 'Are you sure you want to sign out?', [
       { text: 'Cancel', style: 'cancel' },
       {
@@ -294,168 +336,369 @@ const SettingsScreen: React.FC = () => {
     );
   };
 
+  // Opens subscription management on each platform
+  function openManageSubscription() {
+    if (Platform.OS === 'ios') {
+      const iosDeepLink = 'itms-apps://apps.apple.com/account/subscriptions';
+      Linking.openURL(iosDeepLink).catch(() =>
+        Linking.openURL('https://apps.apple.com/account/subscriptions')
+      );
+    } else {
+      Linking.openURL('https://play.google.com/store/account/subscriptions');
+    }
+  }
+
+  // Delete account: unlink → optional backend wipe → Auth delete
+  async function onDeleteAccount() {
+    if (!user?.uid) return;
+
+    Alert.alert(
+      'Delete account?',
+      'This will permanently remove your account, points, memories, notes and pairing. It cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              // Best-effort unlink first
+              try { await unlinkPair(user.uid); } catch {}
+
+              // Optional: backend wipe (if you add a CF later)
+              try {
+                // @ts-ignore
+                const { functions } = await import('../firebaseConfig');
+                // @ts-ignore
+                const { httpsCallable } = await import('firebase/functions');
+                // @ts-ignore
+                if (functions && httpsCallable) {
+                  // @ts-ignore
+                  const wipe = httpsCallable(functions, 'deleteUserData');
+                  await wipe({});
+                }
+              } catch {
+                // Ignore if not configured
+              }
+
+              // Delete Firebase Auth user (may require recent login)
+              if (auth.currentUser) {
+                await deleteUser(auth.currentUser);
+              }
+
+              Alert.alert('Deleted', 'Your account has been removed.');
+            } catch (e: any) {
+              if (e?.code === 'auth/requires-recent-login') {
+                Alert.alert(
+                  'Please re-authenticate',
+                  'For security, please sign in again and then delete your account.'
+                );
+              } else {
+                Alert.alert('Delete failed', e?.message ?? 'Please try again.');
+              }
+            }
+          },
+        },
+      ]
+    );
+  }
+
+  // Upgrade demo → real (link email/password)
+  async function onUpgradeAccount() {
+    if (!auth.currentUser || !isDemo) {
+      setShowUpgrade(false);
+      return;
+    }
+    const email = upgradeEmail.trim();
+    const password = upgradePassword;
+
+    if (!email || !password) {
+      Alert.alert('Missing info', 'Please enter an email and password.');
+      return;
+    }
+    setUpgradeLoading(true);
+    try {
+      const cred = EmailAuthProvider.credential(email, password);
+      await linkWithCredential(auth.currentUser, cred);
+
+      setShowUpgrade(false);
+      setUpgradeEmail('');
+      setUpgradePassword('');
+
+      // ✅ Toast success (same pattern as TasksScreen)
+      showToast('Account saved! Your demo is now a real account ✨');
+    } catch (e: any) {
+      let msg = 'Please try again.';
+      switch (e?.code) {
+        case 'auth/email-already-in-use':
+          msg = 'That email is already in use. Use a different email.';
+          break;
+        case 'auth/invalid-email':
+          msg = 'Please enter a valid email address.';
+          break;
+        case 'auth/weak-password':
+          msg = 'Password should be at least 6 characters.';
+          break;
+        case 'auth/credential-already-in-use':
+          msg = 'These credentials are linked to another account.';
+          break;
+      }
+      Alert.alert('Upgrade failed', msg);
+    } finally {
+      setUpgradeLoading(false);
+    }
+  }
+
   const showNotifOpenSettings = notifStatus === 'denied';
   const showLibOpenSettings = libStatus === 'denied';
   const showCamOpenSettings = camStatus === 'denied';
 
+  const manageSubtitle = Platform.select({
+    ios: 'Opens App Store',
+    android: 'Opens Google Play',
+    default: undefined,
+  });
+
   return (
-    <ScrollView
-      style={{ flex: 1, backgroundColor: t.colors.bg }}
-      contentContainerStyle={{ padding: tokens.spacing.md }}
-    >
-      <ThemedText variant="display" style={{ marginBottom: tokens.spacing.md }}>
-        Settings
-      </ThemedText>
-
-      {/* Partner linking */}
-      <Card>
-        <View style={styles.sectionHeader}>
-          <ThemedText variant="h2">Partner linking</ThemedText>
-          {linked ? (
-            <Badge label="Linked" bg="#ECFDF5" color="#065F46" />
-          ) : (
-            <Badge label="Not linked" bg="#FEF2F2" color="#991B1B" />
-          )}
-        </View>
-
-        <ThemedText variant="caption" color={t.colors.textDim} style={{ marginBottom: tokens.spacing.s }}>
-          Link with your partner to share points, tasks, memories, and notes.
+    <>
+      <ScrollView
+        style={{ flex: 1, backgroundColor: t.colors.bg }}
+        contentContainerStyle={{ padding: tokens.spacing.md }}
+      >
+        <ThemedText variant="display" style={{ marginBottom: tokens.spacing.md }}>
+          Settings
         </ThemedText>
 
-        <Row
-          icon="link"
-          title={linked ? 'Accounts linked' : 'Generate invite code'}
-          subtitle={pairSubtitle}
-          right={
-            loadingPair ? (
-              <ActivityIndicator />
-            ) : linked ? (
-              <Ionicons name="checkmark-circle" size={22} color="#10B981" />
+        {/* Partner linking */}
+        <Card>
+          <View style={styles.sectionHeader}>
+            <ThemedText variant="h2">Partner linking</ThemedText>
+            {linked ? (
+              <Badge label="Linked" bg="#ECFDF5" color="#065F46" />
             ) : (
-              <Button label="Create code" onPress={onGenerateCode} />
-            )
-          }
-        />
+              <Badge label="Not linked" bg="#FEF2F2" color="#991B1B" />
+            )}
+          </View>
 
-        {/* When NOT linked: show QR + actions */}
-        {!linked && pairInfo?.code ? (
-          <>
-            <View style={styles.codeBox}>
-              <ThemedText variant="display" center>
-                {pairInfo.code}
+          <ThemedText variant="caption" color={t.colors.textDim} style={{ marginBottom: tokens.spacing.s }}>
+            Link with your partner to share points, tasks, memories, and notes.
+          </ThemedText>
+
+          <Row
+            icon="link"
+            title={linked ? 'Accounts linked' : 'Generate invite code'}
+            subtitle={pairSubtitle}
+            right={
+              loadingPair ? (
+                <ActivityIndicator />
+              ) : linked ? (
+                <Ionicons name="checkmark-circle" size={22} color="#10B981" />
+              ) : (
+                <Button label="Create code" onPress={onGenerateCode} />
+              )
+            }
+          />
+
+          {/* When NOT linked: show QR + actions */}
+          {!linked && pairInfo?.code ? (
+            <>
+              <View style={styles.codeBox}>
+                <ThemedText variant="display" center>
+                  {pairInfo.code}
+                </ThemedText>
+              </View>
+
+              <PairingQR code={pairInfo.code} />
+
+              <View style={styles.rowBtns}>
+                <Button label="Share" onPress={onShareCode} />
+                <LinkButton title="Enter code" onPress={onRedeemPrompt} />
+                <LinkButton title="Scan code" onPress={() => nav.navigate('PairingScan')} />
+              </View>
+            </>
+          ) : null}
+
+          {/* When linked: allow unlink */}
+          {linked ? (
+            <View style={[styles.rowBtns, { justifyContent: 'flex-start' }]}>
+              <Button label="Unlink partner" variant="outline" onPress={onUnlink} />
+            </View>
+          ) : null}
+        </Card>
+
+        {/* Permissions */}
+        <Card style={{ marginTop: tokens.spacing.md }}>
+          <View style={styles.sectionHeader}>
+            <ThemedText variant="h2">Permissions</ThemedText>
+          </View>
+
+          <Row
+            icon="notifications"
+            title="Notifications"
+            subtitle="For reminders & pushes"
+            right={<>{permDot(notifStatus)}</>}
+            onPress={requestNotifications}
+          />
+          {showNotifOpenSettings ? (
+            <View style={styles.quickRow}>
+              <LinkButton
+                title="Open Settings"
+                onPress={() =>
+                  showOpenSettingsAlert('Notifications', 'Open system settings to enable notifications.')
+                }
+              />
+            </View>
+          ) : null}
+
+          <Row
+            icon="images"
+            title="Photos"
+            subtitle="Pick & save memories"
+            right={<>{permDot(libStatus)}</>}
+            onPress={requestLibrary}
+          />
+          {showLibOpenSettings ? (
+            <View style={styles.quickRow}>
+              <LinkButton
+                title="Open Settings"
+                onPress={() => showOpenSettingsAlert('Photos', 'Open system settings to allow photo access.')}
+              />
+            </View>
+          ) : null}
+
+          <Row
+            icon="camera"
+            title="Camera"
+            subtitle="Scan pairing QR codes"
+            right={<>{permDot(camStatus)}</>}
+            onPress={requestCamera}
+          />
+          {showCamOpenSettings ? (
+            <View style={styles.quickRow}>
+              <LinkButton
+                title="Open Settings"
+                onPress={() => showOpenSettingsAlert('Camera', 'Open system settings to allow camera access.')}
+              />
+            </View>
+          ) : null}
+        </Card>
+
+        {/* Appearance — no “Follow system” */}
+        <Card style={{ marginTop: tokens.spacing.md }}>
+          <View style={styles.sectionHeader}>
+            <ThemedText variant="h2">Appearance</ThemedText>
+            <Badge label="Live" bg="#EEF2FF" color="#3730A3" />
+          </View>
+
+          <ThemeRow label="Light (Rose)" value="light-rose" />
+          <ThemeRow label="Ocean" value="ocean" />
+          <ThemeRow label="Forest" value="forest" />
+          <ThemeRow label="Minimal (Mono)" value="mono" />
+        </Card>
+
+        {/* Account */}
+        <Card style={{ marginTop: tokens.spacing.md }}>
+          <View style={styles.sectionHeader}>
+            <ThemedText variant="h2">Account</ThemedText>
+            {isDemo ? <Badge label="Demo" bg="#FEF3C7" color="#92400E" /> : null}
+          </View>
+
+          {isDemo ? (
+            <>
+              <ThemedText variant="caption" color={t.colors.textDim} style={{ marginBottom: tokens.spacing.s }}>
+                You’re using a demo account. Create a real account to save your data across devices.
               </ThemedText>
+              <Row
+                icon="person-add-outline"
+                title="Create real account"
+                subtitle="Link email & password to keep your data"
+                right={<Button label="Create" onPress={() => setShowUpgrade(true)} />}
+              />
+            </>
+          ) : null}
+
+          {/* Manage subscription (platform-aware) */}
+          <Row
+            icon="card-outline"
+            title="Manage subscription"
+            subtitle={manageSubtitle}
+            right={<Ionicons name="open-outline" size={22} color={t.colors.textDim} />}
+            onPress={openManageSubscription}
+          />
+
+          <Row
+            icon="log-out"
+            title="Sign out"
+            subtitle={isDemo ? "Warning: demo data will be lost" : "Log out of this device"}
+            right={<Ionicons name="exit-outline" size={22} color={t.colors.textDim} />}
+            onPress={onConfirmSignOut}
+          />
+
+          {/* Delete account (destructive) */}
+          <Row
+            icon="trash-outline"
+            title="Delete account"
+            subtitle="Permanently remove data"
+            right={<Ionicons name="trash-outline" size={22} color="#EF4444" />}
+            onPress={onDeleteAccount}
+          />
+        </Card>
+
+        {/* About */}
+        <Card style={{ marginTop: tokens.spacing.md }}>
+          <ThemedText variant="h2">About</ThemedText>
+          <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: tokens.spacing.xs }}>
+            LovePoints helps couples celebrate everyday kindness with points, memories, notes, and gentle reminders.
+          </ThemedText>
+        </Card>
+      </ScrollView>
+
+      {/* Upgrade modal */}
+      <Modal visible={showUpgrade} transparent animationType="fade" onRequestClose={() => setShowUpgrade(false)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <ThemedText variant="h2" style={{ marginBottom: tokens.spacing.s }}>Create real account</ThemedText>
+            <ThemedText variant="caption" color="#6B7280" style={{ marginBottom: tokens.spacing.s }}>
+              Link your demo to an email & password so your data is safely saved.
+            </ThemedText>
+
+            <ThemedText variant="label">Email</ThemedText>
+            <TextInput
+              style={styles.input}
+              value={upgradeEmail}
+              onChangeText={setUpgradeEmail}
+              placeholder="you@example.com"
+              autoCapitalize="none"
+              keyboardType="email-address"
+              textContentType="emailAddress"
+            />
+
+            <ThemedText variant="label" style={{ marginTop: tokens.spacing.s }}>Password</ThemedText>
+            <TextInput
+              style={styles.input}
+              value={upgradePassword}
+              onChangeText={setUpgradePassword}
+              placeholder="Minimum 6 characters"
+              secureTextEntry
+              textContentType="newPassword"
+            />
+
+            <View style={styles.modalBtnRow}>
+              <Button label="Cancel" variant="outline" onPress={() => setShowUpgrade(false)} />
+              <Button label={upgradeLoading ? 'Saving…' : 'Create account'} onPress={onUpgradeAccount} disabled={upgradeLoading} />
             </View>
-
-            <PairingQR code={pairInfo.code} />
-
-            <View style={styles.rowBtns}>
-              <Button label="Share" onPress={onShareCode} />
-              <LinkButton title="Enter code" onPress={onRedeemPrompt} />
-              <LinkButton title="Scan code" onPress={() => nav.navigate('PairingScan')} />
-            </View>
-          </>
-        ) : null}
-
-        {/* When linked: allow unlink */}
-        {linked ? (
-          <View style={[styles.rowBtns, { justifyContent: 'flex-start' }]}>
-            <Button label="Unlink partner" variant="outline" onPress={onUnlink} />
           </View>
-        ) : null}
-      </Card>
-
-      {/* Permissions */}
-      <Card style={{ marginTop: tokens.spacing.md }}>
-        <View style={styles.sectionHeader}>
-          <ThemedText variant="h2">Permissions</ThemedText>
         </View>
+      </Modal>
 
-        <Row
-          icon="notifications"
-          title="Notifications"
-          subtitle="For reminders & pushes"
-          right={<>{permDot(notifStatus)}</>}
-          onPress={requestNotifications}
-        />
-        {showNotifOpenSettings ? (
-          <View style={styles.quickRow}>
-            <LinkButton
-              title="Open Settings"
-              onPress={() =>
-                showOpenSettingsAlert('Notifications', 'Open system settings to enable notifications.')
-              }
-            />
-          </View>
-        ) : null}
-
-        <Row
-          icon="images"
-          title="Photos"
-          subtitle="Pick & save memories"
-          right={<>{permDot(libStatus)}</>}
-          onPress={requestLibrary}
-        />
-        {showLibOpenSettings ? (
-          <View style={styles.quickRow}>
-            <LinkButton
-              title="Open Settings"
-              onPress={() => showOpenSettingsAlert('Photos', 'Open system settings to allow photo access.')}
-            />
-          </View>
-        ) : null}
-
-        <Row
-          icon="camera"
-          title="Camera"
-          subtitle="Scan pairing QR codes"
-          right={<>{permDot(camStatus)}</>}
-          onPress={requestCamera}
-        />
-        {showCamOpenSettings ? (
-          <View style={styles.quickRow}>
-            <LinkButton
-              title="Open Settings"
-              onPress={() => showOpenSettingsAlert('Camera', 'Open system settings to allow camera access.')}
-            />
-          </View>
-        ) : null}
-      </Card>
-
-      {/* Appearance — no “Follow system” */}
-      <Card style={{ marginTop: tokens.spacing.md }}>
-        <View style={styles.sectionHeader}>
-          <ThemedText variant="h2">Appearance</ThemedText>
-          <Badge label="Live" bg="#EEF2FF" color="#3730A3" />
-        </View>
-
-        <ThemeRow label="Light (Rose)" value="light-rose" />
-        <ThemeRow label="Ocean" value="ocean" />
-        <ThemeRow label="Forest" value="forest" />
-        <ThemeRow label="Minimal (Mono)" value="mono" />
-      </Card>
-
-      {/* Account */}
-      <Card style={{ marginTop: tokens.spacing.md }}>
-        <ThemedText variant="h2" style={{ marginBottom: tokens.spacing.s }}>
-          Account
-        </ThemedText>
-        <Row
-          icon="log-out"
-          title="Sign out"
-          subtitle="Log out of this device"
-          right={<Ionicons name="exit-outline" size={22} color={t.colors.textDim} />}
-          onPress={onConfirmSignOut}
-        />
-      </Card>
-
-      {/* About */}
-      <Card style={{ marginTop: tokens.spacing.md }}>
-        <ThemedText variant="h2">About</ThemedText>
-        <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: tokens.spacing.xs }}>
-          LovePoints helps couples celebrate everyday kindness with points, memories, notes, and gentle reminders.
-        </ThemedText>
-      </Card>
-    </ScrollView>
+      {/* Toast (same component as TasksScreen) */}
+      <ToastUndo
+        visible={toast.visible}
+        message={toast.msg}
+        onAction={toast.undo}
+        onHide={() => setToast({ visible: false, msg: '' })}
+      />
+    </>
   );
 };
 
@@ -498,6 +741,34 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     paddingHorizontal: 8,
     borderRadius: 8,
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: tokens.spacing.md,
+  },
+  modalCard: {
+    width: '100%',
+    maxWidth: 520,
+    borderRadius: 16,
+    padding: tokens.spacing.md,
+    backgroundColor: '#FFFFFF',
+  },
+  input: {
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginTop: tokens.spacing.xs,
+  },
+  modalBtnRow: {
+    marginTop: tokens.spacing.md,
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: tokens.spacing.s as unknown as number,
   },
 });
 

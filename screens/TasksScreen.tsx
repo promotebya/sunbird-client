@@ -4,6 +4,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ActionSheetIOS,
   Alert,
   DeviceEventEmitter,
   FlatList,
@@ -48,15 +49,14 @@ import {
 } from 'firebase/firestore';
 import { db } from '../firebaseConfig';
 import useAuthListener from '../hooks/useAuthListener';
-import usePointsTotal from '../hooks/usePointsTotal';
+import usePartnerUid from '../hooks/usePartnerUid';
 
-// import { getPairId } from '../utils/partner';
 import { createPointsEntry, deletePointsEntry } from '../utils/points';
 import { listenDoc } from '../utils/snap';
 import { activateCatchup, isoWeekStr, notifyTaskCompletion } from '../utils/streak';
 
 import RedeemModal from '../components/RedeemModal';
-import { addReward, listenRewards, redeemReward, type RewardDoc } from '../utils/rewards';
+import { listenRewards, type RewardDoc } from '../utils/rewards';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -71,6 +71,9 @@ type TaskDoc = {
   points?: number;
   createdAt?: any;
   updatedAt?: any;
+  kind?: 'shared' | 'personal';
+  forUid?: string | null; // assignee (only for personal)
+  worth?: number;         // points per award for this task
 };
 
 const FIRST_DONE_KEY = (uid: string) =>
@@ -83,23 +86,101 @@ function withAlpha(hex: string, alpha: number) {
   return `#${full}${a}`;
 }
 
+function pickWorth(current: number): Promise<number> {
+  return new Promise((resolve) => {
+    const options = ['+1', '+2', '+3', '+5', '+10', 'Cancel'];
+    const values = [1, 2, 3, 5, 10];
+
+    if (Platform.OS === 'ios') {
+      ActionSheetIOS.showActionSheetWithOptions(
+        {
+          options,
+          cancelButtonIndex: options.length - 1,
+          title: 'How many points should this task be worth?',
+        },
+        (idx) => {
+          if (idx === options.length - 1) return resolve(current);
+          resolve(values[idx] ?? current);
+        }
+      );
+    } else {
+      Alert.alert('How many points should this task be worth?', undefined, [
+        { text: '+1',  onPress: () => resolve(1)  },
+        { text: '+2',  onPress: () => resolve(2)  },
+        { text: '+3',  onPress: () => resolve(3)  },
+        { text: '+5',  onPress: () => resolve(5)  },
+        { text: '+10', onPress: () => resolve(10) },
+        { text: 'Cancel', style: 'cancel', onPress: () => resolve(current) },
+      ]);
+    }
+  });
+}
+
+type TopTab = 'shared' | 'personal';
+type PersonalTab = 'yours' | 'partners';
+type RewardScope = 'shared' | 'personal';
+
 const TasksScreen: React.FC = () => {
+  /* ──────────────────────────────────────────────────────────── */
+  /* Small helper to notify partner after redeem                  */
+  /* Writes to /notifications and emits a local event.            */
+  /* If you already have a CF listening on /notifications,        */
+  /* this will produce a push. Otherwise it's a safe no-op.       */
+  /* ──────────────────────────────────────────────────────────── */
+  async function notifyRewardRedeemedLocal(
+    actorUid: string,
+    pairIdValue: string | null,
+    rewardTitle: string,
+    scope: RewardScope
+  ) {
+    try {
+      await addDoc(collection(db, 'notifications'), {
+        type: 'reward_redeemed',
+        pairId: pairIdValue ?? null,
+        actorUid,
+        title: rewardTitle,
+        scope,
+        createdAt: serverTimestamp(),
+      });
+    } catch {}
+    try {
+      DeviceEventEmitter.emit('lp.reward.redeemed', { pairId: pairIdValue, title: rewardTitle, scope });
+    } catch {}
+  }
   const nav = useNavigation<any>();
   const route = useRoute<any>();
   const insets = useSafeAreaInsets();
   const { user } = useAuthListener();
-  const { total } = usePointsTotal(user?.uid); // fallback only
   const t = useTokens();
   const s = useMemo(() => styles(t), [t]);
 
   const [pairId, setPairId] = useState<string | null>(null);
+  const [topTab, setTopTab] = useState<TopTab>('shared');
+  const [personalTab, setPersonalTab] = useState<PersonalTab>('yours');
+
+  const partnerUid = usePartnerUid(user?.uid ?? null);
+
   const prevPairRef = useRef<string | null>(null);
   const [tasks, setTasks] = useState<TaskDoc[]>([]);
   const [rewards, setRewards] = useState<RewardDoc[]>([]);
 
+  // Rewards scope/balances (zeigt die Liste an; fürs Erstellen wird die Auswahl im Modal benutzt)
+  const [rewardScope, setRewardScope] = useState<RewardScope>('shared');
+  const [personalRedeemable, setPersonalRedeemable] = useState(0);
+  const [spentPersonalSum, setSpentPersonalSum] = useState(0);
+  const [spentSharedSum, setSpentSharedSum] = useState(0);
+
+  // Shared input
   const [title, setTitle] = useState('');
+  // Personal input (nur im "partners"-Subtab)
+  const [titlePersonal, setTitlePersonal] = useState('');
+  // Point value pickers next to inputs
+  const [sharedWorth, setSharedWorth] = useState<number>(1);
+  const [personalWorth, setPersonalWorth] = useState<number>(1);
+
   const [titleError, setTitleError] = useState<string | undefined>(undefined);
   const inputRef = useRef<any>(null);
+  const inputPersonalRef = useRef<any>(null);
 
   const [toast, setToast] = useState<{ visible: boolean; msg: string; undo?: () => Promise<void> | void; }>({ visible: false, msg: '' });
   const showUndo = (message: string, undo?: () => Promise<void> | void) => setToast({ visible: true, msg: message, undo });
@@ -107,7 +188,7 @@ const TasksScreen: React.FC = () => {
   const [showConfetti, setShowConfetti] = useState(false);
   const [showAddReward, setShowAddReward] = useState(false);
 
-  // Persisted fold state for the Rewards section
+  // Persisted fold state für Rewards
   const REWARDS_OPEN_KEY = (uid?: string | null) => `lp:tasks:rewardsOpen:${uid ?? 'anon'}`;
   const [rewardsOpen, setRewardsOpen] = useState(true);
 
@@ -145,10 +226,11 @@ const TasksScreen: React.FC = () => {
     catchupIntentWeekISO?: string;
   } | null>(null);
 
-  // Accept preset idea
+  // Accept preset idea (shared flow unchanged)
   useEffect(() => {
     const preset: string | undefined = route.params?.presetIdea;
     if (preset) {
+      setTopTab('shared');
       setTitle(preset);
       requestAnimationFrame(() => inputRef.current?.focus?.());
       nav.setParams?.({ presetIdea: undefined });
@@ -179,7 +261,6 @@ const TasksScreen: React.FC = () => {
     if (prev && pairId == null) {
       void cleanupTasksForPreviousPair(prev, user.uid);
       void cleanupRewardsForPreviousPair(prev, user.uid);
-      // Make UI drop immediately (Android sometimes keeps last snapshot briefly)
       setTasks([]);
       setRewards([]);
     }
@@ -194,14 +275,12 @@ const TasksScreen: React.FC = () => {
 
       const col = collection(db, 'tasks');
 
-      // Delete MY tasks for that old pair
       const mineSnap = await getDocs(query(col, where('ownerId', '==', uid), limit(500)));
       const mineToDelete = mineSnap.docs
         .filter(d => (d.data() as any)?.pairId === prevPairId)
         .map(d => d.id);
       await deleteInChunks(mineToDelete);
 
-      // Best-effort: delete any remaining shared tasks (may be denied; ignore)
       try {
         const sharedSnap = await getDocs(query(col, where('pairId', '==', prevPairId)));
         const sharedIds = sharedSnap.docs.map(d => d.id);
@@ -216,7 +295,6 @@ const TasksScreen: React.FC = () => {
     }
   }
 
-  // Rewards cleanup mirrors tasks cleanup
   async function cleanupRewardsForPreviousPair(prevPairId: string, uid: string) {
     try {
       const marker = `lp:rewards-cleaned:${prevPairId}:${uid}`;
@@ -225,14 +303,12 @@ const TasksScreen: React.FC = () => {
 
       const col = collection(db, 'rewards');
 
-      // Delete MY rewards for that old pair (safe)
       const mineSnap = await getDocs(query(col, where('ownerId', '==', uid), limit(500)));
       const myRewards = mineSnap.docs
         .filter(d => (d.data() as any)?.pairId === prevPairId)
         .map(d => d.id);
       await deleteInChunks(myRewards);
 
-      // Best-effort: delete any remaining shared rewards for that pair
       try {
         const sharedSnap = await getDocs(query(col, where('pairId', '==', prevPairId)));
         const sharedIds = sharedSnap.docs.map(d => d.id);
@@ -250,7 +326,6 @@ const TasksScreen: React.FC = () => {
   async function deleteInChunks(ids: string[], chunkSize = 300) {
     for (let i = 0; i < ids.length; i += chunkSize) {
       const slice = ids.slice(i, i + chunkSize);
-      // Keep this best-effort delete tolerant of failures
       await Promise.all(
         slice.map(id =>
           deleteDoc(doc(db, 'rewards', id)).catch(() =>
@@ -271,7 +346,65 @@ const TasksScreen: React.FC = () => {
     return () => off && off();
   }, [user, pairId]);
 
-  // Shared-only listener with graceful index fallback
+  // Sum ALL shared redemptions for this pair (both users) from append-only collection
+  useEffect(() => {
+    if (!pairId) {
+      setSpentSharedSum(0);
+      return;
+    }
+    const qRef = query(
+      collection(db, 'rewardRedemptions'),
+      where('pairId', '==', pairId),
+      where('scope', '==', 'shared')
+    );
+    const unsub = onSnapshot(
+      qRef,
+      (snap) => {
+        let sum = 0;
+        for (const d of snap.docs) {
+          const data: any = d.data();
+          const v = Number(data?.cost ?? 0);
+          if (Number.isFinite(v) && v > 0) sum += v;
+        }
+        setSpentSharedSum(sum);
+      },
+      () => setSpentSharedSum(0)
+    );
+    return () => unsub && unsub();
+  }, [pairId]);
+
+  // Sum PERSONAL redemptions for this user from append-only collection
+  useEffect(() => {
+    if (!pairId || !user?.uid) {
+      setSpentPersonalSum(0);
+      return;
+    }
+
+    const qRef = query(
+      collection(db, 'rewardRedemptions'),
+      where('pairId', '==', pairId),
+      where('scope', '==', 'personal'),
+      where('redeemedBy', '==', user.uid)
+    );
+
+    const unsub = onSnapshot(
+      qRef,
+      (snap) => {
+        let sum = 0;
+        for (const d of snap.docs) {
+          const data: any = d.data();
+          const v = Number(data?.cost ?? 0);
+          if (Number.isFinite(v) && v > 0) sum += v;
+        }
+        setSpentPersonalSum(sum);
+      },
+      () => setSpentPersonalSum(0)
+    );
+
+    return () => unsub && unsub();
+  }, [pairId, user?.uid]);
+
+  // Single listener for all pair tasks (shared + personal); we filter in-memory
   useEffect(() => {
     if (!user || !pairId) {
       setTasks([]);
@@ -341,110 +474,247 @@ const TasksScreen: React.FC = () => {
     return () => off && off();
   }, [user]);
 
-  // -------- Pair-aware LIVE total (union of pair points + my no-pair points) + optimistic bump
-  const [totalLive, setTotalLive] = useState<number | null>(null);
+  // -------- LIVE totals ----------------------------------------------------
+  // 1) pairTotalLive: sum of positive /points where pairId == current pair (identical for both partners)
+  // 2) ownerSoloLive: sum of positive /points owned by me with no pairId (used only for *personal* balance on this screen)
+  // 3) totalOptimistic: animation bump; we apply it to both streams if needed
+
+  const [pairTotalLive, setPairTotalLive] = useState<number | null>(null);
+  const [ownerSoloLive, setOwnerSoloLive] = useState<number>(0);
+  const [totalOptimistic, setTotalOptimistic] = useState<{ bump: number; baselinePair: number; baselineOwner: number } | null>(null);
 
   useEffect(() => {
     if (!user?.uid) {
-      setTotalLive(null);
+      setPairTotalLive(null);
+      setOwnerSoloLive(0);
       return;
     }
 
-    // maps of id -> value so we can union safely
-    let ownerUnsub: (() => void) | undefined;
-    let pairUnsub:  (() => void) | undefined;
+    let soloUnsub: (() => void) | undefined;
+    let minePairOuterUnsub: (() => void) | undefined;
+    let partnerPairOuterUnsub: (() => void) | undefined;
 
-    const ownerMap = new Map<string, number>();
-    const pairMap  = new Map<string, number>();
-
-    const recompute = () => {
-      // union: all pair docs + owner docs that do NOT have a pairId
-      let sum = 0;
-      // pair docs (all)
-      for (const v of pairMap.values()) sum += v;
-      // owner docs (only those with no pairId)
-      for (const [id, v] of ownerMap) {
-        // ownerMap stores no-pair docs only (see listener)
-        sum += v;
-      }
-      setTotalLive(sum);
-    };
-
-    // Listen to all my docs; keep only those with null/undefined pairId in ownerMap
-    ownerUnsub = onSnapshot(
+    // (A) owner-only points (no pairId) — unchanged
+    soloUnsub = onSnapshot(
       query(collection(db, 'points'), where('ownerId', '==', user.uid)),
       (snap) => {
-        ownerMap.clear();
+        let sum = 0;
         for (const d of snap.docs) {
           const data: any = d.data();
           const v = Number(data?.value ?? 0);
           const pid = data?.pairId ?? null;
-          if ((pid === null || pid === undefined) && Number.isFinite(v)) {
-            ownerMap.set(d.id, v);
-          }
+          if ((pid === null || pid === undefined) && Number.isFinite(v) && v > 0) sum += v;
         }
-        recompute();
+        setOwnerSoloLive(sum);
       },
-      () => {
-        ownerMap.clear();
-        recompute();
-      }
+      () => setOwnerSoloLive(0)
     );
 
-    // If paired, also listen to all docs for this pair
+    // (B) shared points for the current pair (sum mine + partner, exclude personal)
     if (pairId) {
-      pairUnsub = onSnapshot(
-        query(collection(db, 'points'), where('pairId', '==', pairId)),
-        (snap) => {
-          pairMap.clear();
-          for (const d of snap.docs) {
-            const v = Number((d.data() as any)?.value ?? 0);
-            if (Number.isFinite(v)) pairMap.set(d.id, v);
-          }
-          recompute();
-        },
-        () => {
-          pairMap.clear();
-          recompute();
+      const base = collection(db, 'points');
+
+      let mineShared = 0;
+      let partnerShared = 0;
+
+      const recompute = () => setPairTotalLive(mineShared + partnerShared);
+
+      const isPersonalEntry = (data: any) => {
+        const reason = String(data?.reason ?? '').toLowerCase();
+        return (
+          data?.scope === 'personal' ||
+          data?.kind === 'personal' ||
+          reason.includes('personal task')
+        );
+      };
+
+      const computeSharedForPair = (snap: any, alreadyFilteredByPair: boolean) => {
+        let sum = 0;
+        for (const d of snap.docs) {
+          const data: any = d.data();
+          const v = Number(data?.value ?? 0);
+          if (!Number.isFinite(v) || v <= 0) continue;
+          if (!alreadyFilteredByPair && data?.pairId !== pairId) continue;
+          if (isPersonalEntry(data)) continue;
+          sum += v;
         }
-      );
+        return sum;
+      };
+
+      // Prefer ownerId+pairId; on index/permission error, fallback to ownerId-only and filter locally by pairId
+      const listenOwnerShared = (ownerIdToListen: string, setVal: (n: number) => void) => {
+        let innerUnsub: (() => void) | undefined;
+
+        const startPrimary = () => {
+          innerUnsub = onSnapshot(
+            query(base, where('ownerId', '==', ownerIdToListen), where('pairId', '==', pairId)),
+            (snap) => setVal(computeSharedForPair(snap, /*alreadyFilteredByPair*/ true)),
+            (err) => {
+              const code = (err as any)?.code;
+              if (code === 'failed-precondition' || code === 'permission-denied') {
+                // Fallback: owner-only stream, filter in-memory
+                innerUnsub = onSnapshot(
+                  query(base, where('ownerId', '==', ownerIdToListen)),
+                  (snap2) => setVal(computeSharedForPair(snap2, /*alreadyFilteredByPair*/ false)),
+                  () => setVal(0)
+                );
+              } else {
+                console.warn('[points] owner+pair query error', err);
+                setVal(0);
+              }
+            }
+          );
+        };
+
+        startPrimary();
+        return () => {
+          try { innerUnsub && innerUnsub(); } catch {}
+        };
+      };
+
+      // Mine (always readable)
+      minePairOuterUnsub = listenOwnerShared(user.uid, (val) => {
+        mineShared = val; recompute();
+      });
+
+      // Partner (may be blocked by rules; fallback will set 0 if so)
+      if (partnerUid) {
+        partnerPairOuterUnsub = listenOwnerShared(partnerUid, (val) => {
+          partnerShared = val; recompute();
+        });
+      } else {
+        partnerShared = 0;
+        recompute();
+      }
     } else {
-      // if not paired, clear pair map
-      pairMap.clear();
-      recompute();
+      setPairTotalLive(0);
     }
 
     return () => {
-      try { ownerUnsub && ownerUnsub(); } catch {}
-      try { pairUnsub && pairUnsub(); } catch {}
+      try { soloUnsub && soloUnsub(); } catch {}
+      try { minePairOuterUnsub && minePairOuterUnsub(); } catch {}
+      try { partnerPairOuterUnsub && partnerPairOuterUnsub(); } catch {}
     };
-  }, [user?.uid, pairId]);
+  }, [user?.uid, partnerUid, pairId]);
 
-  // Optimistic bump on challenge completion
-  const [totalOptimistic, setTotalOptimistic] = useState<{ bump: number; baseline: number } | null>(null);
-
+  // Challenge completion animation bump
   useEffect(() => {
     const sub = DeviceEventEmitter.addListener('lp.challenge.completed', (payload: any) => {
       const pts = Number(payload?.points ?? 0);
       if (!pts) return;
-      const baseline = (totalLive ?? total ?? 0);
-      setTotalOptimistic({ bump: pts, baseline });
+      setTotalOptimistic({
+        bump: pts,
+        baselinePair: pairTotalLive ?? 0,
+        baselineOwner: ownerSoloLive ?? 0,
+      });
     });
     return () => sub.remove();
-  }, [total, totalLive]);
+  }, [pairTotalLive, ownerSoloLive]);
 
   useEffect(() => {
     if (totalOptimistic) {
-      const live = (totalLive ?? total ?? 0);
-      const target = totalOptimistic.baseline + totalOptimistic.bump;
-      if (live >= target) setTotalOptimistic(null);
+      const reachedPair  = (pairTotalLive  ?? 0) >= (totalOptimistic.baselinePair  + totalOptimistic.bump);
+      const reachedOwner = (ownerSoloLive ?? 0) >= (totalOptimistic.baselineOwner + totalOptimistic.bump);
+      if (reachedPair && reachedOwner) setTotalOptimistic(null);
     }
-  }, [totalLive, total, totalOptimistic]);
+  }, [pairTotalLive, ownerSoloLive, totalOptimistic]);
 
-  const totalBase = totalLive ?? (total ?? 0);
-  const totalDisplay = totalOptimistic
-    ? Math.max(totalBase, totalOptimistic.baseline + totalOptimistic.bump)
-    : totalBase;
+  const pairTotalDisplay = totalOptimistic
+    ? Math.max(pairTotalLive ?? 0,  (totalOptimistic.baselinePair  + totalOptimistic.bump))
+    : (pairTotalLive ?? 0);
+
+  const ownerSoloDisplay = totalOptimistic
+    ? Math.max(ownerSoloLive ?? 0, (totalOptimistic.baselineOwner + totalOptimistic.bump))
+    : (ownerSoloLive ?? 0);
+
+  // Personal-only redeemable balance (sum of my positive personal points for this pair)
+  useEffect(() => {
+    if (!user?.uid || !pairId) {
+      setPersonalRedeemable(0);
+      return;
+    }
+
+    // Query only by ownerId; filter rest locally (avoids composite index)
+    const qRef = query(
+      collection(db, 'points'),
+      where('ownerId', '==', user.uid)
+    );
+
+    const unsub = onSnapshot(
+      qRef,
+      (snap) => {
+        let sum = 0;
+        for (const d of snap.docs) {
+          const data: any = d.data();
+
+          // must belong to current pair
+          if (data?.pairId !== pairId) continue;
+
+          const v = Number(data?.value ?? 0);
+          if (!Number.isFinite(v) || v <= 0) continue;
+
+          const reason = (String(data?.reason ?? '')).toLowerCase();
+          const isPersonal =
+            data?.scope === 'personal' ||
+            data?.kind === 'personal' ||
+            reason.includes('personal task');
+
+          if (isPersonal) sum += v;
+        }
+        setPersonalRedeemable(sum);
+      },
+      () => setPersonalRedeemable(0)
+    );
+
+    return () => unsub && unsub();
+  }, [user?.uid, pairId]);
+
+  // ---- Rewards: Tasks-only "available" Balance
+  // Global (Home/Challenges) bleibt unverändert. Hier ziehen wir NUR bereits eingelöste Rewards (redeemed)
+  // vom jeweiligen Scope ab, um die lokal verfügbare Summe fürs Einlösen zu zeigen.
+  const spentShared = useMemo(() => {
+    return rewards.reduce((sum, r: any) => {
+      const scopeRaw = r?.scope ?? 'shared';
+      const scope = typeof scopeRaw === 'string' ? scopeRaw.toLowerCase() : 'shared';
+      if (scope === 'personal') return sum;
+      if (r?.redeemed) return sum + (Number(r?.cost) || 0);
+      return sum;
+    }, 0);
+  }, [rewards]);
+
+  const spentPersonal = useMemo(() => {
+    return rewards.reduce((sum, r: any) => {
+      const scopeRaw = r?.scope ?? 'shared';
+      const scope = typeof scopeRaw === 'string' ? scopeRaw.toLowerCase() : 'shared';
+      if (scope !== 'personal') return sum;
+      const redeemedBy = (r as any)?.redeemedBy;
+      if (r?.redeemed && redeemedBy && user?.uid && redeemedBy === user.uid) {
+        return sum + (Number(r?.cost) || 0);
+      }
+      return sum;
+    }, 0);
+  }, [rewards, user?.uid]);
+
+  const effectiveSpentShared = spentSharedSum || spentShared;
+  const effectiveSpentPersonal = spentPersonalSum || spentPersonal;
+
+  // Fallback: shared points earned via tasks (sum of task.points on shared tasks)
+  const sharedEarnedFromTasks = useMemo(() => {
+    return tasks.reduce((sum, t) => {
+      const isShared = (t.kind ?? 'shared') !== 'personal';
+      if (!isShared) return sum;
+      return sum + (Number(t.points) || 0);
+    }, 0);
+  }, [tasks]);
+
+  // Prefer live pair points; fall back to aggregated task points if needed (take the max)
+  const sharedGrossForRewards = Math.max((pairTotalDisplay ?? 0), sharedEarnedFromTasks);
+  const sharedAvailableForRewards = Math.max(0, sharedGrossForRewards - effectiveSpentShared);
+  const personalAvailableForRewards = Math.max(0, (personalRedeemable ?? 0) - effectiveSpentPersonal);
+
+  /* ──────────────────────────────────────────────────────────── */
+  /* SHARED: unchanged behavior                                   */
+  /* ──────────────────────────────────────────────────────────── */
 
   async function handleAddTask() {
     if (!user) return;
@@ -466,6 +736,7 @@ const TasksScreen: React.FC = () => {
         pairId,
         done: false,
         points: 0,
+        worth: sharedWorth,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       };
@@ -480,18 +751,7 @@ const TasksScreen: React.FC = () => {
     }
   }
 
-  async function maybeShowConfettiOnFirstDone() {
-    if (!user) return;
-    const key = FIRST_DONE_KEY(user.uid);
-    const seen = await AsyncStorage.getItem(key);
-    if (!seen) {
-      setShowConfetti(true);
-      setTimeout(() => setShowConfetti(false), 1200);
-      await AsyncStorage.setItem(key, '1');
-    }
-  }
-
-  async function handleToggleDone(item: TaskDoc) {
+  async function handleToggleDoneShared(item: TaskDoc) {
     try {
       const nextDone = !item.done;
       await updateDoc(doc(db, 'tasks', item.id), { done: nextDone, updatedAt: serverTimestamp() });
@@ -510,23 +770,25 @@ const TasksScreen: React.FC = () => {
     }
   }
 
-  async function handleAwardPoint(item: TaskDoc) {
+  async function awardPointsShared(item: TaskDoc, amount: number) {
     if (!user) return;
     try {
       const pointsId = await createPointsEntry({
-        ownerId: user.uid,
+        ownerId: user.uid,               // shared points count for both
         pairId: item.pairId ?? null,
-        value: 1,
+        value: amount,                   // variable amount
         reason: `Task: ${item.title}`,
         taskId: item.id,
+        scope: 'shared',
+        kind: 'shared',
       });
 
       await updateDoc(doc(db, 'tasks', item.id), {
-        points: (item.points ?? 0) + 1,
+        points: (item.points ?? 0) + amount,
         updatedAt: serverTimestamp(),
       });
 
-      showUndo('+1 point added 🎉', async () => {
+      showUndo(`+${amount} point${amount === 1 ? '' : 's'} added 🎉`, async () => {
         await deletePointsEntry(pointsId);
         await updateDoc(doc(db, 'tasks', item.id), {
           points: Math.max(0, (item.points ?? 0)),
@@ -534,7 +796,119 @@ const TasksScreen: React.FC = () => {
         });
       });
     } catch (e: any) {
-      Alert.alert('Could not award point', e?.message ?? 'Please try again.');
+      Alert.alert('Could not award points', e?.message ?? 'Please try again.');
+    }
+  }
+
+  async function handleAwardPointShared(item: TaskDoc) {
+    const amount = Math.max(1, Number(item.worth) || 1);
+    await awardPointsShared(item, amount);
+  }
+
+  /* ──────────────────────────────────────────────────────────── */
+  /* PERSONAL                                                     */
+  /* ──────────────────────────────────────────────────────────── */
+
+  async function handleAddPersonalTask() {
+    if (!user) return;
+    const trimmed = titlePersonal.trim();
+    if (!trimmed) return;
+    if (!pairId || !partnerUid) {
+      Alert.alert('Link accounts first', 'Open Pairing to link with your partner before adding personal tasks.');
+      return;
+    }
+    try {
+      const payload: Omit<TaskDoc, 'id'> = {
+        title: trimmed,
+        ownerId: user.uid,          // creator
+        forUid: partnerUid,         // assignee is partner
+        pairId,
+        kind: 'personal',
+        done: false,
+        points: 0,
+        worth: personalWorth,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      };
+      await addDoc(collection(db, 'tasks'), payload);
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+      setTitlePersonal('');
+      Keyboard.dismiss();
+      showUndo('Added to partner’s list.');
+    } catch (e: any) {
+      Alert.alert('Couldn’t add task', e?.message ?? 'Please try again.');
+    }
+  }
+
+  async function handleToggleDonePersonal(item: TaskDoc) {
+    if (!user) return;
+    if (item.forUid && item.forUid !== user.uid) {
+      Alert.alert('Only assignee can complete', 'Your partner can mark this one as done.');
+      return;
+    }
+    try {
+      const nextDone = !item.done;
+      await updateDoc(doc(db, 'tasks', item.id), { done: nextDone, updatedAt: serverTimestamp() });
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+      if (nextDone) {
+        maybeShowConfettiOnFirstDone();
+      }
+      showUndo(nextDone ? 'Marked complete' : 'Marked incomplete', async () => {
+        await updateDoc(doc(db, 'tasks', item.id), { done: item.done ?? false, updatedAt: serverTimestamp() });
+      });
+    } catch (e: any) {
+      Alert.alert('Update failed', e?.message ?? 'Please try again.');
+    }
+  }
+
+  async function awardPointsPersonal(item: TaskDoc, amount: number) {
+    if (!user || !pairId) return;
+    const recipientUid = item.forUid; // award only to partner (assignee)
+    if (!recipientUid || recipientUid === user.uid) return;
+
+    try {
+      const pointsId = await createPointsEntry({
+        ownerId: recipientUid, // credit to partner (assignee)
+        pairId,
+        value: amount,         // variable amount
+        reason: `Personal task: ${item.title}`,
+        taskId: item.id,
+        // mark unmistakably as personal so balances pick it up
+        scope: 'personal',
+        kind: 'personal',
+        forUid: recipientUid,
+      });
+
+      await updateDoc(doc(db, 'tasks', item.id), {
+        points: (item.points ?? 0) + amount,
+        updatedAt: serverTimestamp(),
+      });
+
+      showUndo(`+${amount} point${amount === 1 ? '' : 's'} added for your partner 🎉`, async () => {
+        await deletePointsEntry(pointsId);
+        await updateDoc(doc(db, 'tasks', item.id), {
+          points: Math.max(0, (item.points ?? 0)),
+          updatedAt: serverTimestamp(),
+        });
+      });
+    } catch (e: any) {
+      Alert.alert('Could not award points', e?.message ?? 'Please try again.');
+    }
+  }
+
+  async function handleAwardPointPersonal(item: TaskDoc) {
+    const amount = Math.max(1, Number(item.worth) || 1);
+    await awardPointsPersonal(item, amount);
+  }
+
+  async function maybeShowConfettiOnFirstDone() {
+    if (!user) return;
+    const key = FIRST_DONE_KEY(user.uid);
+    const seen = await AsyncStorage.getItem(key);
+    if (!seen) {
+      setShowConfetti(true);
+      setTimeout(() => setShowConfetti(false), 1200);
+      await AsyncStorage.setItem(key, '1');
     }
   }
 
@@ -548,8 +922,11 @@ const TasksScreen: React.FC = () => {
           title: backup.title,
           ownerId: backup.ownerId,
           pairId: backup.pairId ?? pairId ?? null,
+          kind: backup.kind ?? undefined,
+          forUid: backup.forUid ?? null,
           done: backup.done ?? false,
           points: backup.points ?? 0,
+          worth: backup.worth ?? 1,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
@@ -559,10 +936,25 @@ const TasksScreen: React.FC = () => {
     }
   }
 
-  const onCreateReward = async (title: string, cost: number) => {
+  // Neuer Creator: akzeptiert optional Scope (aus dem Modal)
+  const onCreateReward = async (title: string, cost: number, scopeOverride?: RewardScope) => {
     if (!user) return;
     try {
-      await addReward(user.uid, pairId ?? null, title, cost);
+      const scopeToUse: RewardScope = scopeOverride ?? rewardScope;
+      await addDoc(collection(db, 'rewards'), {
+        ownerId: user.uid,
+        pairId: pairId ?? null,
+        title,
+        cost,
+        scope: scopeToUse,
+        redeemed: false,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      // optional: nach dem Erstellen auf die gerade genutzte Ansicht wechseln
+      if (scopeOverride && scopeOverride !== rewardScope) {
+        setRewardScope(scopeOverride);
+      }
     } catch (e: any) {
       Alert.alert('Could not add reward', e?.message ?? 'Please try again.');
     }
@@ -570,35 +962,57 @@ const TasksScreen: React.FC = () => {
 
   const onRedeem = async (r: RewardDoc) => {
     if (!user) return;
-    const current = totalDisplay; // union + optimistic
-    if (current < r.cost) {
-      const short = r.cost - current;
+
+    const scope = ((r as any)?.scope ?? 'shared') as RewardScope;
+    const balance = scope === 'personal' ? personalAvailableForRewards : sharedAvailableForRewards;
+
+    if (balance < r.cost) {
+      const short = r.cost - balance;
       Alert.alert(
         'Not enough points',
-        `You need ${short} more point${short === 1 ? '' : 's'} to redeem “${r.title}”.`
+        `You need ${short} more point${short === 1 ? '' : 's'} to redeem “${r.title}” in ${scope} rewards.`
       );
       return;
     }
+
     try {
-      await redeemReward(user.uid, pairId ?? null, r);
+      // Append-only redemption record – do NOT toggle fields on the reward document
+      const redemptionRef = await addDoc(collection(db, 'rewardRedemptions'), {
+        rewardId: r.id,
+        title: r.title,
+        cost: r.cost,
+        scope,
+        pairId: pairId ?? null,
+        redeemedBy: user.uid,
+        createdAt: serverTimestamp(),
+      });
+
+      // Push/local notify
+      await notifyRewardRedeemedLocal(user.uid, pairId ?? null, r.title, scope);
+
+      // Undo by deleting the redemption record
+      showUndo(`Redeemed “${r.title}” 🎉`, async () => {
+        try {
+          await deleteDoc(doc(db, 'rewardRedemptions', redemptionRef.id));
+        } catch {}
+      });
     } catch (e: any) {
       Alert.alert('Could not redeem reward', e?.message ?? 'Please try again.');
     }
   };
 
-  // NEW: delete reward (with undo). Honors security rules (only creator can delete if rules enforce it).
   async function handleDeleteReward(r: RewardDoc) {
     const backup = { ...r };
     try {
       await deleteDoc(doc(db, 'rewards', r.id));
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       showUndo('Reward deleted', async () => {
-        // Re-create (new id) on undo
         await addDoc(collection(db, 'rewards'), {
-          ownerId: backup.ownerId,
-          pairId: backup.pairId ?? pairId ?? null,
-          title: backup.title,
-          cost: backup.cost,
+          ownerId: (backup as any).ownerId,
+          pairId: (backup as any).pairId ?? pairId ?? null,
+          title: (backup as any).title,
+          cost: (backup as any).cost,
+          scope: (backup as any)?.scope ?? 'shared',
           redeemed: false,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
@@ -613,31 +1027,48 @@ const TasksScreen: React.FC = () => {
     }
   }
 
+  /* ──────────────────────────────────────────────────────────── */
+  /* Derived task buckets                                         */
+  /* ──────────────────────────────────────────────────────────── */
+
+  const sharedTasks = useMemo(
+    () => tasks.filter(t => (t.kind ?? 'shared') !== 'personal'),
+    [tasks]
+  );
+
+  const personalYour = useMemo(
+    () => tasks.filter(t => t.kind === 'personal' && !!user?.uid && t.forUid === user.uid),
+    [tasks, user?.uid]
+  );
+
+  const personalPartners = useMemo(
+    () => tasks.filter(t => t.kind === 'personal' && !!partnerUid && t.forUid === partnerUid),
+    [tasks, partnerUid]
+  );
+
+  /* ──────────────────────────────────────────────────────────── */
+  /* Rendering                                                    */
+  /* ──────────────────────────────────────────────────────────── */
+
   const TASKS_TOUR_STEPS: SpotlightStep[] = useMemo(() => {
-    const steps: SpotlightStep[] = [
-      {
-        id: 'tsk-welcome',
-        targetId: null,
-        title: 'Shared Tasks',
-        text: 'Both partners see and update this list.',
-        placement: 'bottom',
-        allowBackdropTapToNext: true,
-      },
+    if (topTab !== 'shared') return [];
+    const arr: SpotlightStep[] = [
+      { id: 'tsk-welcome', targetId: null, title: 'Shared Tasks', text: 'Both partners see and update this list.', placement: 'bottom', allowBackdropTapToNext: true },
       { id: 'tsk-input', targetId: 'ts-input', title: 'Add a task', text: 'Type a small, kind action.' },
       { id: 'tsk-add', targetId: 'ts-add', title: 'Save it', text: 'Tap Add to put it on the list.', placement: 'top' },
       { id: 'tsk-suggestions', targetId: 'ts-suggestions', title: 'Ideas', text: 'Tap a suggestion to prefill.' },
     ];
-    if (tasks.length > 0) {
-      steps.push(
+    if (sharedTasks.length > 0) {
+      arr.push(
         { id: 'tsk-done',   targetId: 'ts-done',   title: 'Mark complete', text: 'Tap the box when you’re done.' },
         { id: 'tsk-award',  targetId: 'ts-award',  title: 'Give a point',  text: 'Reward effort with +1.', placement: 'top' },
         { id: 'tsk-delete', targetId: 'ts-delete', title: 'Delete',        text: 'Remove things you don’t need.', placement: 'top' },
       );
     }
-    return steps;
-  }, [tasks.length]);
+    return arr;
+  }, [topTab, sharedTasks.length]);
 
-  const renderItem = ({ item, index }: { item: TaskDoc; index: number }) => {
+  const renderItemShared = ({ item, index }: { item: TaskDoc; index: number }) => {
     const done = !!item.done;
     const isFirst = index === 0;
 
@@ -647,7 +1078,7 @@ const TasksScreen: React.FC = () => {
       </View>
     );
     const AwardBtn = (
-      <Pressable onPress={() => handleAwardPoint(item)} style={s.awardBtn} hitSlop={8} accessibilityLabel="Add point">
+      <Pressable onPress={() => handleAwardPointShared(item)} style={s.awardBtn} hitSlop={8} accessibilityLabel="Add point">
         <Ionicons name="add-circle" size={20} color={t.colors.primary} />
       </Pressable>
     );
@@ -657,9 +1088,11 @@ const TasksScreen: React.FC = () => {
       </Pressable>
     );
 
+    const worthDisplay = Math.max(1, Number(item.worth) || 1);
+
     return (
       <Card style={s.itemCard}>
-        <Pressable onPress={() => handleToggleDone(item)} style={s.itemRow} accessibilityRole="button">
+        <Pressable onPress={() => handleToggleDoneShared(item)} style={s.itemRow} accessibilityRole="button">
           {isFirst ? <SpotlightTarget id="ts-done">{Checkbox}</SpotlightTarget> : Checkbox}
 
           <View style={{ flex: 1 }}>
@@ -667,15 +1100,11 @@ const TasksScreen: React.FC = () => {
               {item.title}
             </ThemedText>
             <View style={s.metaRow}>
-              {typeof item.points === 'number' && item.points > 0 ? (
-                <View style={s.pointsPill}>
-                  <ThemedText variant="caption" color={t.colors.primary}>
-                    +{item.points} pt{item.points === 1 ? '' : 's'}
-                  </ThemedText>
-                </View>
-              ) : (
-                <ThemedText variant="caption" color={t.colors.textDim}>No points yet</ThemedText>
-              )}
+              <View style={s.pointsPill}>
+                <ThemedText variant="caption" color={t.colors.primary}>
+                  +{worthDisplay} pt{worthDisplay === 1 ? '' : 's'}
+                </ThemedText>
+              </View>
             </View>
           </View>
 
@@ -686,24 +1115,77 @@ const TasksScreen: React.FC = () => {
     );
   };
 
-  const showCatchupChip = useMemo(() => {
-    if (!streak) return true;
-    const thisWeek = isoWeekStr(new Date());
-    const alreadyUsedThisWeek  = streak.catchupWeekISO === thisWeek;
-    const alreadyArmedThisWeek = streak.catchupIntentWeekISO === thisWeek;
-    const pending = !!streak.catchupPending;
-    return !alreadyUsedThisWeek && !alreadyArmedThisWeek && !pending;
-  }, [streak]);
+  const renderItemPersonal = ({ item }: { item: TaskDoc; index: number }) => {
+    const done = !!item.done;
+    const viewingPartnersList = personalTab === 'partners';
+    const canToggle = item.forUid === user?.uid;
+    const showAward = viewingPartnersList;
+    const canDelete = item.ownerId === user?.uid;
+
+    const Checkbox = (
+      <View style={[s.checkbox, done && { backgroundColor: t.colors.primary, borderColor: t.colors.primary, opacity: canToggle ? 1 : 0.5 }]}>
+        {done ? <Ionicons name="checkmark" size={16} color="#fff" /> : null}
+      </View>
+    );
+    const AwardBtn = showAward ? (
+      <Pressable onPress={() => handleAwardPointPersonal(item)} style={s.awardBtn} hitSlop={8} accessibilityLabel="Add point for partner">
+        <Ionicons name="add-circle" size={20} color={t.colors.primary} />
+      </Pressable>
+    ) : null;
+    const DeleteBtn = canDelete ? (
+      <Pressable onPress={() => handleDelete(item)} style={s.deleteBtn} hitSlop={8} accessibilityLabel="Delete task">
+        <Ionicons name="trash-outline" size={20} color="#EF4444" />
+      </Pressable>
+    ) : null;
+
+    const worthDisplay = Math.max(1, Number(item.worth) || 1);
+
+    return (
+      <Card style={s.itemCard}>
+        <Pressable
+          onPress={() => (canToggle ? handleToggleDonePersonal(item) : Alert.alert('Only assignee can complete', 'Your partner can mark this one as done.'))}
+          style={s.itemRow}
+          accessibilityRole="button"
+        >
+          {Checkbox}
+
+          <View style={{ flex: 1 }}>
+            <ThemedText variant="title" color={done ? t.colors.textDim : t.colors.text}>
+              {item.title}
+            </ThemedText>
+            <View style={s.metaRow}>
+              <View style={s.pointsPill}>
+                <ThemedText variant="caption" color={t.colors.primary}>
+                  +{worthDisplay} pt{worthDisplay === 1 ? '' : 's'}
+                </ThemedText>
+              </View>
+            </View>
+          </View>
+
+          {AwardBtn}
+          {DeleteBtn}
+        </Pressable>
+      </Card>
+    );
+  };
 
   const rewardsSection = useMemo(() => {
     if (rewards.length === 0) return null;
+
+    const balance = rewardScope === 'shared' ? sharedAvailableForRewards : personalAvailableForRewards;
+
+    // Nur Rewards des aktuell gewählten Scopes anzeigen
+    const filteredRewards = rewards.filter((r: any) => {
+      const scope = r?.scope ?? 'shared'; // legacy -> shared
+      return rewardScope === 'shared' ? scope !== 'personal' : scope === 'personal';
+    });
 
     return (
       <Card style={{ marginBottom: 12, borderWidth: 1, borderColor: '#F0E6EF' }}>
         {/* Fold header */}
         <Pressable onPress={toggleRewardsOpen} accessibilityRole="button" style={s.foldHeader}>
           <ThemedText variant="subtitle" style={{ flex: 1 }}>
-            Rewards {rewards.length ? `(${rewards.length})` : ''}
+            Rewards {filteredRewards.length ? `(${filteredRewards.length})` : ''}
           </ThemedText>
           <Ionicons
             name="chevron-down"
@@ -713,22 +1195,43 @@ const TasksScreen: React.FC = () => {
           />
         </Pressable>
 
+        {/* Scope Toggle für die Anzeige */}
+        {rewardsOpen && (
+          <View style={s.rewardsTabs}>
+            <Pressable
+              onPress={() => setRewardScope('shared')}
+              style={[s.subTab, rewardScope === 'shared' && s.subTabActive]}
+            >
+              <ThemedText variant="label" color={rewardScope === 'shared' ? '#fff' : t.colors.text}>
+                Shared
+              </ThemedText>
+            </Pressable>
+            <Pressable
+              onPress={() => setRewardScope('personal')}
+              style={[s.subTab, rewardScope === 'personal' && s.subTabActive]}
+            >
+              <ThemedText variant="label" color={rewardScope === 'personal' ? '#fff' : t.colors.text}>
+                Personal
+              </ThemedText>
+            </Pressable>
+          </View>
+        )}
+
         {rewardsOpen && (
           <>
-            {rewards.map((item, i) => {
-              const canRedeem = (totalDisplay) >= item.cost;
+            {filteredRewards.map((item, i) => {
+              const canRedeem = balance >= item.cost;
               return (
                 <View key={item.id} style={[s.rewardRow, i > 0 && s.hairlineTop]}>
                   <View style={{ flex: 1 }}>
                     <ThemedText variant="title">{item.title}</ThemedText>
                     <ThemedText variant="caption" color={t.colors.textDim}>
-                      Cost {item.cost} pts{!canRedeem ? ` • Need ${item.cost - (totalDisplay)}` : ''}
+                      Cost {item.cost} pts{!canRedeem ? ` • Need ${item.cost - balance}` : ''}
                     </ThemedText>
                   </View>
 
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                     <Button label="Redeem" onPress={() => onRedeem(item)} disabled={!canRedeem} />
-                    {/* Delete reward */}
                     <Pressable
                       onPress={() => handleDeleteReward(item)}
                       style={s.deleteBtn}
@@ -741,27 +1244,44 @@ const TasksScreen: React.FC = () => {
                 </View>
               );
             })}
-            {/* balance footer */}
             <View style={[s.hairlineTop, { paddingTop: 8 }]}>
               <ThemedText variant="caption" color={t.colors.textDim}>
-                You have {totalDisplay} pt{totalDisplay === 1 ? '' : 's'} available.
+                You have {balance} pt{balance === 1 ? '' : 's'} available ({rewardScope}).
               </ThemedText>
             </View>
           </>
         )}
       </Card>
     );
-  }, [rewards, rewardsOpen, totalDisplay, t.colors.textDim]);
+  }, [rewards, rewardsOpen, t.colors.textDim, sharedAvailableForRewards, personalAvailableForRewards, rewardScope]);
 
-  const listHeader = (
+  const showCatchupChip = useMemo(() => {
+    if (!streak) return true;
+    const thisWeek = isoWeekStr(new Date());
+    const alreadyUsedThisWeek  = (streak as any)?.catchupWeekISO === thisWeek;
+    const alreadyArmedThisWeek = (streak as any)?.catchupIntentWeekISO === thisWeek;
+    const pending = !!(streak as any)?.catchupPending;
+    return !alreadyUsedThisWeek && !alreadyArmedThisWeek && !pending;
+  }, [streak]);
+
+  const headerShared = (
     <View>
-      <View style={s.headerRow}>
+      {/* Top Tabs */}
+      <View style={s.topTabs}>
+        <Pressable onPress={() => setTopTab('shared')} style={[s.tab, topTab === 'shared' && s.tabActive]}>
+          <ThemedText variant="label" color={topTab === 'shared' ? '#fff' : t.colors.text}>Shared</ThemedText>
+        </Pressable>
+        <Pressable onPress={() => setTopTab('personal')} style={[s.tab, topTab === 'personal' && s.tabActive]}>
+          <ThemedText variant="label" color={topTab === 'personal' ? '#fff' : t.colors.text}>Personal</ThemedText>
+        </Pressable>
+      </View>
+
+      {/* Header mit großem Add-Button */}
+      <View style={s.headerRowNoWrap}>
         <ThemedText variant="display" style={{ flexShrink: 1, marginRight: t.spacing.s }}>
           Shared tasks
         </ThemedText>
-        <View style={{ flexShrink: 0 }}>
-          <Button label="Add reward" variant="outline" onPress={() => setShowAddReward(true)} />
-        </View>
+        <Button label="Add reward" onPress={() => setShowAddReward(true)} />
       </View>
 
       {rewardsSection}
@@ -830,6 +1350,18 @@ const TasksScreen: React.FC = () => {
               onSubmitEditing={handleAddTask}
             />
           </SpotlightTarget>
+          <Pressable
+            onPress={async () => setSharedWorth(await pickWorth(sharedWorth))}
+            style={s.pointsPicker}
+            accessibilityRole="button"
+            accessibilityLabel="Set task point value"
+            hitSlop={8}
+          >
+            <Ionicons name="trophy-outline" size={14} color={t.colors.primary} />
+            <ThemedText variant="label" style={s.pointsPickerText}>
+              +{sharedWorth}
+            </ThemedText>
+          </Pressable>
           <SpotlightTarget id="ts-add">
             <Button label="Add" onPress={handleAddTask} disabled={!title.trim() || !pairId} />
           </SpotlightTarget>
@@ -851,35 +1383,131 @@ const TasksScreen: React.FC = () => {
     </View>
   );
 
+  const headerPersonal = (
+    <View>
+      {/* Top Tabs */}
+      <View style={s.topTabs}>
+        <Pressable onPress={() => setTopTab('shared')} style={[s.tab, topTab === 'shared' && s.tabActive]}>
+          <ThemedText variant="label" color={topTab === 'shared' ? '#fff' : t.colors.text}>Shared</ThemedText>
+        </Pressable>
+        <Pressable onPress={() => setTopTab('personal')} style={[s.tab, topTab === 'personal' && s.tabActive]}>
+          <ThemedText variant="label" color={topTab === 'personal' ? '#fff' : t.colors.text}>Personal</ThemedText>
+        </Pressable>
+      </View>
+
+      <View style={s.headerRow}>
+        <ThemedText variant="display" style={{ flexShrink: 1 }}>
+          Personal tasks
+        </ThemedText>
+      </View>
+
+      {/* Sub tabs */}
+      <View style={s.subTabs}>
+        <Pressable onPress={() => setPersonalTab('yours')} style={[s.subTab, personalTab === 'yours' && s.subTabActive]}>
+          <ThemedText variant="label" color={personalTab === 'yours' ? '#fff' : t.colors.text}>Your tasks</ThemedText>
+        </Pressable>
+        <Pressable onPress={() => setPersonalTab('partners')} style={[s.subTab, personalTab === 'partners' && s.subTabActive]}>
+          <ThemedText variant="label" color={personalTab === 'partners' ? '#fff' : t.colors.text}>Partner’s tasks</ThemedText>
+        </Pressable>
+      </View>
+
+      {/* Input nur im Partners-Tab */}
+      {personalTab === 'partners' && (
+        <Card style={{ marginBottom: t.spacing.md }}>
+          <View style={s.inputRow}>
+            <Input
+              ref={inputPersonalRef}
+              value={titlePersonal}
+              onChangeText={setTitlePersonal}
+              placeholder={pairId ? 'New task for your partner…' : 'Link accounts to add personal tasks'}
+              containerStyle={{ flex: 1, marginRight: t.spacing.s }}
+              editable={!!pairId && !!partnerUid}
+              returnKeyType="done"
+              onSubmitEditing={handleAddPersonalTask}
+            />
+            <Pressable
+              onPress={async () => setPersonalWorth(await pickWorth(personalWorth))}
+              style={s.pointsPicker}
+              accessibilityRole="button"
+              accessibilityLabel="Set task point value"
+              hitSlop={8}
+            >
+              <Ionicons name="trophy-outline" size={14} color={t.colors.primary} />
+              <ThemedText variant="label" style={s.pointsPickerText}>
+                +{personalWorth}
+              </ThemedText>
+            </Pressable>
+            <Button label="Add" onPress={handleAddPersonalTask} disabled={!titlePersonal.trim() || !pairId || !partnerUid} />
+          </View>
+          <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: t.spacing.s }}>
+            Create tasks your partner should do. You can give them points here.
+          </ThemedText>
+        </Card>
+      )}
+    </View>
+  );
+
+  /* Which dataset + renderers to use based on tabs */
+  const data = topTab === 'shared'
+    ? sharedTasks
+    : (personalTab === 'yours' ? personalYour : personalPartners);
+
+  const renderItem = topTab === 'shared' ? renderItemShared : renderItemPersonal;
+
+  const emptyBlock = topTab === 'shared'
+    ? (
+      <Card>
+        <View style={{ alignItems: 'center', paddingVertical: t.spacing.lg }}>
+          <ThemedText variant="display">📝</ThemedText>
+          <ThemedText variant="title" style={{ marginTop: t.spacing.xs }}>
+            No shared tasks yet
+          </ThemedText>
+          <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: t.spacing.xs }}>
+            Try adding ‘Plan a surprise’ 😉
+          </ThemedText>
+          <View style={{ marginTop: t.spacing.md }}>
+            <Button label="Add a task" onPress={() => inputRef.current?.focus()} disabled={!pairId} />
+          </View>
+        </View>
+      </Card>
+    )
+    : (
+      <Card>
+        <View style={{ alignItems: 'center', paddingVertical: t.spacing.lg }}>
+          <ThemedText variant="display">👥</ThemedText>
+          <ThemedText variant="title" style={{ marginTop: t.spacing.xs }}>
+            {personalTab === 'yours' ? 'No tasks from your partner yet' : 'No tasks for your partner yet'}
+          </ThemedText>
+          <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: t.spacing.xs }}>
+            {personalTab === 'yours'
+              ? 'Ask your partner to add something for you ✨'
+              : 'Create a small, kind task for them 💞'}
+          </ThemedText>
+          {personalTab === 'partners' && (
+            <View style={{ marginTop: t.spacing.md }}>
+              <Button label="Add a task" onPress={() => inputPersonalRef.current?.focus()} disabled={!pairId || !partnerUid} />
+            </View>
+          )}
+        </View>
+      </Card>
+    );
+
+  const header = topTab === 'shared' ? headerShared : headerPersonal;
+
   return (
     <SafeAreaView style={[s.screen, { paddingTop: t.spacing.md }]} edges={['top', 'left', 'right']}>
       {showConfetti ? <ConfettiTiny /> : null}
 
       <KeyboardAvoidingView behavior={Platform.select({ ios: 'padding', android: undefined })} style={{ flex: 1 }}>
         <FlatList
-          data={tasks}
+          data={data}
           keyExtractor={(i) => i.id}
           ItemSeparatorComponent={() => <View style={{ height: t.spacing.s }} />}
           renderItem={renderItem}
-          ListHeaderComponent={listHeader}
-          contentContainerStyle={{ paddingBottom: insets.bottom + t.spacing.xl }}
+          ListHeaderComponent={header}
+          contentContainerStyle={{ paddingBottom: insets.bottom + t.spacing.xl, paddingHorizontal: t.spacing.md }}
           keyboardShouldPersistTaps="handled"
-          ListEmptyComponent={
-            <Card>
-              <View style={{ alignItems: 'center', paddingVertical: t.spacing.lg }}>
-                <ThemedText variant="display">📝</ThemedText>
-                <ThemedText variant="title" style={{ marginTop: t.spacing.xs }}>
-                  No shared tasks yet
-                </ThemedText>
-                <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: t.spacing.xs }}>
-                  Try adding ‘Plan a surprise’ 😉
-                </ThemedText>
-                <View style={{ marginTop: t.spacing.md }}>
-                  <Button label="Add a task" onPress={() => inputRef.current?.focus()} disabled={!pairId} />
-                </View>
-              </View>
-            </Card>
-          }
+          ListEmptyComponent={emptyBlock}
         />
 
         <ToastUndo
@@ -889,9 +1517,26 @@ const TasksScreen: React.FC = () => {
           onHide={() => setToast({ visible: false, msg: '' })}
         />
 
-        <RedeemModal visible={showAddReward} onClose={() => setShowAddReward(false)} onCreate={onCreateReward} />
-
-        <SpotlightAutoStarter uid={user?.uid ?? null} steps={TASKS_TOUR_STEPS} persistKey="tour-tasks-shared-only" />
+        {/* Rewards modal + spotlight nur im Shared-Tab */}
+        {topTab === 'shared' && (
+          <>
+            <RedeemModal
+              visible={showAddReward}
+              onClose={() => setShowAddReward(false)}
+              // Fallback: falls Modal nur (title, cost) liefert
+              onCreate={(title: string, cost: number) => onCreateReward(title, cost)}
+              // Neu: Modal enthält Tabs (Shared/Personal) und gibt scope zurück
+              onCreateWithScope={(title: string, cost: number, scope: RewardScope) =>
+                onCreateReward(title, cost, scope)
+              }
+              // Vorbelegung der Tabs im Modal passend zur aktuellen Listen-Ansicht
+              initialScope={rewardScope}
+              // Optionaler Hint fürs Modal, dass es die Scope-Navigation anzeigen soll
+              showScopeTabs
+            />
+            <SpotlightAutoStarter uid={user?.uid ?? null} steps={TASKS_TOUR_STEPS} persistKey="tour-tasks-shared-only" />
+          </>
+        )}
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -913,6 +1558,56 @@ const styles = (t: ThemeTokens) =>
   StyleSheet.create({
     screen: { flex: 1, backgroundColor: t.colors.bg },
 
+    topTabs: {
+      flexDirection: 'row',
+      gap: 8,
+      paddingHorizontal: t.spacing.md,
+      marginBottom: t.spacing.s,
+    },
+    tab: {
+      paddingHorizontal: t.spacing.md,
+      paddingVertical: 10,
+      borderRadius: 999,
+      backgroundColor: t.colors.card,
+      borderWidth: 1,
+      borderColor: t.colors.border,
+    },
+    tabActive: {
+      backgroundColor: t.colors.primary,
+      borderColor: t.colors.primary,
+    },
+
+    subTabs: {
+      flexDirection: 'row',
+      gap: 8,
+      paddingHorizontal: t.spacing.md,
+      marginBottom: t.spacing.s,
+    },
+    subTab: {
+      paddingHorizontal: t.spacing.md,
+      paddingVertical: 9,
+      borderRadius: 999,
+      backgroundColor: t.colors.card,
+      borderWidth: 1,
+      borderColor: t.colors.border,
+    },
+    subTabActive: {
+      backgroundColor: t.colors.primary,
+      borderColor: t.colors.primary,
+    },
+
+    // Non-wrapping header row for Shared section
+    headerRowNoWrap: {
+      paddingHorizontal: t.spacing.md,
+      paddingTop: t.spacing.md,
+      paddingBottom: t.spacing.s,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      flexWrap: 'nowrap',
+      columnGap: 8,
+    },
+
     headerRow: {
       paddingHorizontal: t.spacing.md,
       paddingTop: t.spacing.md,
@@ -924,6 +1619,30 @@ const styles = (t: ThemeTokens) =>
       rowGap: 8,
       columnGap: 8,
     },
+
+    miniBtn: {
+      paddingHorizontal: 10,
+      paddingVertical: 8,
+      borderRadius: 999,
+      backgroundColor: t.colors.card,
+      borderWidth: 1,
+      borderColor: t.colors.border,
+      flexDirection: 'row',
+      alignItems: 'center',
+    },
+    miniBtnText: { marginLeft: 6 },
+    pointsPicker: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: 10,
+      paddingVertical: 10,
+      borderRadius: 999,
+      backgroundColor: t.colors.card,
+      borderWidth: 1,
+      borderColor: withAlpha(t.colors.primary, 0.25),
+      marginRight: t.spacing.s,
+    },
+    pointsPickerText: { marginLeft: 6 },
 
     header: { padding: t.spacing.md, paddingBottom: t.spacing.s },
 
@@ -956,7 +1675,7 @@ const styles = (t: ThemeTokens) =>
       borderColor: t.colors.border,
     },
 
-    itemCard: { marginHorizontal: t.spacing.md },
+    itemCard: { marginBottom: t.spacing.s },
     itemRow: { flexDirection: 'row', alignItems: 'center', gap: t.spacing.s as number },
 
     checkbox: {
@@ -1001,9 +1720,15 @@ const styles = (t: ThemeTokens) =>
       alignItems: 'center',
       justifyContent: 'space-between',
       paddingVertical: 6,
+      paddingHorizontal: t.spacing.md,
     },
-    foldChevron: {
-      marginLeft: 8,
+    foldChevron: { marginLeft: 8 },
+
+    rewardsTabs: {
+      flexDirection: 'row',
+      gap: 8,
+      paddingHorizontal: t.spacing.md,
+      paddingBottom: 6,
     },
   });
 

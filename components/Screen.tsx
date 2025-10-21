@@ -17,7 +17,6 @@ import { useThemeContext } from './ThemeProvider';
 const LG: any =
   (LinearGradient as any)?.displayName === 'UnimplementedView' ? View : LinearGradient;
 
-// Props
 export type ScreenProps = PropsWithChildren<{
   keyboard?: boolean;
   scroll?: boolean;
@@ -25,54 +24,29 @@ export type ScreenProps = PropsWithChildren<{
   contentStyle?: StyleProp<ViewStyle>;
 }>;
 
-// Pick background palette based on theme (Porcelain / Mist variants)
 function getCanvas(themeName: string, resolved: 'light' | 'dark') {
   if (resolved === 'dark') {
-    // Charcoal paper variant for dark mode
     return {
       base: '#131315',
       top: '#1A1B1E',
       bottom: '#131315',
-      fog: 'rgba(255,255,255,0.02)',
     } as const;
   }
 
-  // Light variants
-  const PORCELAIN_BASE = '#FCFAFD'; // warm, neutral – works best with Rose/Forest
-  const MIST_BASE = '#F7F7FA'; // cool, neutral – works best with Ocean/Mono
+  const PORCELAIN_BASE = '#FCFAFD';
+  const MIST_BASE = '#F7F7FA';
 
   switch (themeName) {
     case 'ocean':
     case 'mono':
-      return {
-        base: MIST_BASE,
-        top: '#F4F6FA',
-        bottom: MIST_BASE,
-        fog: 'rgba(240,244,255,0.05)',
-      } as const;
+      return { base: MIST_BASE, top: '#F4F6FA', bottom: MIST_BASE } as const;
     case 'forest':
-      return {
-        base: PORCELAIN_BASE,
-        top: '#F3F8F2',
-        bottom: PORCELAIN_BASE,
-        fog: 'rgba(220,239,230,0.04)',
-      } as const;
+      return { base: PORCELAIN_BASE, top: '#F3F8F2', bottom: PORCELAIN_BASE } as const;
     case 'high-contrast':
-      return {
-        base: '#FFFFFF',
-        top: '#FFFFFF',
-        bottom: '#FFFFFF',
-        fog: 'transparent',
-      } as const;
+      return { base: '#FFFFFF', top: '#FFFFFF', bottom: '#FFFFFF' } as const;
     case 'light-rose':
     default:
-      // Porcelain Blush (romantic, not loud)
-      return {
-        base: PORCELAIN_BASE,
-        top: '#FFF5FA',
-        bottom: PORCELAIN_BASE,
-        fog: 'rgba(255,221,235,0.05)',
-      } as const;
+      return { base: PORCELAIN_BASE, top: '#FFF5FA', bottom: PORCELAIN_BASE } as const;
   }
 }
 
@@ -108,7 +82,7 @@ export default function Screen({
 
   const body = (
     <View style={[s.root, { backgroundColor: canvas.base }, style]}>
-      {/* Subtle vertical wash */}
+      {/* Subtle vertical wash (no corner fog) */}
       <LG
         pointerEvents="none"
         colors={[canvas.top, canvas.bottom]}
@@ -116,33 +90,6 @@ export default function Screen({
         end={{ x: 0.5, y: 1 }}
         style={StyleSheet.absoluteFill}
       />
-
-      {/* Very faint corner fog to add depth without saturation */}
-      <View pointerEvents="none" style={StyleSheet.absoluteFill}>
-        <View
-          style={{
-            position: 'absolute',
-            right: -120,
-            top: -80,
-            width: 260,
-            height: 260,
-            borderRadius: 260,
-            backgroundColor: canvas.fog,
-          }}
-        />
-        <View
-          style={{
-            position: 'absolute',
-            left: -120,
-            bottom: -80,
-            width: 260,
-            height: 260,
-            borderRadius: 260,
-            backgroundColor: canvas.fog,
-          }}
-        />
-      </View>
-
       {content}
     </View>
   );

@@ -2,12 +2,10 @@
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import NetInfo from '@react-native-community/netinfo';
-import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import { useNavigation } from '@react-navigation/native';
 import {
   collection,
   doc,
-  limit,
   onSnapshot,
   orderBy,
   query,
@@ -32,7 +30,6 @@ import {
   StyleSheet,
   View,
 } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import Button from '../components/Button';
 import Card from '../components/Card';
@@ -75,13 +72,6 @@ const IDEAS = [
 
 const isIOS = Platform.OS === 'ios';
 
-type PointsItem = {
-  id: string;
-  value: number;
-  reason?: string | null;
-  createdAt?: any;
-};
-
 // ---- Normalizers shared with Challenges ----
 function getPointValue(data: any): number {
   const candidates = [data?.value, data?.points, data?.point, data?.amount, data?.delta, data?.score];
@@ -91,7 +81,6 @@ function getPointValue(data: any): number {
   }
   return 0;
 }
-
 function getDocDate(data: any): Date | null {
   const fields = ['createdAt', 'timestamp', 'ts', 'time', 'date'];
   for (const k of fields) {
@@ -113,12 +102,9 @@ function getDocDate(data: any): Date | null {
   }
   return null;
 }
-
-// Use a stable id across global + subcollection (prefers idempotencyKey)
 function dedupeKey(data: any, id: string) {
   return String(data?.idempotencyKey ?? id);
 }
-
 function greeting() {
   const h = new Date().getHours();
   if (h < 12) return 'Good morning';
@@ -176,7 +162,6 @@ function startOfWeekMondayUTC(d = new Date()) {
   copy.setUTCDate(copy.getUTCDate() - diffToMon);
   return copy;
 }
-
 function weekKeyUTC(d = new Date()) {
   const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
   const day = (date.getUTCDay() + 6) % 7; // Mon..Sun
@@ -188,8 +173,6 @@ function weekKeyUTC(d = new Date()) {
   const year = date.getUTCFullYear();
   return `${year}-W${String(weekNo).padStart(2, '0')}`;
 }
-
-// ---------- partner UID helper ----------
 function extractPartnerUidFromPairDoc(d: any, myUid: string): string | null {
   if (!d) return null;
   if (d.userA && d.userB) return d.userA === myUid ? d.userB : d.userA;
@@ -205,9 +188,6 @@ export default function HomeScreen() {
   const s = useMemo(() => styles(t), [t]);
   const nav = useNavigation<any>();
 
-  const insets = useSafeAreaInsets();
-  const tabBarHeight = useBottomTabBarHeight();
-
   const { user } = useAuthListener();
   const { total, weekly } = usePointsTotal(user?.uid);
   const streak = useStreak(user?.uid);
@@ -218,7 +198,6 @@ export default function HomeScreen() {
   const [pairHint, setPairHint] = useState<PairHint>('unknown');
   const [isOnline, setIsOnline] = useState<boolean | null>(null);
 
-  const [recent, setRecent] = useState<PointsItem[]>([]);
   const [showAddReward, setShowAddReward] = useState(false);
 
   // CODE PROMPT (Android + fallback)
@@ -232,6 +211,7 @@ export default function HomeScreen() {
   const [rewardReady, setRewardReady] = useState(false);
   const [settingsReady, setSettingsReady] = useState(false);
   const [interactionsDone, setInteractionsDone] = useState(false);
+  const [navReady, setNavReady] = useState(false);
 
   // 🔴 LIVE weekly & total
   const [weeklyLive, setWeeklyLive] = useState<number | null>(null);
@@ -329,38 +309,13 @@ export default function HomeScreen() {
     return () => off();
   }, [user?.uid, pairId]);
 
-  // ---- Recent (your last 3)
-  useEffect(() => {
-    if (!user) return;
-    const qRef = query(
-      collection(db, 'points'),
-      where('ownerId', '==', user.uid),
-      orderBy('createdAt', 'desc'),
-      limit(3)
-    );
-    const off = onSnapshot(qRef, (snap: QuerySnapshot<DocumentData>) => {
-      const items: PointsItem[] = snap.docs.map((d) => {
-        const data = d.data() as any;
-        return {
-          id: d.id,
-          value: Number(data.value ?? 0),
-          reason: data.reason ?? null,
-          createdAt: data.createdAt,
-        };
-      });
-      setRecent(items);
-    });
-    return () => off();
-  }, [user]);
-
-  // ---- LIVE weekly total — UNION (pairId + my ownerId + partner ownerId) with de-dupe; ignores negatives
+  // ---- LIVE weekly total (pair-first; positive only)
   useEffect(() => {
     if (!user?.uid) {
       setWeeklyLive(null);
       return;
     }
 
-    // ✅ Use ISO week window in UTC so both devices share the same boundaries
     const since = startOfWeekMondayUTC();
     const until = new Date(since);
     until.setUTCDate(until.getUTCDate() + 7);
@@ -381,8 +336,8 @@ export default function HomeScreen() {
 
     const unsubs: Array<() => void> = [];
 
-    const add = (qRef: Query<DocumentData>, fbRef?: Query<DocumentData>) =>
-      onSnapshot(
+    function add(qRef: Query<DocumentData>, fbRef?: Query<DocumentData>) {
+      const off = onSnapshot(
         qRef,
         (snap: QuerySnapshot<DocumentData>) => {
           for (const d of snap.docs) buf.set(dedupeKey(d.data(), d.id), d.data());
@@ -390,44 +345,22 @@ export default function HomeScreen() {
         },
         (_err: FirestoreError) => {
           if (!fbRef) return;
-          const off = onSnapshot(fbRef, (snap2: QuerySnapshot<DocumentData>) => {
+          const offFb = onSnapshot(fbRef, (snap2: QuerySnapshot<DocumentData>) => {
             for (const d of snap2.docs) buf.set(dedupeKey(d.data(), d.id), d.data());
             recompute();
           });
-          unsubs.push(off);
+          unsubs.push(offFb);
         }
       );
+      unsubs.push(off);
+    }
 
-    // mine (ownerId)
-    unsubs.push(
+    // ✅ Pair-first: when paired, only count pair-scoped docs (and the pair subcollection).
+    if (pairId) {
       add(
-        query(baseRef, where('ownerId', '==', user.uid), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')),
-        query(baseRef, where('ownerId', '==', user.uid))
-      )
-    );
-
-    // shared pair docs
-    if (pairId) {
-      unsubs.push(
-        add(
-          query(baseRef, where('pairId', '==', pairId), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')),
-          query(baseRef, where('pairId', '==', pairId))
-        )
+        query(baseRef, where('pairId', '==', pairId), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')),
+        query(baseRef, where('pairId', '==', pairId))
       );
-    }
-
-    // partner legacy owner-only
-    if (partnerUid) {
-      unsubs.push(
-        add(
-          query(baseRef, where('ownerId', '==', partnerUid), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')),
-          query(baseRef, where('ownerId', '==', partnerUid))
-        )
-      );
-    }
-
-    // optional subcollection: /pairs/{pairId}/points
-    if (pairId) {
       const offSub = onSnapshot(
         collection(db, 'pairs', pairId, 'points'),
         (snap) => {
@@ -436,23 +369,35 @@ export default function HomeScreen() {
         }
       );
       unsubs.push(offSub);
+    } else {
+      // Not paired: fall back to my owner-only docs
+      add(
+        query(baseRef, where('ownerId', '==', user.uid), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')),
+        query(baseRef, where('ownerId', '==', user.uid))
+      );
     }
 
-    // listen for immediate updates emitted by Challenges
+    // Listen for immediate updates emitted by Challenges (same pair/week only)
     const offEvt = DeviceEventEmitter.addListener('lp.weekly.points', (payload: any) => {
       try {
-        if (!payload || payload.pairId !== pairId) return;
         const wk = weekKeyUTC(new Date());
-        if (payload.week !== wk) return;
-        setWeeklyLive((prev) => (typeof prev === 'number' ? Math.max(prev, Number(payload.points) || 0) : Number(payload.points) || 0));
+        if (pairId && payload?.pairId !== pairId) return;
+        if (payload?.week !== wk) return;
+        setWeeklyLive((prev) =>
+          (typeof prev === 'number'
+            ? Math.max(prev, Number(payload.points) || 0)
+            : Number(payload.points) || 0)
+        );
       } catch {}
     });
     unsubs.push(() => offEvt.remove());
 
-    return () => { unsubs.forEach((u) => u()); };
-  }, [user?.uid, pairId, partnerUid]);
+    return () => {
+      unsubs.forEach((u) => u());
+    };
+  }, [user?.uid, pairId]);
 
-  // ---- LIVE lifetime total (net; includes negatives) — UNION (pairId + both owners)
+  // ---- LIVE lifetime total (pair-first; positive-only)
   useEffect(() => {
     if (!user?.uid) {
       setTotalLive(null);
@@ -464,14 +409,14 @@ export default function HomeScreen() {
       let sum = 0;
       for (const data of buf.values()) {
         const v = getPointValue(data);
-        if (Number.isFinite(v)) sum += v;
+        if (Number.isFinite(v) && v > 0) sum += v;
       }
       setTotalLive(sum);
     };
 
     const unsubs: Array<() => void> = [];
-    const add = (qRef: Query<DocumentData>) =>
-      onSnapshot(
+    function add(qRef: Query<DocumentData>) {
+      const off = onSnapshot(
         qRef,
         (snap: QuerySnapshot<DocumentData>) => {
           for (const d of snap.docs) buf.set(dedupeKey(d.data(), d.id), d.data());
@@ -479,16 +424,12 @@ export default function HomeScreen() {
         },
         (_err: FirestoreError) => {}
       );
+      unsubs.push(off);
+    }
 
-    // mine
-    unsubs.push(add(query(baseRef, where('ownerId', '==', user.uid))));
-    // partner legacy
-    if (partnerUid) unsubs.push(add(query(baseRef, where('ownerId', '==', partnerUid))));
-    // shared pair
-    if (pairId) unsubs.push(add(query(baseRef, where('pairId', '==', pairId))));
-
-    // optional subcollection: /pairs/{pairId}/points
     if (pairId) {
+      // ✅ Pair-first: only pair-scoped docs + optional pair mirror subcollection
+      add(query(baseRef, where('pairId', '==', pairId)));
       const offSub = onSnapshot(
         collection(db, 'pairs', pairId, 'points'),
         (snap) => {
@@ -497,12 +438,17 @@ export default function HomeScreen() {
         }
       );
       unsubs.push(offSub);
+    } else {
+      // Not paired: fall back to my owner-only docs
+      add(query(baseRef, where('ownerId', '==', user.uid)));
     }
 
-    return () => { unsubs.forEach((u) => u()); };
-  }, [user?.uid, pairId, partnerUid]);
+    return () => {
+      unsubs.forEach((u) => u());
+    };
+  }, [user?.uid, pairId]);
 
-  // ---- Mirror challenge completions into shared pair points (root + subcollection)
+  // ---- Mirror challenge completions into shared pair points
   useEffect(() => {
     if (!user?.uid) return;
 
@@ -523,13 +469,8 @@ export default function HomeScreen() {
           createdAt: serverTimestamp(),
         };
 
-        // Root doc (merge so we can upgrade an owner-only write to pair-scoped)
         await setDoc(doc(db, 'points', key), base, { merge: true });
-
-        // Subcollection mirror for any screens that read /pairs/{pairId}/points
-        if (pairId) {
-          await setDoc(doc(db, 'pairs', pairId, 'points', key), base, { merge: true });
-        }
+        if (pairId) await setDoc(doc(db, 'pairs', pairId, 'points', key), base, { merge: true });
       } catch (e) {
         console.warn('[home] pair mirror write failed:', e);
       }
@@ -538,7 +479,7 @@ export default function HomeScreen() {
     return () => sub.remove();
   }, [user?.uid, pairId]);
 
-  // ---- Optimistic bump on challenge completion
+  // ---- Optimistic bump
   useEffect(() => {
     const sub = DeviceEventEmitter.addListener('lp.challenge.completed', (payload: any) => {
       const pts = Number(payload?.points ?? 0);
@@ -559,7 +500,6 @@ export default function HomeScreen() {
       if (live >= target) setWeeklyOptimistic(null);
     }
   }, [weeklyLive, weekly, weeklyOptimistic]);
-
   useEffect(() => {
     if (totalOptimistic) {
       const live = (totalLive ?? total ?? 0);
@@ -593,9 +533,7 @@ export default function HomeScreen() {
   const weeklyBase = weeklyLive ?? weekly ?? 0;
   const weeklyDisplayRaw =
     weeklyOptimistic ? Math.max(weeklyBase, weeklyOptimistic.baseline + weeklyOptimistic.bump) : weeklyBase;
-  // Cap weekly progress at WEEK_GOAL (50)
   const weeklyDisplay = Math.min(weeklyDisplayRaw, WEEK_GOAL);
-
   const totalBase = totalLive ?? (total ?? 0);
   const totalDisplay =
     totalOptimistic ? Math.max(totalBase, totalOptimistic.baseline + totalOptimistic.bump) : totalBase;
@@ -733,6 +671,11 @@ export default function HomeScreen() {
     };
   }, []);
 
+  // We don't measure the tab bar from here; it's targeted by id "tabbar" from AppNavigator.
+  useEffect(() => {
+    setNavReady(true);
+  }, []);
+
   const FIRST_RUN_STEPS: SpotlightStep[] = useMemo(() => {
     const base: SpotlightStep[] = [
       {
@@ -759,35 +702,38 @@ export default function HomeScreen() {
       { id: 'reward', targetId: 'home-add-reward', title: 'Rewards',    text: 'Add a reward you can redeem with points.' },
       { id: 'ideas',  targetId: 'home-ideas-anchor', title: 'Ideas for today', text: 'Quick suggestions for easy wins.', placement: 'top', padding: 6 },
       { id: 'settings', targetId: 'home-settings', title: 'Settings', text: 'Manage your profile, pairing, and notifications.' },
-      isIOS
-        ? ({
+      Platform.OS === 'ios'
+        ? {
             id: 'nav',
-            targetId: 'tabbar-anchor',
+            targetId: 'tabbar', // highlight the real iOS tab bar
             title: 'Navigation',
             text: 'Use the tabs below to move around: Home, Memories, Reminders, Love Notes, Tasks, Challenges.',
             placement: 'top',
             padding: 0,
-            tooltipOffset: 22,
+            tooltipOffset: 10,
             allowBackdropTapToNext: true,
-          } as any)
+          }
         : {
             id: 'nav',
             targetId: null,
             title: 'Navigation',
             text: 'Use the tabs below to move around: Home, Memories, Reminders, Love Notes, Tasks, Challenges.',
             placement: 'bottom',
+            padding: 0,
+            allowBackdropTapToNext: true,
           }
     );
 
     return base;
-  }, [pairCardShouldShow, isIOS]);
+  }, [pairCardShouldShow]);
 
   const spotlightReady =
     interactionsDone &&
     logReady &&
     rewardReady &&
     settingsReady &&
-    (!pairCardShouldShow || linkReady);
+    (!pairCardShouldShow || linkReady) &&
+    navReady;
 
   return (
     <Screen>
@@ -887,7 +833,6 @@ export default function HomeScreen() {
             )}
           </View>
 
-          {/* Celebration line appears under the title when goal is reached */}
           {weeklyLeft === 0 && (
             <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 4 }}>
               Weekly goal reached — you’re a dream team! 💞
@@ -897,7 +842,6 @@ export default function HomeScreen() {
 
         <ProgressBar value={weeklyDisplay} max={WEEK_GOAL} height={8} trackColor="#EDEAF1" />
 
-        {/* Hide the generic nudge once the goal is reached */}
         {weeklyLeft > 0 && (
           <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 8 }}>
             {nudge}
@@ -936,9 +880,12 @@ export default function HomeScreen() {
           <View>
             <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
               <ThemedText variant="subtitle" style={{ flex: 1 }}>Ideas for today</ThemedText>
-              <Pressable onPress={() => nav.navigate('Discover')} accessibilityRole="link">
+
+              {/* Static label only — no navigation */}
+              <View>
                 <ThemedText variant="label" color={t.colors.primary}>See more →</ThemedText>
-              </Pressable>
+              </View>
+
               <View style={{ width: 12 }} />
               <Pressable onPress={() => setKey(k => k + 1)} accessibilityRole="button">
                 <ThemedText variant="label" color={t.colors.primary}>🔀 Shuffle</ThemedText>
@@ -966,19 +913,6 @@ export default function HomeScreen() {
         </View>
       </Card>
 
-      {/* Recent */}
-      {recent.length > 0 ? (
-        <Card style={{ marginBottom: 12, borderWidth: 1, borderColor: HAIRLINE }}>
-          <ThemedText variant="subtitle" style={{ marginBottom: 8 }}>Recent activity</ThemedText>
-          {recent.map((p, i) => (
-            <View key={p.id} style={[s.recentRow, i > 0 && s.hairlineTop]}>
-              <ThemedText variant="title" color={t.colors.primary}>{p.value > 0 ? `+${p.value}` : p.value}</ThemedText>
-              <ThemedText variant="caption" color={t.colors.textDim} style={{ marginLeft: 8, flex: 1 }}>{p.reason ?? 'Points'}</ThemedText>
-            </View>
-          ))}
-        </Card>
-      ) : null}
-
       {/* Bottom nudge */}
       <Card style={{ marginBottom: 16, borderWidth: 1, borderColor: HAIRLINE }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 6 }}>
@@ -992,16 +926,6 @@ export default function HomeScreen() {
           <Button label="Open Challenges" variant="outline" onPress={() => nav.navigate('Challenges')} />
         </View>
       </Card>
-
-      {isIOS && (
-        <SpotlightTarget
-          id="tabbar-anchor"
-          pointerEvents="none"
-          style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: tabBarHeight }}
-        >
-          <View style={{ flex: 1 }} />
-        </SpotlightTarget>
-      )}
 
       {/* Add reward modal */}
       <RedeemModal visible={showAddReward} onClose={() => setShowAddReward(false)} onCreate={onCreateReward} />
@@ -1072,8 +996,6 @@ const styles = (t: ThemeTokens) =>
       borderWidth: 1,
       borderColor: '#F0E6EF',
     },
-    hairlineTop: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#F0E6EF', marginTop: 10, paddingTop: 10 },
-    recentRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 8 },
     modalOverlay: {
       flex: 1,
       backgroundColor: 'rgba(0,0,0,0.35)',

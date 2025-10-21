@@ -4,12 +4,13 @@ import Constants from 'expo-constants';
 import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
 import * as SplashScreen from 'expo-splash-screen';
+import { StatusBar } from 'expo-status-bar';
 import { useEffect, useRef, useState } from 'react';
-import { Animated, Easing, Image, LogBox, Platform, StyleSheet } from 'react-native';
+import { Animated, Easing, Image, LogBox, Platform, StyleSheet, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { ThemeProvider } from './components/ThemeProvider';
+import { ThemeProvider, useTokens } from './components/ThemeProvider';
 import { SpotlightProvider } from './components/spotlight';
 import useAuthListener from './hooks/useAuthListener';
 import usePartnerReminderListener from './hooks/usePartnerReminderListener';
@@ -28,7 +29,7 @@ LogBox.ignoreLogs([
   "WebChannelConnection RPC 'Listen' stream",
 ]);
 
-// Control native splash ourselves
+// Control native splash ourselves (we’ll hide it after nav is ready or via failsafe)
 SplashScreen.preventAutoHideAsync().catch(() => {});
 
 // ---------- Helpers for “Make their day” nudges ----------
@@ -105,7 +106,7 @@ function makeRandomWeeklyTriggers(targetCount: number): Date[] {
       if (when.getTime() <= Date.now()) continue;
       const key = when.getTime();
       if (used.has(key)) continue;
-      used.add(key);
+      used.add(key); // ensure no duplicates
       out.push(when);
     }
     week++;
@@ -149,44 +150,47 @@ function useKindnessNudgesScheduler(userId: string | null | undefined) {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      if (!Device.isDevice) return;
+      try {
+        if (!Device.isDevice) return;
 
-      const perms = await Notifications.getPermissionsAsync();
-      if (perms.status !== 'granted') {
-        const req = await Notifications.requestPermissionsAsync();
-        if (req.status !== 'granted') return;
-      }
+        const perms = await Notifications.getPermissionsAsync();
+        if (perms.status !== 'granted') {
+          const req = await Notifications.requestPermissionsAsync();
+          if (req.status !== 'granted') return;
+        }
 
-      if (Platform.OS === 'android') {
-        // Ensure a default channel exists on Android for reliability
-        await Notifications.setNotificationChannelAsync('default', {
-          name: 'Kindness nudges',
-          importance: Notifications.AndroidImportance.DEFAULT,
-          sound: 'default',
-          vibrationPattern: [0, 250, 250, 250],
-          lightColor: '#FF231F7C',
-        }).catch(() => {});
-      }
+        if (Platform.OS === 'android') {
+          await Notifications.setNotificationChannelAsync('default', {
+            name: 'Kindness nudges',
+            importance: Notifications.AndroidImportance.DEFAULT,
+            sound: 'default',
+            vibrationPattern: [0, 250, 250, 250],
+            lightColor: '#FF231F7C',
+          }).catch(() => {});
+        }
 
-      const TARGET = 48; // ~12 weeks @ 4/wk
-      const existing = await Notifications.getAllScheduledNotificationsAsync();
-      if (cancelled) return;
-
-      const toAdd = Math.max(0, TARGET - existing.length);
-      if (toAdd <= 0) return;
-
-      const times = makeRandomWeeklyTriggers(toAdd);
-      for (const when of times) {
-        const prompt = NUDGE_PROMPTS[randInt(0, NUDGE_PROMPTS.length - 1)];
-        await Notifications.scheduleNotificationAsync({
-          content: { title: 'Make their day 💖', body: prompt, sound: false, data: { kind: 'lp:mtday' } },
-          trigger: {
-            type: Notifications.SchedulableTriggerInputTypes.DATE,
-            date: when,
-            ...(Platform.OS === 'android' ? { channelId: 'default' } : null),
-          } as any,
-        });
+        const TARGET = 48; // ~12 weeks @ 4/wk
+        const existing = await Notifications.getAllScheduledNotificationsAsync();
         if (cancelled) return;
+
+        const toAdd = Math.max(0, TARGET - existing.length);
+        if (toAdd <= 0) return;
+
+        const times = makeRandomWeeklyTriggers(toAdd);
+        for (const when of times) {
+          const prompt = NUDGE_PROMPTS[randInt(0, NUDGE_PROMPTS.length - 1)];
+          await Notifications.scheduleNotificationAsync({
+            content: { title: 'Make their day 💖', body: prompt, sound: false, data: { kind: 'lp:mtday' } },
+            trigger: {
+              type: Notifications.SchedulableTriggerInputTypes.DATE,
+              date: when,
+              ...(Platform.OS === 'android' ? { channelId: 'default' } : null),
+            } as any,
+          });
+          if (cancelled) return;
+        }
+      } catch {
+        // never block first render
       }
     })();
 
@@ -196,30 +200,45 @@ function useKindnessNudgesScheduler(userId: string | null | undefined) {
   }, [userId]);
 }
 
-// ---------- CUSTOM INTRO OVERLAY (fade-in logo, then fade-out overlay) ----------
+// ---------- Splash assets / overlay ----------
 const SPLASH_SOURCE = require('./assets/splash.png');
 const _src = Image.resolveAssetSource(SPLASH_SOURCE) || { width: 320, height: 100 };
 const SPLASH_AR = _src.width && _src.height ? _src.width / _src.height : 3.2;
 
+/** Paint the bottom gesture/nav inset so Android doesn’t show strip artifacts over labels.
+ *  IMPORTANT: this must render *behind* the navigator, so include it BEFORE <NavigationContainer/>.
+ */
+function BottomInsetBackground() {
+  const insets = useSafeAreaInsets();
+  const t = useTokens();
+  if (Platform.OS !== 'android' || !insets.bottom) return null;
+  return (
+    <View
+      pointerEvents="none"
+      style={{
+        position: 'absolute',
+        left: 0,
+        right: 0,
+        bottom: 0,
+        height: insets.bottom,
+        backgroundColor: (t as any)?.colors?.card ?? '#FFFFFF',
+        // no zIndex — we want this behind the tab bar
+      }}
+    />
+  );
+}
+
 export default function App() {
   const { user } = useAuthListener();
 
-  // Overlay always shown at launch (both iOS & Android). We'll fade the LOGO in, then the OVERLAY out.
+  // Overlay like your original (this path was stable on Android)
   const [showIntro, setShowIntro] = useState(true);
-  const overlayOpacity = useRef(new Animated.Value(1)).current; // fade OUT to reveal app
-  const logoOpacity = useRef(new Animated.Value(0)).current;    // fade IN to show the wordmark
+  const overlayOpacity = useRef(new Animated.Value(1)).current;
+  const logoOpacity = useRef(new Animated.Value(0)).current;
   const [navReady, setNavReady] = useState(false);
-  const [introInDone, setIntroInDone] = useState(false);        // after logo fade-in + brief hold
+  const [introInDone, setIntroInDone] = useState(false);
 
-  // Hide native (system) splash almost immediately so we never show a tiny Android splash
-  useEffect(() => {
-    const t = setTimeout(() => {
-      SplashScreen.hideAsync().catch(() => {});
-    }, 10);
-    return () => clearTimeout(t);
-  }, []);
-
-  // Run the logo fade-in once (about ~1s including a short hold)
+  // Fade the logo in (~1s incl. hold)
   useEffect(() => {
     if (!showIntro) return;
     const id = requestAnimationFrame(() => {
@@ -229,7 +248,6 @@ export default function App() {
         easing: Easing.out(Easing.cubic),
         useNativeDriver: true,
       }).start(() => {
-        // small hold to ensure "one second splash image fade in"
         const hold = setTimeout(() => setIntroInDone(true), 450);
         return () => clearTimeout(hold);
       });
@@ -237,7 +255,7 @@ export default function App() {
     return () => cancelAnimationFrame(id);
   }, [showIntro, logoOpacity]);
 
-  // Once navigation is ready AND our intro-in is done, fade OUT the overlay quickly
+  // Fade overlay out once nav is ready + intro-in done
   useEffect(() => {
     if (!showIntro) return;
     if (!(navReady && introInDone)) return;
@@ -248,6 +266,21 @@ export default function App() {
       useNativeDriver: true,
     }).start(() => setShowIntro(false));
   }, [navReady, introInDone, showIntro, overlayOpacity]);
+
+  // Hide native splash when nav is ready (or via failsafe below)
+  useEffect(() => {
+    if (!navReady) return;
+    SplashScreen.hideAsync().catch(() => {});
+  }, [navReady]);
+
+  // Hard failsafe: never get stuck on a white overlay
+  useEffect(() => {
+    const t = setTimeout(() => {
+      SplashScreen.hideAsync().catch(() => {});
+      setShowIntro(false);
+    }, 4000);
+    return () => clearTimeout(t);
+  }, []);
 
   // Global notifications handler
   useEffect(() => {
@@ -261,31 +294,33 @@ export default function App() {
     });
   }, []);
 
-  // Ensure common Android channels exist up front
+  // Android channels (non-blocking)
   useEffect(() => {
     if (Platform.OS !== 'android') return;
     (async () => {
-      await Notifications.setNotificationChannelAsync('default', {
-        name: 'General',
-        importance: Notifications.AndroidImportance.DEFAULT,
-        sound: 'default',
-        vibrationPattern: [0, 200, 200, 200],
-        lightColor: '#FF231F7C',
-      }).catch(() => {});
-      await Notifications.setNotificationChannelAsync('reminders', {
-        name: 'Reminders',
-        importance: Notifications.AndroidImportance.DEFAULT,
-        sound: 'default',
-      }).catch(() => {});
-      await Notifications.setNotificationChannelAsync('messages', {
-        name: 'Messages',
-        importance: Notifications.AndroidImportance.DEFAULT,
-        sound: 'default',
-      }).catch(() => {});
+      try {
+        await Notifications.setNotificationChannelAsync('default', {
+          name: 'General',
+          importance: Notifications.AndroidImportance.DEFAULT,
+          sound: 'default',
+          vibrationPattern: [0, 200, 200, 200],
+          lightColor: '#FF231F7C',
+        });
+        await Notifications.setNotificationChannelAsync('reminders', {
+          name: 'Reminders',
+          importance: Notifications.AndroidImportance.DEFAULT,
+          sound: 'default',
+        });
+        await Notifications.setNotificationChannelAsync('messages', {
+          name: 'Messages',
+          importance: Notifications.AndroidImportance.DEFAULT,
+          sound: 'default',
+        });
+      } catch {}
     })();
   }, []);
 
-  // Save Expo push token whenever a user logs in (or changes)
+  // Save Expo push token on sign-in
   useEffect(() => {
     if (user?.uid) registerAndSaveExpoPushToken(user.uid);
   }, [user?.uid]);
@@ -295,15 +330,21 @@ export default function App() {
   useKindnessNudgesScheduler(user?.uid ?? null);
 
   return (
-    <GestureHandlerRootView style={{ flex: 1 }}>
+    <GestureHandlerRootView style={{ flex: 1, backgroundColor: '#FFFFFF' }}>
       <SafeAreaProvider>
         <ThemeProvider>
+          {/* Status bar: light background with dark icons */}
+          <StatusBar style="dark" backgroundColor="#FFFFFF" />
+
           <SpotlightProvider>
+            {/* 👇 render the inset background BEHIND the navigator */}
+            <BottomInsetBackground />
+
             <NavigationContainer onReady={() => setNavReady(true)}>
               {user ? <AppNavigator /> : <AuthNavigator />}
             </NavigationContainer>
 
-            {/* Fullscreen white overlay (blocks UI); logo fades IN, overlay fades OUT */}
+            {/* Fullscreen overlay (logo fades IN, overlay fades OUT) */}
             {showIntro && (
               <Animated.View style={[styles.splashOverlay, { opacity: overlayOpacity }]} pointerEvents="none">
                 <Animated.Image
@@ -330,6 +371,6 @@ const styles = StyleSheet.create({
   splashWordmark: {
     width: '72%',
     maxWidth: 420,
-    aspectRatio: SPLASH_AR, // keep your wordmark crisp without guessing height
+    aspectRatio: SPLASH_AR,
   },
 });

@@ -1,4 +1,5 @@
 // screens/RemindersScreen.tsx
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import * as Notifications from 'expo-notifications';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -30,16 +31,45 @@ import {
   createPartnerReminderDoc,
   ensureNotificationPermission,
   formatLocalTime,
-  scheduleYearlyNotification,
 } from '../utils/reminders';
 
 type SavedReq = Notifications.NotificationRequest;
 
-// classification helpers
+/* ---------------- constants & helpers ---------------- */
 const GENTLE_KIND = 'lp:nudge';
+const ANDROID_CHANNEL_ID = 'reminders';
+const YEARS_AHEAD = 5;
+const DAY = 24 * 60 * 60 * 1000;
+
+const HAIRLINE = '#F0E6EF';
+const CHIP_BG = '#F3EEF6';
+
+const selfIdsKey = (uid: string) => `reminders:self:${uid}`;
+
+function withAlpha(hex: string, alpha: number) {
+  const h = hex.replace('#', '');
+  const full = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
+  const r = parseInt(full.slice(0, 2), 16);
+  const g = parseInt(full.slice(2, 4), 16);
+  const b = parseInt(full.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 function isGentleNudge(req: SavedReq): boolean {
   try { return (req?.content as any)?.data?.kind === GENTLE_KIND; } catch { return false; }
 }
+
+function isMakeTheirDay(req: SavedReq): boolean {
+  try {
+    const title = String(req?.content?.title ?? '');
+    const body  = String(req?.content?.body ?? '');
+    const kind  = (req?.content as any)?.data?.kind;
+    if (/make\s+their\s+day/i.test(title) || /make\s+their\s+day/i.test(body)) return true;
+    if (kind === 'lp:mtday' || kind === 'lp:suggest') return true;
+  } catch {}
+  return false;
+}
+
 function getTriggerType(trigger: any): 'calendar' | 'date' | 'timeInterval' | 'unknown' {
   try {
     if (!trigger) return 'unknown';
@@ -58,43 +88,7 @@ function getTriggerType(trigger: any): 'calendar' | 'date' | 'timeInterval' | 'u
   } catch { return 'unknown'; }
 }
 
-// spotlight tour
-const REMINDERS_TOUR_STEPS: SpotlightStep[] = [
-  { id: 'rem-welcome', targetId: null, title: 'Reminders', text: "Set yearly dates and we'll handle the nudges for you.", placement: 'bottom', allowBackdropTapToNext: true },
-  { id: 'rem-title',  targetId: 'rem-title',  title: 'Title', text: 'Pick a title or use a preset.' },
-  { id: 'rem-date',   targetId: 'rem-date',   title: 'Date',  text: 'Choose the day and month.' },
-  { id: 'rem-time',   targetId: 'rem-time',   title: 'Time',  text: 'Pick when the reminder should appear.' },
-  { id: 'rem-toggle', targetId: 'rem-toggle', title: 'For both', text: 'Switch this on to also add the reminder to your partner’s screen.', placement: 'top' },
-  { id: 'rem-inbox',  targetId: 'rem-inbox',  title: 'Inbox', text: 'See pending partner items and your upcoming reminders here.' },
-];
-
-// palette
-const HAIRLINE = '#F0E6EF';
-const CHIP_BG = '#F3EEF6';
-
-// rgba helper (keeps your theme behavior)
-function withAlpha(hex: string, alpha: number) {
-  const h = hex.replace('#', '');
-  const full = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
-  const r = parseInt(full.slice(0, 2), 16);
-  const g = parseInt(full.slice(2, 4), 16);
-  const b = parseInt(full.slice(4, 6), 16);
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-}
-
-// hide “Make their day” from Saved
-function isMakeTheirDay(req: SavedReq): boolean {
-  try {
-    const title = String(req?.content?.title ?? '');
-    const body  = String(req?.content?.body ?? '');
-    const kind  = (req?.content as any)?.data?.kind;
-    if (/make\s+their\s+day/i.test(title) || /make\s+their\s+day/i.test(body)) return true;
-    if (kind === 'lp:mtday' || kind === 'lp:suggest') return true;
-  } catch {}
-  return false;
-}
-
-// only real yearly calendar (iOS)
+// true yearly calendar (iOS)
 function isYearlyCalendarTrigger(trigger: any): boolean {
   try {
     const ttype = getTriggerType(trigger);
@@ -109,10 +103,6 @@ function isYearlyCalendarTrigger(trigger: any): boolean {
   } catch { return false; }
 }
 
-// ---------- Android scheduling helpers ----------
-const ANDROID_CHANNEL_ID = 'reminders';
-const DAY = 24 * 60 * 60 * 1000;
-
 function nextOccurrence(month1to12: number, day: number, hour: number, minute: number) {
   const now = new Date();
   const year = now.getFullYear();
@@ -123,13 +113,21 @@ function nextOccurrence(month1to12: number, day: number, hour: number, minute: n
   return candidate;
 }
 
-// Cancel previous anniversary schedules so we don't stack/duplicate
-async function cancelExistingAnniversarySchedules() {
+/* --- cancel this title’s series (local de-dupe before scheduling) --- */
+async function cancelAnniversarySchedulesForTitle(matchTitle: string) {
   try {
     const items = await Notifications.getAllScheduledNotificationsAsync();
     const toCancel = items.filter((it) => {
       const kind = (it?.content as any)?.data?.kind;
-      return typeof kind === 'string' && kind.startsWith('lp:anniv:');
+      if (!kind || typeof kind !== 'string' || !kind.startsWith('lp:anniv:')) return false;
+      const t1 = String(it?.content?.title ?? '').trim();
+      const t2 = String((it?.content as any)?.data?.title ?? '').trim();
+      if (t1 && t1.toLowerCase() === matchTitle.toLowerCase()) return true;
+      if (t2 && t2.toLowerCase() === matchTitle.toLowerCase()) return true;
+      const body = String(it?.content?.body ?? '');
+      const m = body.match(/your\s+([^.!?]+?)(?:[.!?]|$)/i);
+      const parsed = m?.[1]?.trim();
+      return !!parsed && parsed.toLowerCase() === matchTitle.toLowerCase();
     });
     await Promise.allSettled(
       toCancel.map((n) => Notifications.cancelScheduledNotificationAsync(n.identifier))
@@ -137,59 +135,94 @@ async function cancelExistingAnniversarySchedules() {
   } catch {}
 }
 
-// ANDROID: schedule with time-interval trigger, ensure at least 90s in the future
-async function scheduleAndroidDate(
-  content: Notifications.NotificationContentInput,
-  when: Date
+/* ---------------- scheduling (unchanged behavior, but we report IDs) ---------------- */
+// iOS: true yearly repeats; report every scheduled id via onScheduled
+async function scheduleIOSYearlyTriplet(
+  params: { title: string; month: number; day: number; hour: number; minute: number },
+  onScheduled?: (id: string) => void | Promise<void>
 ) {
-  const diffSec = Math.ceil((when.getTime() - Date.now()) / 1000);
-  const seconds = Math.max(90, diffSec); // ensure future; prevents immediate fire
-
-  const id = await Notifications.scheduleNotificationAsync({
-    content,
-    trigger: {
-      type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
-      seconds,
-      repeats: false,
-      channelId: ANDROID_CHANNEL_ID,
-      allowWhileIdle: true,
-    } as Notifications.TimeIntervalTriggerInput,
-  });
-  return id;
-}
-
-async function scheduleAndroidYearlyTriplet(params: {
-  title: string;
-  month: number;
-  day: number;
-  hour: number;
-  minute: number;
-}) {
   const { title, month, day, hour, minute } = params;
+  const base = { repeats: true, type: Notifications.SchedulableTriggerInputTypes.CALENDAR } as const;
 
-  const now = new Date();
-  const dueAt = nextOccurrence(month, day, hour, minute);
-  const nextYearSame = new Date(dueAt.getFullYear() + 1, month - 1, day, hour, minute, 0, 0);
+  const id1 = await Notifications.scheduleNotificationAsync({
+    content: { title, body: `It's today! 💞 Did you plan something?`, data: { kind: 'lp:anniv:today', title } },
+    trigger: { ...base, month, day, hour, minute } as any,
+  });
+  onScheduled?.(id1);
 
-  const d1 = new Date(dueAt.getTime() - DAY);
-  const d7 = new Date(dueAt.getTime() - 7 * DAY);
+  const d1 = new Date(2000, month - 1, day); d1.setDate(d1.getDate() - 1);
+  const id2 = await Notifications.scheduleNotificationAsync({
+    content: { title, body: `Tomorrow is your ${title}. A tiny plan goes a long way ✨`, data: { kind: 'lp:anniv:d1', title } },
+    trigger: { ...base, month: d1.getMonth() + 1, day: d1.getDate(), hour, minute } as any,
+  });
+  onScheduled?.(id2);
 
-  const d1Final = d1 > now ? d1 : new Date(nextYearSame.getTime() - DAY);
-  const d7Final = d7 > now ? d7 : new Date(nextYearSame.getTime() - 7 * DAY);
-
-  await scheduleAndroidDate(
-    { title, body: `It's today! 💞 Did you plan something?`, data: { kind: 'lp:anniv:today' } },
-    dueAt
-  );
-  await scheduleAndroidDate(
-    { title, body: `Tomorrow is your ${title}. A tiny plan goes a long way ✨`, data: { kind: 'lp:anniv:d1' } },
-    d1Final
-  );
-  await scheduleAndroidDate(
-    { title, body: `One week until your ${title}! Want ideas?`, data: { kind: 'lp:anniv:d7' } },
-    d7Final
-  );
+  const d7 = new Date(2000, month - 1, day); d7.setDate(d7.getDate() - 7);
+  const id3 = await Notifications.scheduleNotificationAsync({
+    content: { title, body: `One week until your ${title}! Want ideas?`, data: { kind: 'lp:anniv:d7', title } },
+    trigger: { ...base, month: d7.getMonth() + 1, day: d7.getDate(), hour, minute } as any,
+  });
+  onScheduled?.(id3);
 }
+
+// Android: pre-schedule N future years as date alarms; report IDs
+async function scheduleAndroidForYears(
+  params: { title: string; month: number; day: number; hour: number; minute: number; years: number },
+  onScheduled?: (id: string) => void | Promise<void>
+) {
+  const { title, month, day, hour, minute, years } = params;
+
+  const first = nextOccurrence(month, day, hour, minute).getFullYear();
+  const mkDateTrigger = (d: Date): Notifications.DateTriggerInput => ({
+    type: Notifications.SchedulableTriggerInputTypes.DATE,
+    date: d,
+    channelId: ANDROID_CHANNEL_ID,
+  } as any);
+
+  for (let y = 0; y < years; y++) {
+    const year = first + y;
+
+    const due = new Date(year, month - 1, day, hour, minute, 0, 0);
+    const d1  = new Date(due.getTime() - DAY);
+    const d7  = new Date(due.getTime() - 7 * DAY);
+
+    const id1 = await Notifications.scheduleNotificationAsync({
+      content: { title, body: `It's today! 💞 Did you plan something?`, data: { kind: 'lp:anniv:today', year, title } },
+      trigger: mkDateTrigger(due),
+    });
+    onScheduled?.(id1);
+
+    const id2 = await Notifications.scheduleNotificationAsync({
+      content: { title, body: `Tomorrow is your ${title}. A tiny plan goes a long way ✨`, data: { kind: 'lp:anniv:d1', year, title } },
+      trigger: mkDateTrigger(d1),
+    });
+    onScheduled?.(id2);
+
+    const id3 = await Notifications.scheduleNotificationAsync({
+      content: { title, body: `One week until your ${title}! Want ideas?`, data: { kind: 'lp:anniv:d7', year, title } },
+      trigger: mkDateTrigger(d7),
+    });
+    onScheduled?.(id3);
+  }
+}
+
+async function scheduleYearlyTriplet(
+  params: { title: string; month: number; day: number; hour: number; minute: number },
+  onScheduled?: (id: string) => void | Promise<void>
+) {
+  if (Platform.OS === 'ios') return scheduleIOSYearlyTriplet(params, onScheduled);
+  return scheduleAndroidForYears({ ...params, years: YEARS_AHEAD }, onScheduled);
+}
+
+/* ---------------- UI (screen) ---------------- */
+const REMINDERS_TOUR_STEPS: SpotlightStep[] = [
+  { id: 'rem-welcome', targetId: null, title: 'Reminders', text: "Set yearly dates and we'll handle the nudges for you.", placement: 'bottom', allowBackdropTapToNext: true },
+  { id: 'rem-title',  targetId: 'rem-title',  title: 'Title', text: 'Pick a title or use a preset.' },
+  { id: 'rem-date',   targetId: 'rem-date',   title: 'Date',  text: 'Choose the day and month.' },
+  { id: 'rem-time',   targetId: 'rem-time',   title: 'Time',  text: 'Pick when the reminder should appear.' },
+  { id: 'rem-toggle', targetId: 'rem-toggle', title: 'For both', text: 'Switch this on to also add the reminder to your partner’s screen.', placement: 'top' },
+  { id: 'rem-inbox',  targetId: 'rem-inbox',  title: 'Inbox', text: 'See pending partner items and your upcoming reminders here.' },
+];
 
 const RemindersScreen: React.FC = () => {
   const t = useTokens();
@@ -246,6 +279,9 @@ const RemindersScreen: React.FC = () => {
   const [scheduled, setScheduled] = useState<SavedReq[]>([]);
   const [loadingScheduled, setLoadingScheduled] = useState(false);
 
+  // Only show locally-created reminders in Saved
+  const [selfIds, setSelfIds] = useState<Set<string>>(new Set());
+
   const { badge } = usePendingRemindersBadge(user?.uid ?? null);
 
   useEffect(() => {
@@ -254,12 +290,17 @@ const RemindersScreen: React.FC = () => {
       const [pid, puid] = await Promise.all([getPairId(user.uid), getPartnerUid(user.uid)]);
       setPairId(pid);
       setPartnerUid(puid);
+      // load self ids for this user
+      try {
+        const raw = await AsyncStorage.getItem(selfIdsKey(user.uid));
+        if (raw) setSelfIds(new Set(JSON.parse(raw)));
+      } catch {}
     })();
   }, [user]);
 
   const canCreateForBoth = useMemo(() => !!partnerUid && !!pairId, [partnerUid, pairId]);
 
-  // Android: make sure channel exists
+  // Android: ensure channel
   useEffect(() => {
     if (Platform.OS !== 'android') return;
     Notifications.setNotificationChannelAsync(ANDROID_CHANNEL_ID, {
@@ -271,13 +312,12 @@ const RemindersScreen: React.FC = () => {
     }).catch(() => {});
   }, []);
 
-  // Modern notification handler to avoid `shouldShowAlert` deprecation
+  // Notification handler
   useEffect(() => {
     Notifications.setNotificationHandler({
       handleNotification: async () => ({
         shouldPlaySound: true,
         shouldSetBadge: false,
-        // iOS displays: use banner + list instead of deprecated alert
         shouldShowBanner: true,
         shouldShowList: true,
       }) as any,
@@ -294,56 +334,86 @@ const RemindersScreen: React.FC = () => {
     if (!timeOnly) setTimeOnly(new Date(2000, 0, 1, 9, 0));
   }
 
+  /* ---------- functional updates to avoid lost IDs ---------- */
+  const updateSelfIds = useCallback((updater: (prev: Set<string>) => Set<string>) => {
+    if (!user?.uid) return;
+    setSelfIds(prev => {
+      const next = updater(prev);
+      AsyncStorage.setItem(selfIdsKey(user.uid!), JSON.stringify(Array.from(next))).catch(() => {});
+      return next;
+    });
+  }, [user?.uid]);
+
+  const addSelfId = useCallback((id: string) => {
+    updateSelfIds(prev => {
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+  }, [updateSelfIds]);
+
+  const removeSelfId = useCallback((id: string) => {
+    updateSelfIds(prev => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  }, [updateSelfIds]);
+
+  // Load OS scheduled + prune selfIds to existing ones (functional to avoid races)
   const loadScheduled = useCallback(async () => {
     setLoadingScheduled(true);
     try {
       const items = await Notifications.getAllScheduledNotificationsAsync();
-      items.sort((a, b) => {
-        const ta = a.content?.title ?? '';
-        const tb = b.content?.title ?? '';
-        if (ta !== tb) return ta.localeCompare(tb);
-        const sa = triggerToText((a as any).trigger);
-        const sb = triggerToText((b as any).trigger);
-        return sa.localeCompare(sb);
-      });
       setScheduled(items);
+
+      // prune IDs that no longer exist
+      if (user?.uid) {
+        const exist = new Set(items.map(i => i.identifier));
+        updateSelfIds(prev => {
+          const next = new Set(Array.from(prev).filter(id => exist.has(id)));
+          return next;
+        });
+      }
     } finally {
       setLoadingScheduled(false);
     }
-  }, []);
+  }, [updateSelfIds, user?.uid]);
 
   useEffect(() => { loadScheduled(); }, [loadScheduled]);
   useFocusEffect(useCallback(() => { loadScheduled(); }, [loadScheduled]));
 
-  // Only show the main (day-of) yearly item in Saved reminders
+  // Robust title resolver for Saved list (still useful for display)
+  const getReqTitle = useCallback((req: SavedReq) => {
+    const direct = String(req?.content?.title ?? '').trim();
+    if (direct && direct.toLowerCase() !== 'reminder') return direct;
+    const dataTitle = String((req?.content as any)?.data?.title ?? '').trim();
+    if (dataTitle) return dataTitle;
+    const body = String(req?.content?.body ?? '');
+    const m = body.match(/your\s+([^.!?]+?)(?:[.!?]|$)/i);
+    if (m?.[1]) return m[1].trim();
+    return 'Reminder';
+  }, []);
+
+  // Show only *my* locally-created reminders in Saved
   const visibleScheduled = useMemo((): SavedReq[] => {
-    const unique = new Map<string, SavedReq>();
-
-    for (const req of scheduled) {
-      if (isGentleNudge(req)) continue;       // internal nudges
-      if (isMakeTheirDay(req)) continue;      // app suggestions
-
-      const trig = (req as any).trigger;
-      const ttype = getTriggerType(trig);
-
-      // iOS: keep only true yearly calendar (month+day). Android: date/timeInterval are fine.
-      if (ttype === 'calendar' && !isYearlyCalendarTrigger(trig)) continue;
-
-      // Hide the pre-alerts (Android uses data.kind; iOS fallback uses body text)
-      const kind = (req?.content as any)?.data?.kind;
+    const mine = scheduled.filter((req) => selfIds.has(req.identifier));
+    const filtered = mine.filter((req) => !isGentleNudge(req) && !isMakeTheirDay(req));
+    const out: SavedReq[] = [];
+    const seen = new Set<string>();
+    for (const req of filtered) {
+      const kind = (req?.content as any)?.data?.kind ?? 'lp:anniv:today';
       if (kind === 'lp:anniv:d1' || kind === 'lp:anniv:d7') continue;
-      const body = String(req?.content?.body ?? '');
-      if (/one week/i.test(body) || /tomorrow/i.test(body)) continue;
-
-      // Deduplicate
-      const key = `${req.content?.title ?? ''}||${triggerToText(trig)}||${kind ?? ''}`;
-      if (!unique.has(key)) unique.set(key, req);
+      const key = `${getReqTitle(req)}||${kind}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        out.push(req);
+      }
     }
+    return out;
+  }, [scheduled, selfIds, getReqTitle]);
 
-    return Array.from(unique.values());
-  }, [scheduled]);
-
-  function triggerToText(trigger: any): string {
+  function triggerToText(trigger: any, req?: SavedReq): string {
     try {
       if (!trigger) return 'Scheduled';
       const CAL  = Notifications.SchedulableTriggerInputTypes?.CALENDAR ?? 'calendar';
@@ -354,6 +424,8 @@ const RemindersScreen: React.FC = () => {
         (trigger as any).date ? DATE :
         (typeof (trigger as any).seconds === 'number' ? INT : undefined)
       );
+
+      const markYearly = String((req?.content as any)?.data?.kind ?? '').startsWith('lp:anniv:');
 
       if (t === CAL || t === 'calendar') {
         const comps = (trigger as any).dateComponents && typeof (trigger as any).dateComponents === 'object'
@@ -376,9 +448,9 @@ const RemindersScreen: React.FC = () => {
         const d = raw ? new Date(raw) : null;
         if (d && !isNaN(d.getTime())) {
           let dd = '';
-          try { dd = d.toLocaleDateString(); }
+          try { dd = d.toLocaleDateString([], { year: 'numeric', month: 'long', day: 'numeric' }); }
           catch { dd = `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`; }
-          return `${dd} • ${formatLocalTime(d)}`;
+          return `${dd} • ${formatLocalTime(d)}${markYearly ? ' • yearly' : ''}`;
         }
         return 'Scheduled date';
       }
@@ -390,7 +462,7 @@ const RemindersScreen: React.FC = () => {
           let dd = '';
           try { dd = when.toLocaleDateString([], { month: 'long', day: 'numeric' }); }
           catch { dd = `${when.getMonth() + 1}/${when.getDate()}/${when.getFullYear()}`; }
-          return `${dd} • ${formatLocalTime(when)}`;
+          return `${dd} • ${formatLocalTime(when)}${markYearly ? ' • yearly' : ''}`;
         }
         return 'Scheduled';
       }
@@ -401,6 +473,7 @@ const RemindersScreen: React.FC = () => {
 
   async function onCancel(id: string) {
     await Notifications.cancelScheduledNotificationAsync(id);
+    removeSelfId(id);
     await loadScheduled();
   }
 
@@ -429,36 +502,27 @@ const RemindersScreen: React.FC = () => {
 
     setSaving(true);
     try {
-      const baseMonth = dateOnly.getMonth() + 1;
-      const baseDay = dateOnly.getDate();
-      const hour = timeOnly.getHours();
-      const minute = timeOnly.getMinutes();
+      const month = dateOnly.getMonth() + 1;
+      const day   = dateOnly.getDate();
+      const hour  = timeOnly.getHours();
+      const minute= timeOnly.getMinutes();
 
-      // avoid duplicates/bursts
-      await cancelExistingAnniversarySchedules();
+      // de-dupe only this event series
+      await cancelAnniversarySchedulesForTitle(title);
 
-      if (Platform.OS === 'android') {
-        // schedule 3 separate date alarms (future-proofed)
-        await scheduleAndroidYearlyTriplet({ title, month: baseMonth, day: baseDay, hour, minute });
-      } else {
-        // iOS: true yearly calendar repeats
-        await scheduleYearlyNotification({ title, body: `It's today! 💞 Did you plan something?`, month: baseMonth, day: baseDay, hour, minute });
-        const d1 = new Date(new Date(2000, baseMonth - 1, baseDay).getTime() - DAY);
-        await scheduleYearlyNotification({ title, body: `Tomorrow is your ${title}. A tiny plan goes a long way ✨`, month: d1.getMonth() + 1, day: d1.getDate(), hour, minute });
-        const d7 = new Date(new Date(2000, baseMonth - 1, baseDay).getTime() - 7 * DAY);
-        await scheduleYearlyNotification({ title, body: `One week until your ${title}! Want ideas?`, month: d7.getMonth() + 1, day: d7.getDate(), hour, minute });
-      }
+      // local schedule (report ids so Saved shows only mine)
+      await scheduleYearlyTriplet({ title, month, day, hour, minute }, addSelfId);
 
-      if (forBoth && canCreateForBoth && partnerUid) {
-        const dueAt = nextOccurrence(baseMonth, baseDay, hour, minute);
+      // partner doc (unchanged behavior)
+      if (forBoth && pairId && partnerUid) {
+        const dueAt = nextOccurrence(month, day, hour, minute);
         await createPartnerReminderDoc({ forUid: partnerUid, ownerId: user.uid, pairId, title, dueAt });
       }
 
       setBanner('Reminders saved ✨');
       setTimeout(() => setBanner(null), 1800);
 
-      // allow Android to register before reading back
-      await new Promise((r) => setTimeout(r, 2000));
+      await new Promise((r) => setTimeout(r, 800));
       await loadScheduled();
     } catch (e: any) {
       Alert.alert('Could not schedule', e?.message ?? 'Please try again.');
@@ -469,7 +533,7 @@ const RemindersScreen: React.FC = () => {
 
   const fixedSummary = `We’ll remind you 7 days before, 1 day before, and on the day${
     timeOnly ? ` at ${formatLocalTime(timeOnly)}` : ''
-  }.`;
+  } — every year until you cancel.`;
 
   function openInbox() {
     try { navigation.navigate('RemindersInbox' as never); } catch {}
@@ -572,25 +636,25 @@ const RemindersScreen: React.FC = () => {
             <Button label={loadingScheduled ? 'Loading…' : 'Refresh'} variant="outline" onPress={loadScheduled} />
           </View>
 
-          {visibleScheduled.length === 0 ? (
-            <ThemedText variant="caption" color={t.colors.textDim}>No local reminders yet.</ThemedText>
-          ) : (
-            <View style={{ rowGap: 10 }}>
-              {visibleScheduled.map((req) => (
-                <View key={req.identifier} style={s.savedRow}>
-                  <View style={{ flex: 1 }}>
-                    <ThemedText variant="title">{req.content?.title ?? 'Reminder'}</ThemedText>
-                    <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 2 }}>
-                      {triggerToText((req as any).trigger)}
-                    </ThemedText>
-                  </View>
-                  <Pressable onPress={() => onCancel(req.identifier)} style={s.cancelBtn} accessibilityRole="button">
-                    <ThemedText variant="label" color="#fff">Cancel</ThemedText>
-                  </Pressable>
+        {visibleScheduled.length === 0 ? (
+          <ThemedText variant="caption" color={t.colors.textDim}>No local reminders yet.</ThemedText>
+        ) : (
+          <View style={{ rowGap: 10 }}>
+            {visibleScheduled.map((req) => (
+              <View key={req.identifier} style={s.savedRow}>
+                <View style={{ flex: 1 }}>
+                  <ThemedText variant="title">{getReqTitle(req)}</ThemedText>
+                  <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 2 }}>
+                    {triggerToText((req as any).trigger, req)}
+                  </ThemedText>
                 </View>
-              ))}
-            </View>
-          )}
+                <Pressable onPress={() => onCancel(req.identifier)} style={s.cancelBtn} accessibilityRole="button">
+                  <ThemedText variant="label" color="#fff">Cancel</ThemedText>
+                </Pressable>
+              </View>
+            ))}
+          </View>
+        )}
         </Card>
 
         {/* pickers */}
@@ -601,6 +665,9 @@ const RemindersScreen: React.FC = () => {
           date={dateOnly ?? new Date()}
           onConfirm={(d: Date) => { setDateOnly(d); setShowDatePicker(false); }}
           onCancel={() => setShowDatePicker(false)}
+          textColor={t.colors.text}
+          themeVariant="light"
+          pickerContainerStyleIOS={{ backgroundColor: '#FFFFFF' }}
         />
         <DateTimePickerModal
           isVisible={showTimePicker}
@@ -609,6 +676,9 @@ const RemindersScreen: React.FC = () => {
           date={timeOnly ?? new Date(2000, 0, 1, 9, 0)}
           onConfirm={(d: Date) => { setTimeOnly(d); setShowTimePicker(false); }}
           onCancel={() => setShowTimePicker(false)}
+          textColor={t.colors.text}
+          themeVariant="light"
+          pickerContainerStyleIOS={{ backgroundColor: '#FFFFFF' }}
         />
 
         {banner ? (

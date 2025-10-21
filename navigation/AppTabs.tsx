@@ -1,10 +1,12 @@
 // navigation/AppTabs.tsx
 import { Ionicons } from '@expo/vector-icons';
 import { BottomTabBarProps, createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import { useMemo } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { SpotlightTarget } from '../components/spotlight';
-import { tokens } from '../components/tokens';
+import { useTokens } from '../components/ThemeProvider';
+import useAndroidNavBar from '../hooks/useAndroidNavBar';
 
 // screens...
 import ChallengesScreen from '../screens/ChallengesScreen';
@@ -45,20 +47,59 @@ const TARGET_IDS: Record<keyof TabsParamList, string> = {
 
 function CustomTabBar({ state, navigation }: BottomTabBarProps) {
   const insets = useSafeAreaInsets();
-  const activeTint = tokens.colors.primary;
+  const t = useTokens();
+
+  // Keep Android system navigation bar in sync and fully opaque
+  useAndroidNavBar();
+
+  const activeTint = t.colors.primary;
   const inactiveTint = '#9CA3AF';
 
+  // a small extra band that rises above the bar without changing hitbox
+  const bandExtra = 12;
+  const barHeight = 56 + Math.max(insets.bottom, 8);
+
+  // Paint bar & pad for bottom inset so labels/icons never sit under the system nav bar
+  const barDynamic = useMemo(
+    () => ({
+      backgroundColor: t.colors.card,
+      borderTopColor: t.colors.border,
+      paddingBottom: Math.max(insets.bottom, 8),
+      height: barHeight,
+    }),
+    [t.colors.card, t.colors.border, insets.bottom, barHeight]
+  );
+
   return (
-    // Wrap the REAL bar so Spotlight measures the exact rectangle
-    <SpotlightTarget id="tabbar">
-      <View style={[styles.bar, { paddingBottom: Math.max(insets.bottom, 8) }]}>
+    <SpotlightTarget id="tabbar" style={{ position: 'relative' }}>
+      {/* Underlay that extends ABOVE the bar a bit to create the light strip effect */}
+      <View
+        pointerEvents="none"
+        style={{
+          position: 'absolute',
+          left: 0,
+          right: 0,
+          bottom: 0,
+          height: barHeight + bandExtra,
+          backgroundColor: t.colors.card,
+          borderTopWidth: StyleSheet.hairlineWidth,
+          borderTopColor: t.colors.border,
+          transform: [{ translateY: -bandExtra }],
+        }}
+      />
+      {/* The real bar (keeps normal height) */}
+      <View style={[styles.bar, barDynamic]}>
         {state.routes.map((route, index) => {
           const isFocused = state.index === index;
           const color = isFocused ? activeTint : inactiveTint;
           const iconName = ICONS[route.name as keyof TabsParamList];
 
           const onPress = () => {
-            const event = navigation.emit({ type: 'tabPress', target: route.key, canPreventDefault: true });
+            const event = navigation.emit({
+              type: 'tabPress',
+              target: route.key,
+              canPreventDefault: true,
+            });
             if (!isFocused && !event.defaultPrevented) navigation.navigate(route.name);
           };
 
@@ -71,7 +112,6 @@ function CustomTabBar({ state, navigation }: BottomTabBarProps) {
               style={styles.item}
               android_ripple={{ color: 'rgba(0,0,0,0.06)', radius: 80 }}
             >
-              {/* Tight icon hitbox for future granular steps */}
               <SpotlightTarget id={TARGET_IDS[route.name as keyof TabsParamList]} style={styles.iconHit}>
                 <Ionicons name={iconName} size={22} color={color} />
               </SpotlightTarget>
@@ -104,10 +144,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-around',
-    backgroundColor: '#fff',
     paddingTop: 10,
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: '#E5E7EB',
   },
   item: {
     width: 56,

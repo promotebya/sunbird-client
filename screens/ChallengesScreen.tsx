@@ -39,11 +39,7 @@ import {
   serverTimestamp,
   setDoc,
   Timestamp,
-  where,
-  type DocumentData,
-  type FirestoreError,
-  type Query,
-  type QuerySnapshot,
+  where
 } from 'firebase/firestore';
 import { db } from '../firebaseConfig';
 import { getPairId } from '../utils/partner';
@@ -411,7 +407,7 @@ export default function ChallengesScreen() {
     return () => sub.remove();
   }, [user?.uid, pairId]);
 
-  /* ---------- WEEKLY TOTAL — UNION (owner + partner legacy + pair root + pair sub) ---------- */
+  /* ---------- WEEKLY TOTAL — PAIR-FIRST (identical for both) ---------- */
   const [weeklyLive, setWeeklyLive] = useState<number | null>(null);
 
   useEffect(() => {
@@ -438,65 +434,45 @@ export default function ChallengesScreen() {
 
     const unsubs: Array<() => void> = [];
 
-    const add = (qRef: Query<DocumentData>, fbRef?: Query<DocumentData>) =>
-      onSnapshot(
-        qRef,
-        (snap: QuerySnapshot<DocumentData>) => {
-          for (const d of snap.docs) buf.set(dedupeKey(d.data(), d.id), d.data());
-          recompute();
-        },
-        (_err: FirestoreError) => {
-          if (!fbRef) return;
-          const off = onSnapshot(fbRef, (snap2: QuerySnapshot<DocumentData>) => {
-            for (const d of snap2.docs) buf.set(dedupeKey(d.data(), d.id), d.data());
-            recompute();
-          });
-          unsubs.push(off);
-        }
-      );
-
-    // mine (ownerId)
-    unsubs.push(
-      add(
-        query(baseRef, where('ownerId', '==', user.uid), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')) as Query<DocumentData>,
-        query(baseRef, where('ownerId', '==', user.uid)) as Query<DocumentData>
-      )
-    );
-
-    // shared pair docs (root)
+    // If paired: only count pair-scoped points (root + optional /pairs/{pairId}/points)
     if (pairId) {
       unsubs.push(
-        add(
-          query(baseRef, where('pairId', '==', pairId), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')) as Query<DocumentData>,
-          query(baseRef, where('pairId', '==', pairId)) as Query<DocumentData>
+        onSnapshot(
+          query(baseRef, where('pairId', '==', pairId), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')),
+          (snap) => { for (const d of snap.docs) buf.set(dedupeKey(d.data(), d.id), d.data()); recompute(); },
+          () => {
+            const off = onSnapshot(query(baseRef, where('pairId', '==', pairId)), (snap2) => {
+              for (const d of snap2.docs) buf.set(dedupeKey(d.data(), d.id), d.data()); recompute();
+            });
+            unsubs.push(off);
+          }
         )
       );
-    }
 
-    // partner legacy owner-only
-    if (partnerUid) {
       unsubs.push(
-        add(
-          query(baseRef, where('ownerId', '==', partnerUid), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')) as Query<DocumentData>,
-          query(baseRef, where('ownerId', '==', partnerUid)) as Query<DocumentData>
-        )
-      );
-    }
-
-    // optional mirror subcollection: /pairs/{pairId}/points
-    if (pairId) {
-      const offSub = onSnapshot(
-        collection(db, 'pairs', pairId, 'points'),
-        (snap) => {
+        onSnapshot(collection(db, 'pairs', pairId, 'points'), (snap) => {
           for (const d of snap.docs) buf.set(dedupeKey(d.data(), d.id), d.data());
           recompute();
-        }
+        })
       );
-      unsubs.push(offSub);
+    } else {
+      // Not paired: fall back to owner-only
+      unsubs.push(
+        onSnapshot(
+          query(baseRef, where('ownerId', '==', user.uid), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')),
+          (snap) => { for (const d of snap.docs) buf.set(dedupeKey(d.data(), d.id), d.data()); recompute(); },
+          () => {
+            const off = onSnapshot(query(baseRef, where('ownerId', '==', user.uid)), (snap2) => {
+              for (const d of snap2.docs) buf.set(dedupeKey(d.data(), d.id), d.data()); recompute();
+            });
+            unsubs.push(off);
+          }
+        )
+      );
     }
 
     return () => { unsubs.forEach((u) => u()); };
-  }, [user?.uid, pairId, partnerUid]);
+  }, [user?.uid, pairId]);
 
   // Optimistic WEEKLY bump
   const [weeklyOptimistic, setWeeklyOptimistic] = useState<{ bump: number; baseline: number } | null>(null);
@@ -520,7 +496,7 @@ export default function ChallengesScreen() {
       ? Math.max(weeklyLive ?? 0, weeklyOptimistic.baseline + weeklyOptimistic.bump)
       : (weeklyLive ?? 0));
 
-  /* ---------- TOTAL POINTS — UNION (owner + partner legacy + pair root + pair sub) ---------- */
+  /* ---------- TOTAL POINTS — PAIR-FIRST (identical for both) ---------- */
   const [totalLive, setTotalLive] = useState<number | null>(null);
 
   useEffect(() => {
@@ -532,41 +508,37 @@ export default function ChallengesScreen() {
       let sum = 0;
       for (const data of buf.values()) {
         const v = getPointValue(data);
-        if (Number.isFinite(v)) sum += v;
+        if (Number.isFinite(v) && v > 0) sum += v;
       }
       setTotalLive(Math.max(0, sum));
     };
 
     const unsubs: Array<() => void> = [];
-    const add = (qRef: Query<DocumentData>) =>
-      onSnapshot(
-        qRef,
-        (snap: QuerySnapshot<DocumentData>) => {
-          for (const d of snap.docs) buf.set(dedupeKey(d.data(), d.id), d.data());
-          recompute();
-        }
-      );
 
-    // mine
-    unsubs.push(add(query(baseRef, where('ownerId', '==', user.uid)) as Query<DocumentData>));
-    // partner legacy
-    if (partnerUid) unsubs.push(add(query(baseRef, where('ownerId', '==', partnerUid)) as Query<DocumentData>));
-    // shared pair (root)
-    if (pairId) unsubs.push(add(query(baseRef, where('pairId', '==', pairId)) as Query<DocumentData>));
-    // optional mirror subcollection
     if (pairId) {
-      const offSub = onSnapshot(
-        collection(db, 'pairs', pairId, 'points'),
-        (snap) => {
+      unsubs.push(
+        onSnapshot(query(baseRef, where('pairId', '==', pairId)), (snap) => {
           for (const d of snap.docs) buf.set(dedupeKey(d.data(), d.id), d.data());
           recompute();
-        }
+        })
       );
-      unsubs.push(offSub);
+      unsubs.push(
+        onSnapshot(collection(db, 'pairs', pairId, 'points'), (snap) => {
+          for (const d of snap.docs) buf.set(dedupeKey(d.data(), d.id), d.data());
+          recompute();
+        })
+      );
+    } else {
+      unsubs.push(
+        onSnapshot(query(baseRef, where('ownerId', '==', user.uid)), (snap) => {
+          for (const d of snap.docs) buf.set(dedupeKey(d.data(), d.id), d.data());
+          recompute();
+        })
+      );
     }
 
     return () => { unsubs.forEach((u) => u()); };
-  }, [user?.uid, pairId, partnerUid]);
+  }, [user?.uid, pairId]);
 
   const [totalOptimistic, setTotalOptimistic] = useState<{ bump: number; baseline: number } | null>(null);
   useEffect(() => {
@@ -721,11 +693,9 @@ export default function ChallengesScreen() {
     if (sections.length > 0) {
       steps.push({ id: 'ch-start-step', targetId: 'ch-start', title: 'Start here', text: 'Open a challenge, then mark it complete for points!', placement: 'top', padding: 12 });
     }
-    if (firstLockedKey) {
-      steps.push({ id: 'ch-lock-step', targetId: 'ch-lock', title: 'Locked items', text: 'Some unlock with points or Premium.', placement: 'top', padding: 12 });
-    }
+    // Removed lock step from the tutorial
     return steps;
-  }, [sections.length, firstLockedKey, effectivePremium]);
+  }, [sections.length]);
 
   /* ---------- navigation ---------- */
 
@@ -1042,7 +1012,7 @@ export default function ChallengesScreen() {
         </View>
       ) : null}
 
-      <SpotlightAutoStarter uid={user?.uid ?? null} steps={tourSteps} persistKey="tour-challenges-v11" />
+      <SpotlightAutoStarter uid={user?.uid ?? null} steps={tourSteps} persistKey="tour-challenges-v12" />
     </View>
   );
 }
