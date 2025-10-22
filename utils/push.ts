@@ -1,7 +1,16 @@
 // utils/push.ts
 import Constants from 'expo-constants';
 import * as Notifications from 'expo-notifications';
-import { arrayUnion, doc, getDoc, setDoc } from 'firebase/firestore';
+import {
+  addDoc,
+  arrayUnion,
+  collection,
+  doc,
+  getDoc,
+  serverTimestamp,
+  setDoc,
+  updateDoc,
+} from 'firebase/firestore';
 import { Platform } from 'react-native';
 import { db } from '../firebaseConfig';
 
@@ -16,110 +25,154 @@ type ExpoMessage = {
 
 type ExpoTicket = { id?: string; status: 'ok' | 'error'; message?: string; details?: any };
 type ExpoSendResponse = { data?: ExpoTicket[]; errors?: any[] };
-type ExpoReceiptMap = Record<string, { status: 'ok' | 'error'; message?: string; details?: any }>;
+type ExpoReceipt = { status: 'ok' | 'error'; message?: string; details?: any };
+type ExpoReceiptMap = Record<string, ExpoReceipt>;
 
 const ANDROID_CHANNEL = 'messages';
 
+// Foreground behavior (iOS/Android) – light & unobtrusive
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: false,
+    shouldSetBadge: false,
+    // SDK 53+ typings (iOS): include these to satisfy NotificationBehavior
+    shouldShowBanner: true,
+    shouldShowList: true,
+  }),
+});
+
+/**
+ * Registers for notifications, creates Android channel, fetches Expo token,
+ * and stores the token under:
+ *   - users/{uid}.expoPushTokens (top level)
+ *   - users/{uid}/public/push.expoPushTokens (back-compat)
+ */
 export async function ensurePushSetup(uid: string) {
   if (!uid) return null;
 
-  // Ask permission
-  const existing = await Notifications.getPermissionsAsync();
-  let status = existing.status;
+  // Permissions
+  let status = (await Notifications.getPermissionsAsync()).status;
   if (status !== 'granted') {
-    const req = await Notifications.requestPermissionsAsync({
-      ios: { allowAlert: true, allowBadge: true, allowSound: true } as any,
-    } as any);
-    status = req.status;
+    status = (await Notifications.requestPermissionsAsync()).status;
   }
   if (status !== 'granted') return null;
 
-  // Android channel
+  // Android notification channel
   if (Platform.OS === 'android') {
-    await Notifications.setNotificationChannelAsync(ANDROID_CHANNEL, {
-      name: 'Messages',
-      importance: Notifications.AndroidImportance.DEFAULT,
-      sound: 'default',
-      vibrationPattern: [0, 250, 250, 250],
-      lightColor: '#FF231F7C',
-    }).catch(() => {});
+    try {
+      await Notifications.setNotificationChannelAsync(ANDROID_CHANNEL, {
+        name: 'Messages',
+        importance: Notifications.AndroidImportance.DEFAULT,
+        sound: 'default',
+        vibrationPattern: [0, 200, 150, 200],
+        lightColor: '#FF7ABFFF',
+      });
+    } catch {}
   }
 
-  // Get Expo token (needs EAS projectId in app.json)
+  // EAS projectId is required outside Expo Go
   const projectId =
     (Constants as any)?.expoConfig?.extra?.eas?.projectId ||
     (Constants as any)?.easConfig?.projectId;
+
+  if (!projectId) {
+    console.warn('[push] Missing EAS projectId. Add it to app.json/app.config.');
+    return null;
+  }
+
+  // Get Expo token
   const { data: token } = await Notifications.getExpoPushTokenAsync({ projectId });
   if (!token) return null;
 
-  // Save under users/{uid}/public/push so partner can read (per rules)
-  const ref = doc(db, 'users', uid, 'public', 'push');
-  await setDoc(
-    ref,
-    { expoPushTokens: arrayUnion(token), updatedAt: new Date() },
-    { merge: true }
-  );
+  // Save token (top-level doc)
+  const userRef = doc(db, 'users', uid);
+  await setDoc(userRef, { expoPushTokens: [token] }, { merge: true });
+  await updateDoc(userRef, { expoPushTokens: arrayUnion(token) });
 
-  console.log('[push] Registered token (public/push):', token);
+  // Save token (public/push subdoc) – partner-readable per your rules
+  const publicRef = doc(db, 'users', uid, 'public', 'push');
+  const now = new Date();
+  await setDoc(publicRef, { expoPushTokens: [token], updatedAt: now }, { merge: true });
+  await updateDoc(publicRef, { expoPushTokens: arrayUnion(token), updatedAt: now });
+
+  console.log('[push] token registered:', token);
   return token;
 }
 
-/** Read tokens from users/{uid}/public/push (rules allow partner reads). */
+/** Returns all known Expo tokens for a user from both storage locations. */
 export async function getUserExpoTokens(uid: string): Promise<string[]> {
-  const snap = await getDoc(doc(db, 'users', uid, 'public', 'push'));
-  if (!snap.exists()) return [];
-  const arr = Array.isArray((snap.data() as any)?.expoPushTokens)
-    ? ((snap.data() as any).expoPushTokens as string[])
-    : [];
-  return arr.filter((t) => typeof t === 'string' && t.startsWith('ExponentPushToken'));
+  const topSnap = await getDoc(doc(db, 'users', uid));
+  const pubSnap = await getDoc(doc(db, 'users', uid, 'public', 'push'));
+
+  const fromTop = (topSnap.exists() && (topSnap.data() as any).expoPushTokens) || [];
+  const fromPub = (pubSnap.exists() && (pubSnap.data() as any).expoPushTokens) || [];
+
+  const all = [...fromTop, ...fromPub].filter(Boolean);
+  const uniq = Array.from(new Set(all)).filter((t: string) =>
+    typeof t === 'string' && (t.startsWith('ExponentPushToken') || t.startsWith('ExpoPushToken'))
+  );
+  return uniq;
+}
+
+/** Internal: chunk helper */
+function chunk<T>(arr: T[], size = 99) {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
 }
 
 async function sendExpoPush(messages: ExpoMessage[]) {
-  const res = await fetch('https://exp.host/--/api/v2/push/send', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify(messages),
-  });
+  const tickets: ExpoTicket[] = [];
+  const receiptIds: string[] = [];
 
-  const json = (await res.json()) as ExpoSendResponse;
-  if (!res.ok) {
-    console.warn('[push] send HTTP error', res.status, json);
-    return { tickets: [], receipts: {} as ExpoReceiptMap };
+  // Send in chunks (Expo recommends <= 100 per call)
+  for (const group of chunk(messages, 99)) {
+    const res = await fetch('https://exp.host/--/api/v2/push/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(group),
+    });
+
+    const json = (await res.json()) as ExpoSendResponse;
+    const groupTickets = json?.data ?? [];
+    tickets.push(...groupTickets);
+    receiptIds.push(
+      ...groupTickets.map((t) => t.id).filter(Boolean) as string[]
+    );
+
+    if (!res.ok) {
+      console.warn('[push] HTTP error sending chunk:', res.status, json);
+    }
   }
 
-  const tickets: ExpoTicket[] = json?.data ?? [];
-  const ids = tickets.map((t) => t.id).filter(Boolean) as string[];
+  // Brief wait, then fetch receipts in chunks
+  await new Promise((r) => setTimeout(r, 1200));
 
-  console.log('[push] tickets:', JSON.stringify(tickets, null, 2));
-
-  // Give Expo a moment to generate receipts
-  await new Promise((r) => setTimeout(r, 1500));
-
-  let receipts: ExpoReceiptMap = {};
-  if (ids.length) {
+  const receipts: ExpoReceiptMap = {};
+  for (const idGroup of chunk(receiptIds, 300)) {
     try {
       const r = await fetch('https://exp.host/--/api/v2/push/getReceipts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({ ids }),
+        body: JSON.stringify({ ids: idGroup }),
       });
       const jr = await r.json();
-      receipts = (jr?.data ?? {}) as ExpoReceiptMap;
-      console.log('[push] receipts:', JSON.stringify(receipts, null, 2));
+      Object.assign(receipts, (jr?.data ?? {}) as ExpoReceiptMap);
     } catch (e) {
-      console.warn('[push] receipt fetch failed', e);
+      console.warn('[push] receipt fetch failed:', e);
     }
   }
 
   return { tickets, receipts };
 }
 
-/** Helper to send a single text notification to many tokens (Android channel optional). */
+/** Send one text notification to many tokens. */
 export async function sendToTokens(
   tokens: string[],
   opts: { title: string; body: string; data?: any; channelId?: string }
 ) {
-  if (!tokens.length) return { tickets: [], receipts: {} };
+  if (!tokens.length) return { tickets: [], receipts: {} as ExpoReceiptMap };
 
   const messages: ExpoMessage[] = tokens.map((to) => ({
     to,
@@ -127,8 +180,36 @@ export async function sendToTokens(
     title: opts.title,
     body: opts.body,
     data: opts.data,
-    channelId: opts.channelId ?? ANDROID_CHANNEL, // must match registered channel on Android
+    channelId: opts.channelId ?? ANDROID_CHANNEL, // must match Android channel
   }));
 
   return sendExpoPush(messages);
+}
+
+/**
+ * Optional helper if you’re using a Cloud Function that listens to pushOutbox.
+ * Call this instead of sending directly client→Expo, and let the backend fan out.
+ */
+export async function enqueueRewardRedeemedPush(params: {
+  toUid: string;
+  pairId?: string | null;
+  actorName?: string | null;
+  rewardTitle: string;
+  scope: 'shared' | 'personal';
+}) {
+  const { toUid, pairId = null, actorName, rewardTitle, scope } = params;
+  try {
+    await addDoc(collection(db, 'pushOutbox'), {
+      type: 'reward_redeemed',
+      toUid,
+      pairId,
+      title: 'Reward redeemed',
+      body: `${actorName || 'Your partner'} redeemed “${rewardTitle}”${scope === 'personal' ? ' (personal)' : ''}.`,
+      data: { pairId, rewardTitle, scope },
+      status: 'pending',
+      createdAt: serverTimestamp(),
+    });
+  } catch (e) {
+    console.warn('[push] enqueue pushOutbox failed:', e);
+  }
 }

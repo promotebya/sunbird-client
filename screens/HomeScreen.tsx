@@ -54,6 +54,9 @@ import { redeemPairCode } from '../utils/pairing';
 import RedeemModal from '../components/RedeemModal';
 import { addReward } from '../utils/rewards';
 
+// 🔔 PUSH: register device token for this user
+import { ensurePushSetup } from '../utils/push';
+
 const WEEK_GOAL = 50;
 const MILESTONES = [5, 10, 25, 50, 100, 200, 500];
 
@@ -216,6 +219,9 @@ export default function HomeScreen() {
   // 🔴 LIVE weekly & total
   const [weeklyLive, setWeeklyLive] = useState<number | null>(null);
   const [totalLive, setTotalLive] = useState<number | null>(null);
+  // 🆕 Personal-only (owner)
+  const [personalWeeklyLive, setPersonalWeeklyLive] = useState<number | null>(null);
+  const [personalTotalLive, setPersonalTotalLive] = useState<number | null>(null);
 
   // ✅ Optimistic bumps
   const [weeklyOptimistic, setWeeklyOptimistic] = useState<{ bump: number; baseline: number } | null>(null);
@@ -228,6 +234,22 @@ export default function HomeScreen() {
     });
     return () => sub();
   }, []);
+
+  // 🔔 PUSH: register (or refresh) this device's Expo push token after login
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      if (!user?.uid) return;
+      try {
+        await ensurePushSetup(user.uid);
+      } catch (e) {
+        if (__DEV__) console.warn('[home] ensurePushSetup failed', e);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [user?.uid]);
 
   // ---- Load cached pair hint quickly on login
   useEffect(() => {
@@ -397,6 +419,58 @@ export default function HomeScreen() {
     };
   }, [user?.uid, pairId]);
 
+  // ---- LIVE weekly personal (owner-only, scope=personal; pair-first)
+  useEffect(() => {
+    if (!user?.uid) {
+      setPersonalWeeklyLive(null);
+      return;
+    }
+
+    const since = startOfWeekMondayUTC();
+    const until = new Date(since);
+    until.setUTCDate(until.getUTCDate() + 7);
+
+    const baseRef = collection(db, 'points');
+    const buf = new Map<string, any>();
+
+    const recompute = () => {
+      let sum = 0;
+      for (const data of buf.values()) {
+        const v = getPointValue(data);
+        const dt = getDocDate(data);
+        const scope = String(data?.scope ?? '');
+        const owner = String(data?.ownerId ?? '');
+        if (
+          owner === user.uid &&
+          scope === 'personal' &&
+          dt && dt >= since && dt < until &&
+          Number.isFinite(v) && v > 0
+        ) {
+          sum += v;
+        }
+      }
+      setPersonalWeeklyLive(sum);
+    };
+
+    const unsubs: Array<() => void> = [];
+    function add(q: Query<DocumentData>) {
+      const off = onSnapshot(q, (snap: QuerySnapshot<DocumentData>) => {
+        for (const d of snap.docs) buf.set(dedupeKey(d.data(), d.id), d.data());
+        recompute();
+      });
+      unsubs.push(off);
+    }
+
+    // Pair-first: filter by pairId + ownerId; scope/time filtered in-memory
+    if (pairId) {
+      add(query(baseRef, where('pairId', '==', pairId), where('ownerId', '==', user.uid)));
+    } else {
+      add(query(baseRef, where('ownerId', '==', user.uid)));
+    }
+
+    return () => { unsubs.forEach((u) => u()); };
+  }, [user?.uid, pairId]);
+
   // ---- LIVE lifetime total (pair-first; positive-only)
   useEffect(() => {
     if (!user?.uid) {
@@ -446,6 +520,46 @@ export default function HomeScreen() {
     return () => {
       unsubs.forEach((u) => u());
     };
+  }, [user?.uid, pairId]);
+
+  // ---- LIVE lifetime personal (owner-only, scope=personal; pair-first)
+  useEffect(() => {
+    if (!user?.uid) {
+      setPersonalTotalLive(null);
+      return;
+    }
+    const baseRef = collection(db, 'points');
+    const buf = new Map<string, any>();
+
+    const recompute = () => {
+      let sum = 0;
+      for (const data of buf.values()) {
+        const v = getPointValue(data);
+        const scope = String(data?.scope ?? '');
+        const owner = String(data?.ownerId ?? '');
+        if (owner === user.uid && scope === 'personal' && Number.isFinite(v) && v > 0) {
+          sum += v;
+        }
+      }
+      setPersonalTotalLive(sum);
+    };
+
+    const unsubs: Array<() => void> = [];
+    function add(q: Query<DocumentData>) {
+      const off = onSnapshot(q, (snap: QuerySnapshot<DocumentData>) => {
+        for (const d of snap.docs) buf.set(dedupeKey(d.data(), d.id), d.data());
+        recompute();
+      });
+      unsubs.push(off);
+    }
+
+    if (pairId) {
+      add(query(baseRef, where('pairId', '==', pairId), where('ownerId', '==', user.uid)));
+    } else {
+      add(query(baseRef, where('ownerId', '==', user.uid)));
+    }
+
+    return () => { unsubs.forEach((u) => u()); };
   }, [user?.uid, pairId]);
 
   // ---- Mirror challenge completions into shared pair points
@@ -537,6 +651,15 @@ export default function HomeScreen() {
   const totalBase = totalLive ?? (total ?? 0);
   const totalDisplay =
     totalOptimistic ? Math.max(totalBase, totalOptimistic.baseline + totalOptimistic.bump) : totalBase;
+
+  // Personal-only effective numbers
+  const personalWeeklyBase = personalWeeklyLive ?? 0;
+  const personalWeeklyDisplay = Math.min(personalWeeklyBase, WEEK_GOAL);
+  const personalTotalDisplay = personalTotalLive ?? 0;
+  const { target: personalTarget, remaining: personalRemaining } = useMemo(
+    () => nextMilestone(personalTotalDisplay),
+    [personalTotalDisplay]
+  );
 
   // ---- Copy tweaks
   const weeklyLeft = Math.max(0, WEEK_GOAL - weeklyDisplay);
@@ -857,6 +980,38 @@ export default function HomeScreen() {
           <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 4 }}>
             {remaining} to go • {weeklyDisplay} this week
           </ThemedText>
+        </View>
+
+        {/* --- Personal block ---------------------------------------------------- */}
+        <View style={{ marginTop: 16, paddingTop: 12, borderTopWidth: 1, borderTopColor: HAIRLINE }}>
+          <View style={{ marginBottom: 8 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <ThemedText variant="subtitle" style={{ flexShrink: 0 }}>Personal</ThemedText>
+              <ThemedText
+                variant="caption"
+                color={t.colors.textDim}
+                style={{ marginLeft: 8, flexGrow: 1, textAlign: 'right' }}
+                numberOfLines={1}
+              >
+                {personalWeeklyDisplay} / {WEEK_GOAL} · {Math.max(0, WEEK_GOAL - personalWeeklyDisplay)} to go
+              </ThemedText>
+            </View>
+          </View>
+
+          {/* Personal weekly goal bar */}
+          <ProgressBar value={personalWeeklyDisplay} max={WEEK_GOAL} height={8} trackColor="#EDEAF1" />
+
+          {/* Personal next milestone */}
+          <View style={{ marginTop: 12 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+              <ThemedText variant="label" color={t.colors.textDim}>Next personal milestone</ThemedText>
+              <ThemedText variant="label">{personalTarget} pts</ThemedText>
+            </View>
+            <ProgressBar value={personalTotalDisplay} max={personalTarget} height={6} trackColor="#EDEAF1" />
+            <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 4 }}>
+              {personalRemaining} to go • {personalWeeklyBase} this week
+            </ThemedText>
+          </View>
         </View>
 
         <View style={{ marginTop: 12, flexDirection: 'row', alignItems: 'center' }}>
