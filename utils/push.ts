@@ -30,23 +30,28 @@ type ExpoReceiptMap = Record<string, ExpoReceipt>;
 
 const ANDROID_CHANNEL = 'messages';
 
-// Foreground behavior (iOS/Android) – light & unobtrusive
+// Foreground behavior — keep it subtle, but satisfy newer typings too
 Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: false,
-    shouldSetBadge: false,
-    // SDK 53+ typings (iOS): include these to satisfy NotificationBehavior
-    shouldShowBanner: true,
-    shouldShowList: true,
-  }),
+  handleNotification: async () => {
+    // Use `any` so this works across expo-notifications 0.31 .. 0.4x
+    const behavior: any = {
+      shouldShowAlert: true,
+      shouldPlaySound: false,
+      shouldSetBadge: false,
+    };
+    if (Platform.OS === 'ios') {
+      behavior.shouldShowBanner = true;
+      behavior.shouldShowList = true;
+    }
+    return behavior;
+  },
 });
 
 /**
  * Registers for notifications, creates Android channel, fetches Expo token,
  * and stores the token under:
- *   - users/{uid}.expoPushTokens (top level)
- *   - users/{uid}/public/push.expoPushTokens (back-compat)
+ *   - users/{uid}.expoPushTokens
+ *   - users/{uid}/public/push.expoPushTokens  (partner-readable)
  */
 export async function ensurePushSetup(uid: string) {
   if (!uid) return null;
@@ -58,7 +63,7 @@ export async function ensurePushSetup(uid: string) {
   }
   if (status !== 'granted') return null;
 
-  // Android notification channel
+  // Android channel
   if (Platform.OS === 'android') {
     try {
       await Notifications.setNotificationChannelAsync(ANDROID_CHANNEL, {
@@ -71,7 +76,7 @@ export async function ensurePushSetup(uid: string) {
     } catch {}
   }
 
-  // EAS projectId is required outside Expo Go
+  // EAS projectId required outside Expo Go
   const projectId =
     (Constants as any)?.expoConfig?.extra?.eas?.projectId ||
     (Constants as any)?.easConfig?.projectId;
@@ -90,7 +95,7 @@ export async function ensurePushSetup(uid: string) {
   await setDoc(userRef, { expoPushTokens: [token] }, { merge: true });
   await updateDoc(userRef, { expoPushTokens: arrayUnion(token) });
 
-  // Save token (public/push subdoc) – partner-readable per your rules
+  // Save token (public/push)
   const publicRef = doc(db, 'users', uid, 'public', 'push');
   const now = new Date();
   await setDoc(publicRef, { expoPushTokens: [token], updatedAt: now }, { merge: true });
@@ -137,9 +142,7 @@ async function sendExpoPush(messages: ExpoMessage[]) {
     const json = (await res.json()) as ExpoSendResponse;
     const groupTickets = json?.data ?? [];
     tickets.push(...groupTickets);
-    receiptIds.push(
-      ...groupTickets.map((t) => t.id).filter(Boolean) as string[]
-    );
+    receiptIds.push(...groupTickets.map((t) => t.id).filter(Boolean) as string[]);
 
     if (!res.ok) {
       console.warn('[push] HTTP error sending chunk:', res.status, json);
@@ -187,8 +190,7 @@ export async function sendToTokens(
 }
 
 /**
- * Optional helper if you’re using a Cloud Function that listens to pushOutbox.
- * Call this instead of sending directly client→Expo, and let the backend fan out.
+ * Optional backend handoff (if you wire a Cloud Function to process `pushOutbox`).
  */
 export async function enqueueRewardRedeemedPush(params: {
   toUid: string;

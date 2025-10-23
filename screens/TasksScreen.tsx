@@ -62,6 +62,7 @@ import { listenDoc } from '../utils/snap';
 import { activateCatchup, isoWeekStr, notifyTaskCompletion } from '../utils/streak';
 
 import RedeemModal from '../components/RedeemModal';
+import { getUserExpoTokens, sendToTokens } from '../utils/push';
 import { listenRewards, type RewardDoc } from '../utils/rewards';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -210,25 +211,41 @@ const TasksScreen: React.FC = () => {
 
   const partnerUid = usePartnerUid(user?.uid ?? null);
 
-  // 🔔 NEW: queue a push to the other partner when a reward is redeemed
+  // 🔔 NEW: queue a push to the other partner when a reward is redeemed (hybrid: immediate + outbox)
   async function enqueuePartnerPushRewardRedeemed(rewardTitle: string, scope: RewardScope) {
     if (!user?.uid || !partnerUid) return;
+
+    const title = 'Reward redeemed';
+    const body  = `${user.displayName || 'Your partner'} redeemed “${rewardTitle}”${scope === 'personal' ? ' (personal)' : ''}.`;
+    const data  = { pairId: pairId ?? null, rewardTitle, scope };
+    const channelId = 'messages';
+
+    // 1) Immediate push to the other device
+    try {
+      const tokens = await getUserExpoTokens(partnerUid);
+      if (tokens.length) {
+        await sendToTokens(tokens, { title, body, data, channelId });
+      }
+    } catch (e) {
+      console.warn('[push] sendToTokens failed:', e);
+    }
+
+    // 2) Enqueue into outbox for backend processing/logging
     try {
       await addDoc(collection(db, 'pushOutbox'), {
         type: 'reward_redeemed',
-        toUid: partnerUid,                 // the other partner
+        toUid: partnerUid,
         pairId: pairId ?? null,
         actorUid: user.uid,
-        title: 'Reward redeemed',
-        body: `${user.displayName || 'Your partner'} redeemed “${rewardTitle}”${
-          scope === 'personal' ? ' (personal)' : ''
-        }.`,
-        data: { pairId: pairId ?? null, rewardTitle, scope },
+        title,
+        body,
+        data,
+        channelId,
         createdAt: serverTimestamp(),
-        status: 'pending',                 // for your worker/CF to process
+        status: 'pending',
       });
     } catch (e) {
-      console.warn('[push] enqueue failed:', e);
+      console.warn('[push] enqueue outbox failed:', e);
     }
   }
 
@@ -1027,7 +1044,7 @@ const TasksScreen: React.FC = () => {
       // In-app feed + event
       await notifyRewardRedeemedLocal(user.uid, pairId ?? null, r.title, scope);
 
-      // 🔔 Push to the *other* partner
+      // 🔔 Push to the *other* partner (hybrid)
       await enqueuePartnerPushRewardRedeemed(r.title, scope);
 
       showUndo(`Redeemed “${r.title}” 🎉`, async () => {
