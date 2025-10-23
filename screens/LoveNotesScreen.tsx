@@ -23,12 +23,12 @@ import Input from '../components/Input';
 import ThemedText from '../components/ThemedText';
 import { useTokens, type ThemeTokens } from '../components/ThemeProvider';
 
-import { collection, doc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { addDoc, collection, doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { db } from '../firebaseConfig';
 import useAuthListener from '../hooks/useAuthListener';
 import { getPairId, getPartnerUid } from '../utils/partner';
 
-// Push helpers
+// Push helpers (global handler is set in utils/push via index.js import)
 import { ensurePushSetup, getUserExpoTokens, sendToTokens } from '../utils/push';
 
 // Spotlight
@@ -72,17 +72,8 @@ const LoveNotesScreen: React.FC = () => {
   const [text, setText] = useState('');
   const inputRef = useRef<any>(null);
 
-  // Modern handler (avoids deprecated shouldShowAlert)
-  useEffect(() => {
-    Notifications.setNotificationHandler({
-      handleNotification: async () => ({
-        shouldPlaySound: true,
-        shouldSetBadge: false,
-        shouldShowBanner: true,
-        shouldShowList: true,
-      }) as any,
-    });
-  }, []);
+  // ⚠️ Do NOT set a per-screen notification handler — the app-wide handler is registered in utils/push.
+  // Setting another handler here could override it on iOS and block alerts.
 
   // Android channel for push/local
   useEffect(() => {
@@ -125,27 +116,95 @@ const LoveNotesScreen: React.FC = () => {
   useEffect(() => { refreshLinkState(); }, [refreshLinkState]);
   useFocusEffect(useCallback(() => { refreshLinkState(); }, [refreshLinkState]));
 
-  // Send Expo pushes to all partner devices (reads users/{partnerUid}/public/push)
-  async function sendPushToPartner(partnerUid: string, bodyText: string, noteId?: string) {
+  // Resolve partner uid robustly (hook -> pair doc -> user doc)
+  const resolvePartnerUid = useCallback(
+    async (candidate: string | null): Promise<string | null> => {
+      if (!user?.uid) return null;
+      let toUid: string | null = candidate ?? null;
+
+      // 1) pair doc members
+      if (!toUid && pairId) {
+        try {
+          const psnap = await getDoc(doc(db, 'pairs', pairId));
+          if (psnap.exists()) {
+            const members = (psnap.data() as any)?.members ?? [];
+            if (Array.isArray(members)) {
+              toUid = members.find((u: string) => u && u !== user.uid) ?? null;
+            }
+          }
+        } catch (e) {
+          console.warn('[loveNotes] resolve via pair failed', e);
+        }
+      }
+
+      // 2) users/{uid}.partnerUid
+      if (!toUid) {
+        try {
+          const usnap = await getDoc(doc(db, 'users', user.uid));
+          const d = usnap.exists() ? (usnap.data() as any) : null;
+          if (d?.partnerUid && typeof d.partnerUid === 'string') toUid = d.partnerUid;
+        } catch (e) {
+          console.warn('[loveNotes] resolve via user failed', e);
+        }
+      }
+
+      return toUid && toUid !== user.uid ? toUid : null;
+    },
+    [user?.uid, pairId]
+  );
+
+  // Send Expo pushes to all partner devices (reads users/{partnerUid}/public/push) + outbox fallback
+  async function sendPushToPartner(partnerUid: string | null, bodyText: string, noteId?: string) {
     try {
-      const tokens = await getUserExpoTokens(partnerUid);
-      if (!tokens.length) {
-        console.warn('[push] partner has no tokens yet');
+      if (!user?.uid) return;
+
+      const toUid = await resolvePartnerUid(partnerUid);
+      if (!toUid) {
+        console.warn('[loveNotes] skip send — no partner uid resolved or partner == self');
         return;
       }
-      // High-priority / time-sensitive push (does not block UI)
-      const message: any = {
-        title: 'New love note 💌',
-        body: bodyText,
-        data: { kind: 'lp:loveNote', noteId, fromUid: user?.uid ?? null, pairId },
-        channelId: ANDROID_CHANNEL_ID,
-        priority: 'high',                // Android hint
-        interruptionLevel: 'timeSensitive', // iOS 15+ hint
-      };
-      // Fire-and-forget to avoid waiting for network/receipt latency
-      sendToTokens(tokens, message).catch((e: any) => console.warn('[push] send error', e));
+
+      const title = 'New love note 💌';
+      const body  = bodyText;
+      const data  = { kind: 'lp:loveNote', noteId, fromUid: user.uid, pairId };
+
+      // Immediate push
+      try {
+        const tokens = await getUserExpoTokens(toUid);
+        console.log('[loveNotes] resolved tokens for partner:', tokens?.length || 0);
+        if (tokens?.length) {
+          await sendToTokens(tokens, {
+            title,
+            body,
+            data,
+            channelId: ANDROID_CHANNEL_ID, // no iOS-only fields!
+          });
+        } else {
+          console.warn('[loveNotes] partner has no tokens yet');
+        }
+      } catch (e) {
+        console.warn('[loveNotes] sendToTokens failed', e);
+      }
+
+      // Outbox fallback for backend worker/logging
+      try {
+        await addDoc(collection(db, 'pushOutbox'), {
+          type: 'love_note',
+          toUid,
+          pairId: pairId ?? null,
+          actorUid: user.uid,
+          title,
+          body,
+          data,
+          channelId: ANDROID_CHANNEL_ID,
+          createdAt: serverTimestamp(),
+          status: 'pending',
+        });
+      } catch (e) {
+        console.warn('[loveNotes] enqueue outbox failed', e);
+      }
     } catch (e) {
-      console.warn('[push] send error', e);
+      console.warn('[loveNotes] send error', e);
     }
   }
 
@@ -173,10 +232,7 @@ const LoveNotesScreen: React.FC = () => {
         updatedAt: serverTimestamp(),
       });
 
-      const pushPromise = partnerUidPromise.then((pUid) => {
-        if (pUid) return sendPushToPartner(pUid, tText, noteRef.id);
-        console.warn('[push] no partnerUid found');
-      });
+      const pushPromise = partnerUidPromise.then((pUid) => sendPushToPartner(pUid ?? null, tText, noteRef.id));
 
       await Promise.all([writePromise, pushPromise]);
 

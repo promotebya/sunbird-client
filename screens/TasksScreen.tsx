@@ -38,6 +38,7 @@ import {
   collection,
   deleteDoc,
   doc,
+  getDoc,
   getDocs,
   limit,
   onSnapshot,
@@ -211,42 +212,111 @@ const TasksScreen: React.FC = () => {
 
   const partnerUid = usePartnerUid(user?.uid ?? null);
 
-  // 🔔 NEW: queue a push to the other partner when a reward is redeemed (hybrid: immediate + outbox)
-  async function enqueuePartnerPushRewardRedeemed(rewardTitle: string, scope: RewardScope) {
-    if (!user?.uid || !partnerUid) return;
-
-    const title = 'Reward redeemed';
-    const body  = `${user.displayName || 'Your partner'} redeemed “${rewardTitle}”${scope === 'personal' ? ' (personal)' : ''}.`;
-    const data  = { pairId: pairId ?? null, rewardTitle, scope };
-    const channelId = 'messages';
-
-    // 1) Immediate push to the other device
+  // Resolve partner uid robustly
+  const resolvePartnerUid = async (): Promise<string | null> => {
+    if (!user?.uid) return null;
+    // 1) hook value
+    if (partnerUid && partnerUid !== user.uid) return partnerUid;
+    // 2) pair doc
     try {
-      const tokens = await getUserExpoTokens(partnerUid);
-      if (tokens.length) {
-        await sendToTokens(tokens, { title, body, data, channelId });
+      if (pairId) {
+        const psnap = await getDoc(doc(db, 'pairs', pairId));
+        if (psnap.exists()) {
+          const members = (psnap.data() as any)?.members ?? [];
+          if (Array.isArray(members)) {
+            const other = members.find((u: string) => u && u !== user.uid) ?? null;
+            if (other) return other;
+          }
+        }
+      }
+    } catch {}
+    // 3) user doc partnerUid
+    try {
+      const usnap = await getDoc(doc(db, 'users', user.uid));
+      const data = usnap.exists() ? (usnap.data() as any) : null;
+      if (data?.partnerUid && typeof data.partnerUid === 'string' && data.partnerUid !== user.uid) {
+        return data.partnerUid;
+      }
+    } catch {}
+    return null;
+  };
+
+  // Generic push helper (no interruptionLevel)
+  const sendPartnerPush = async (
+    toUid: string,
+    msg: { title: string; body: string; data?: Record<string, any>; channelId?: string }
+  ) => {
+    try {
+      const tokens = await getUserExpoTokens(toUid);
+      if (tokens?.length) {
+        await sendToTokens(tokens, {
+          title: msg.title,
+          body: msg.body,
+          data: msg.data,
+          channelId: msg.channelId ?? 'messages',
+        });
+      } else {
+        console.warn('[push] no expo tokens for partner uid:', toUid);
       }
     } catch (e) {
       console.warn('[push] sendToTokens failed:', e);
     }
 
-    // 2) Enqueue into outbox for backend processing/logging
+    // Also enqueue into outbox for optional backend processing
     try {
       await addDoc(collection(db, 'pushOutbox'), {
-        type: 'reward_redeemed',
-        toUid: partnerUid,
+        type: 'custom',
+        toUid,
         pairId: pairId ?? null,
-        actorUid: user.uid,
-        title,
-        body,
-        data,
-        channelId,
+        actorUid: user?.uid ?? null,
+        title: msg.title,
+        body: msg.body,
+        data: msg.data,
+        channelId: msg.channelId ?? 'messages',
         createdAt: serverTimestamp(),
         status: 'pending',
       });
     } catch (e) {
       console.warn('[push] enqueue outbox failed:', e);
     }
+  };
+
+  // 🔔 NEW: queue a push to the other partner when a reward is redeemed (hybrid: immediate + outbox)
+  async function enqueuePartnerPushRewardRedeemed(rewardTitle: string, scope: RewardScope) {
+    if (!user?.uid) return;
+
+    const toUid = await resolvePartnerUid();
+    if (!toUid || toUid === user.uid) {
+      console.warn('[push] skip sending — no partner uid resolved or partner == self');
+      return;
+    }
+
+    const title = 'Reward redeemed';
+    const body  = `${user.displayName || 'Your partner'} redeemed “${rewardTitle}”${scope === 'personal' ? ' (personal)' : ''}.`;
+    const data  = { pairId: pairId ?? null, rewardTitle, scope };
+
+    await sendPartnerPush(toUid, { title, body, data, channelId: 'messages' });
+  }
+
+  // Push helpers for task point awards
+  async function pushPointsAwardShared(item: TaskDoc, amount: number) {
+    if (!user?.uid) return;
+    const toUid = await resolvePartnerUid();
+    if (!toUid || toUid === user.uid) return;
+    const title = 'Point awarded';
+    const body  = `${user.displayName || 'Your partner'} added +${amount} point${amount === 1 ? '' : 's'} to “${item.title}”.`;
+    const data  = { kind: 'lp:taskAward', scope: 'shared', taskId: item.id, amount, pairId: item.pairId ?? pairId ?? null };
+    await sendPartnerPush(toUid, { title, body, data, channelId: 'messages' });
+  }
+
+  async function pushPointsAwardPersonal(item: TaskDoc, amount: number, recipientUid: string) {
+    if (!user?.uid) return;
+    const toUid = recipientUid;
+    if (!toUid || toUid === user.uid) return;
+    const title = 'You earned points';
+    const body  = `${user.displayName || 'Your partner'} gave you +${amount} point${amount === 1 ? '' : 's'} for “${item.title}”.`;
+    const data  = { kind: 'lp:taskAward', scope: 'personal', taskId: item.id, amount, pairId: item.pairId ?? pairId ?? null };
+    await sendPartnerPush(toUid, { title, body, data, channelId: 'messages' });
   }
 
   const prevPairRef = useRef<string | null>(null);
@@ -829,6 +899,8 @@ const TasksScreen: React.FC = () => {
         pairId: item.pairId ?? null,
       });
 
+      await pushPointsAwardShared(item, amount);
+
       showUndo(`+${amount} point${amount === 1 ? '' : 's'} added 🎉`, async () => {
         await deletePointsEntry(pointsId, pidToUse ?? undefined);
         await updateDoc(doc(db, 'tasks', item.id), {
@@ -937,6 +1009,8 @@ const TasksScreen: React.FC = () => {
         ownerId: item.ownerId,
         pairId: item.pairId ?? null,
       });
+
+      await pushPointsAwardPersonal(item, amount, recipientUid);
 
       showUndo(`+${amount} point${amount === 1 ? '' : 's'} added for your partner 🎉`, async () => {
         await deletePointsEntry(pointsId, pairId);

@@ -1,12 +1,11 @@
 // App.tsx
 import { NavigationContainer } from '@react-navigation/native';
-import Constants from 'expo-constants';
 import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useRef, useState } from 'react';
-import { Animated, Easing, Image, LogBox, Platform, StyleSheet, View } from 'react-native';
+import { Animated, AppState, Easing, Image, LogBox, Platform, StyleSheet, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -17,9 +16,8 @@ import usePartnerReminderListener from './hooks/usePartnerReminderListener';
 import AppNavigator from './navigation/AppNavigator';
 import AuthNavigator from './navigation/AuthNavigator';
 
-// Firestore (to save Expo push tokens)
-import { arrayUnion, doc, serverTimestamp, setDoc } from 'firebase/firestore';
-import { db } from './firebaseConfig';
+
+import { ensurePushSetup, migrateMyTokensToPublic } from './utils/push';
 
 // Quiet known noisy logs without hiding real errors
 LogBox.ignoreLogs([
@@ -114,36 +112,6 @@ function makeRandomWeeklyTriggers(targetCount: number): Date[] {
   return out.sort((a, b) => a.getTime() - b.getTime());
 }
 
-/** Register + save Expo push token on the user's Firestore doc */
-async function registerAndSaveExpoPushToken(uid: string) {
-  try {
-    if (!uid) return null;
-
-    const { status } = await Notifications.getPermissionsAsync();
-    const granted =
-      status === 'granted'
-        ? true
-        : (await Notifications.requestPermissionsAsync()).status === 'granted';
-    if (!granted) return null;
-
-    const projectId =
-      (Constants as any)?.expoConfig?.extra?.eas?.projectId ??
-      (Constants as any)?.easConfig?.projectId;
-
-    const token = (await Notifications.getExpoPushTokenAsync({ projectId })).data;
-
-    const userRef = doc(db, 'users', uid);
-    await setDoc(
-      userRef,
-      { expoPushTokens: arrayUnion(token), lastPushTokenAt: serverTimestamp() },
-      { merge: true }
-    );
-
-    return token;
-  } catch {
-    return null;
-  }
-}
 
 /** Schedules/tops-up local “kindness nudge” notifications */
 function useKindnessNudgesScheduler(userId: string | null | undefined) {
@@ -320,9 +288,28 @@ export default function App() {
     })();
   }, []);
 
-  // Save Expo push token on sign-in
+  // Save/refresh Expo push token on sign-in and when app becomes active
   useEffect(() => {
-    if (user?.uid) registerAndSaveExpoPushToken(user.uid);
+    let cancelled = false;
+    async function run() {
+      try {
+        if (user?.uid) {
+          await ensurePushSetup(user.uid);
+          await migrateMyTokensToPublic();
+        }
+      } catch (e) {
+        console.warn('[push] ensurePushSetup failed:', e);
+      }
+    }
+    run();
+
+    const sub = AppState.addEventListener('change', (st) => {
+      if (!cancelled && st === 'active' && user?.uid) run();
+    });
+    return () => {
+      cancelled = true;
+      sub.remove();
+    };
   }, [user?.uid]);
 
   // Existing listeners/hooks

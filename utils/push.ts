@@ -1,6 +1,7 @@
 // utils/push.ts
 import Constants from 'expo-constants';
 import * as Notifications from 'expo-notifications';
+import { getAuth } from 'firebase/auth';
 import {
   addDoc,
   arrayUnion,
@@ -21,6 +22,8 @@ type ExpoMessage = {
   body: string;
   data?: Record<string, any>;
   channelId?: string; // Android channel
+  priority?: 'default' | 'normal' | 'high'; // Android hint
+  interruptionLevel?: 'active' | 'critical' | 'passive' | 'time-sensitive'; // iOS hint (hyphen)
 };
 
 type ExpoTicket = { id?: string; status: 'ok' | 'error'; message?: string; details?: any };
@@ -30,10 +33,9 @@ type ExpoReceiptMap = Record<string, ExpoReceipt>;
 
 const ANDROID_CHANNEL = 'messages';
 
-// Foreground behavior — keep it subtle, but satisfy newer typings too
+// Foreground behavior — compatible with SDK 53 typings
 Notifications.setNotificationHandler({
   handleNotification: async () => {
-    // Use `any` so this works across expo-notifications 0.31 .. 0.4x
     const behavior: any = {
       shouldShowAlert: true,
       shouldPlaySound: false,
@@ -47,11 +49,24 @@ Notifications.setNotificationHandler({
   },
 });
 
+/** Map various caller spellings to the Expo-valid values (hyphenated). */
+function normalizeInterruptionLevel(
+  v?: string
+): ExpoMessage['interruptionLevel'] | undefined {
+  if (!v) return undefined;
+  const s = String(v);
+  if (s === 'timeSensitive' || s === 'time-sensitive') return 'time-sensitive';
+  if (s === 'active') return 'active';
+  if (s === 'passive') return 'passive';
+  if (s === 'critical') return 'critical';
+  return undefined;
+}
+
 /**
- * Registers for notifications, creates Android channel, fetches Expo token,
- * and stores the token under:
- *   - users/{uid}.expoPushTokens
- *   - users/{uid}/public/push.expoPushTokens  (partner-readable)
+ * Register for notifications, create Android channel,
+ * and store token to:
+ *   - users/{uid}.expoPushTokens (owner-only)
+ *   - users/{uid}/public/push.expoPushTokens (partner-readable)
  */
 export async function ensurePushSetup(uid: string) {
   if (!uid) return null;
@@ -61,7 +76,10 @@ export async function ensurePushSetup(uid: string) {
   if (status !== 'granted') {
     status = (await Notifications.requestPermissionsAsync()).status;
   }
-  if (status !== 'granted') return null;
+  if (status !== 'granted') {
+    console.warn('[push] permissions not granted; skipping token registration');
+    return null;
+  }
 
   // Android channel
   if (Platform.OS === 'android') {
@@ -73,7 +91,9 @@ export async function ensurePushSetup(uid: string) {
         vibrationPattern: [0, 200, 150, 200],
         lightColor: '#FF7ABFFF',
       });
-    } catch {}
+    } catch (e) {
+      console.warn('[push] setNotificationChannelAsync failed', e);
+    }
   }
 
   // EAS projectId required outside Expo Go
@@ -88,35 +108,112 @@ export async function ensurePushSetup(uid: string) {
 
   // Get Expo token
   const { data: token } = await Notifications.getExpoPushTokenAsync({ projectId });
-  if (!token) return null;
+  if (!token) {
+    console.warn('[push] getExpoPushTokenAsync returned no token');
+    return null;
+  }
 
-  // Save token (top-level doc)
+  // Save token (top-level doc; owner-only)
   const userRef = doc(db, 'users', uid);
-  await setDoc(userRef, { expoPushTokens: [token] }, { merge: true });
-  await updateDoc(userRef, { expoPushTokens: arrayUnion(token) });
+  try {
+    await setDoc(userRef, { expoPushTokens: [token] }, { merge: true });
+    await updateDoc(userRef, { expoPushTokens: arrayUnion(token) });
+  } catch (e) {
+    console.warn('[push] saving top-level token failed', e);
+  }
 
-  // Save token (public/push)
+  // Save token (public/push; partner-readable)
   const publicRef = doc(db, 'users', uid, 'public', 'push');
   const now = new Date();
-  await setDoc(publicRef, { expoPushTokens: [token], updatedAt: now }, { merge: true });
-  await updateDoc(publicRef, { expoPushTokens: arrayUnion(token), updatedAt: now });
+  try {
+    await setDoc(publicRef, { expoPushTokens: [token], updatedAt: now }, { merge: true });
+    await updateDoc(publicRef, { expoPushTokens: arrayUnion(token), updatedAt: now });
+  } catch (e) {
+    console.warn('[push] saving public token failed', e);
+  }
 
-  console.log('[push] token registered:', token);
+  console.log('[push] token registered for', uid, ':', token);
   return token;
 }
 
-/** Returns all known Expo tokens for a user from both storage locations. */
+/**
+ * One-shot migration: if you ever only had tokens at /users/{uid}.expoPushTokens,
+ * copy them into /users/{uid}/public/push so partners (same pair) can read them.
+ */
+export async function migrateMyTokensToPublic() {
+  const me = getAuth().currentUser?.uid;
+  if (!me) return;
+
+  try {
+    const topSnap = await getDoc(doc(db, 'users', me));
+    if (!topSnap.exists()) return;
+    const arr = (topSnap.data() as any)?.expoPushTokens;
+    if (!Array.isArray(arr) || !arr.length) return;
+
+    const publicRef = doc(db, 'users', me, 'public', 'push');
+    await setDoc(
+      publicRef,
+      {
+        expoPushTokens: arrayUnion(...arr),
+        updatedAt: new Date(),
+      },
+      { merge: true }
+    );
+    console.log('[push] migrated', arr.length, 'tokens to public for', me);
+  } catch (e) {
+    console.warn('[push] migrateMyTokensToPublic failed', e);
+  }
+}
+
+/**
+ * Return Expo tokens for a user.
+ * - For OTHER users: only read `/users/{uid}/public/push` (rules allow same-pair read)
+ * - For SELF: also read `/users/{uid}` to include any legacy tokens
+ */
 export async function getUserExpoTokens(uid: string): Promise<string[]> {
-  const topSnap = await getDoc(doc(db, 'users', uid));
-  const pubSnap = await getDoc(doc(db, 'users', uid, 'public', 'push'));
+  const me = getAuth().currentUser?.uid ?? null;
+  const tokens: string[] = [];
+  let pubCount = 0;
+  let topCount = 0;
 
-  const fromTop = (topSnap.exists() && (topSnap.data() as any).expoPushTokens) || [];
-  const fromPub = (pubSnap.exists() && (pubSnap.data() as any).expoPushTokens) || [];
+  try {
+    const pubSnap = await getDoc(doc(db, 'users', uid, 'public', 'push'));
+    if (pubSnap.exists()) {
+      const arr = (pubSnap.data() as any)?.expoPushTokens;
+      if (Array.isArray(arr)) {
+        tokens.push(...arr);
+        pubCount = arr.length;
+      }
+    }
+  } catch (e) {
+    console.warn('[push] read public tokens failed for', uid, e);
+  }
 
-  const all = [...fromTop, ...fromPub].filter(Boolean);
-  const uniq = Array.from(new Set(all)).filter((t: string) =>
-    typeof t === 'string' && (t.startsWith('ExponentPushToken') || t.startsWith('ExpoPushToken'))
+  if (me && me === uid) {
+    try {
+      const topSnap = await getDoc(doc(db, 'users', uid));
+      if (topSnap.exists()) {
+        const arr = (topSnap.data() as any)?.expoPushTokens;
+        if (Array.isArray(arr)) {
+          tokens.push(...arr);
+          topCount = arr.length;
+        }
+      }
+    } catch (e) {
+      console.warn('[push] read top-level tokens failed for', uid, e);
+    }
+  }
+
+  const uniq = Array.from(new Set(tokens)).filter(
+    (t) =>
+      typeof t === 'string' &&
+      (t.startsWith('ExponentPushToken') || t.startsWith('ExpoPushToken'))
   );
+
+  console.log(
+    `[push] tokens for ${uid}: total=${uniq.length} (public=${pubCount}${me === uid ? `, top=${topCount}` : ''})`
+  );
+  if (!uniq.length) console.warn('[push] no tokens found for uid', uid);
   return uniq;
 }
 
@@ -127,19 +224,43 @@ function chunk<T>(arr: T[], size = 99) {
   return out;
 }
 
+async function postMessages(payload: any) {
+  const res = await fetch('https://exp.host/--/api/v2/push/send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  let json: ExpoSendResponse;
+  try {
+    json = (await res.json()) as ExpoSendResponse;
+  } catch {
+    json = { errors: [{ message: 'Non-JSON response' } as any] };
+  }
+  return { res, json };
+}
+
 async function sendExpoPush(messages: ExpoMessage[]) {
   const tickets: ExpoTicket[] = [];
   const receiptIds: string[] = [];
 
   // Send in chunks (Expo recommends <= 100 per call)
   for (const group of chunk(messages, 99)) {
-    const res = await fetch('https://exp.host/--/api/v2/push/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify(group),
-    });
+    let { res, json } = await postMessages(group);
 
-    const json = (await res.json()) as ExpoSendResponse;
+    // Fallback: some environments complain "Expected object, received array".
+    if (!res.ok && Array.isArray(group) && String(json?.errors?.[0]?.message || '').includes('Expected object')) {
+      for (const m of group) {
+        const single = await postMessages(m);
+        if (!single.res.ok) {
+          console.warn('[push] HTTP error (single):', single.res.status, single.json);
+        }
+        const tix = single.json?.data ?? [];
+        tickets.push(...tix);
+        receiptIds.push(...tix.map((t: any) => t.id).filter(Boolean) as string[]);
+      }
+      continue;
+    }
+
     const groupTickets = json?.data ?? [];
     tickets.push(...groupTickets);
     receiptIds.push(...groupTickets.map((t) => t.id).filter(Boolean) as string[]);
@@ -149,7 +270,7 @@ async function sendExpoPush(messages: ExpoMessage[]) {
     }
   }
 
-  // Brief wait, then fetch receipts in chunks
+  // Fetch receipts
   await new Promise((r) => setTimeout(r, 1200));
 
   const receipts: ExpoReceiptMap = {};
@@ -173,9 +294,21 @@ async function sendExpoPush(messages: ExpoMessage[]) {
 /** Send one text notification to many tokens. */
 export async function sendToTokens(
   tokens: string[],
-  opts: { title: string; body: string; data?: any; channelId?: string }
+  opts: {
+    title: string;
+    body: string;
+    data?: any;
+    channelId?: string;
+    priority?: 'default' | 'normal' | 'high';
+    interruptionLevel?: 'active' | 'critical' | 'passive' | 'timeSensitive' | 'time-sensitive';
+  }
 ) {
-  if (!tokens.length) return { tickets: [], receipts: {} as ExpoReceiptMap };
+  if (!tokens.length) {
+    console.warn('[push] sendToTokens: no tokens — skipping send');
+    return { tickets: [], receipts: {} as ExpoReceiptMap };
+  }
+
+  const il = normalizeInterruptionLevel(opts.interruptionLevel);
 
   const messages: ExpoMessage[] = tokens.map((to) => ({
     to,
@@ -183,15 +316,16 @@ export async function sendToTokens(
     title: opts.title,
     body: opts.body,
     data: opts.data,
-    channelId: opts.channelId ?? ANDROID_CHANNEL, // must match Android channel
+    channelId: opts.channelId ?? ANDROID_CHANNEL,
+    priority: opts.priority ?? 'high',
+    ...(il ? { interruptionLevel: il } : null),
   }));
 
+  console.log('[push] sending', messages.length, 'message(s)');
   return sendExpoPush(messages);
 }
 
-/**
- * Optional backend handoff (if you wire a Cloud Function to process `pushOutbox`).
- */
+/** Optional backend handoff to a Cloud Function if you add one later. */
 export async function enqueueRewardRedeemedPush(params: {
   toUid: string;
   pairId?: string | null;
