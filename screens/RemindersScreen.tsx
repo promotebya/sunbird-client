@@ -224,6 +224,11 @@ const REMINDERS_TOUR_STEPS: SpotlightStep[] = [
   { id: 'rem-inbox',  targetId: 'rem-inbox',  title: 'Inbox', text: 'See pending partner items and your upcoming reminders here.' },
 ];
 
+/** iOS-only: render children without SpotlightTarget to avoid hit-test issues */
+const SpotlightMaybe: React.FC<{ id: string; children: React.ReactNode }> = ({ id, children }) => {
+  return Platform.OS === 'ios' ? <>{children}</> : <SpotlightTarget id={id}>{children}</SpotlightTarget>;
+};
+
 const RemindersScreen: React.FC = () => {
   const t = useTokens();
   const s = useMemo(() => styles(t), [t]);
@@ -603,8 +608,14 @@ const RemindersScreen: React.FC = () => {
           </ThemedText>
 
           <View ref={toggleRef}>
-            <SpotlightTarget id="rem-toggle">
-              <View style={[s.toggleRow, { marginTop: t.spacing.md }]}>
+            <SpotlightMaybe id="rem-toggle">
+              <Pressable
+                onPress={() => canCreateForBoth && setForBoth(v => !v)}
+                accessibilityRole="switch"
+                accessibilityState={{ checked: forBoth, disabled: !canCreateForBoth }}
+                style={[s.toggleRow, { marginTop: t.spacing.md }]}
+                hitSlop={8}
+              >
                 <ThemedText variant="body">Also create for partner</ThemedText>
                 <Switch
                   value={forBoth}
@@ -613,9 +624,10 @@ const RemindersScreen: React.FC = () => {
                   trackColor={{ false: withAlpha(t.colors.text, 0.15), true: withAlpha(t.colors.primary, 0.4) }}
                   thumbColor={Platform.OS === 'android' ? (forBoth ? t.colors.primary : '#f4f3f4') : undefined}
                   ios_backgroundColor={withAlpha(t.colors.text, 0.15)}
+                  style={{ marginLeft: 8 }}
                 />
-              </View>
-            </SpotlightTarget>
+              </Pressable>
+            </SpotlightMaybe>
           </View>
 
           <View style={s.rowDivider} />

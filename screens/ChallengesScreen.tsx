@@ -1,9 +1,10 @@
 // screens/ChallengesScreen.tsx
 import { Ionicons } from '@expo/vector-icons';
-import { useNavigation } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert,
+  AppState,
   DeviceEventEmitter,
   Platform,
   Pressable,
@@ -34,7 +35,6 @@ import {
   doc,
   getDoc,
   onSnapshot,
-  orderBy,
   query,
   serverTimestamp,
   setDoc,
@@ -110,11 +110,46 @@ function mixWithWhite(hex: string, ratio = 0.9) {
   return `#${toHex(m(r))}${toHex(m(g))}${toHex(m(b))}`;
 }
 
-// ---------- Difficulty / category extraction ----------
-function normDiff(raw: any): DiffKey | undefined {
+/* ---------- points write (robust) ---------- */
+async function writePairPointsDoc({
+  ownerId,
+  pairId,
+  value,
+  reason,
+  idempotencyKey,
+}: {
+  ownerId: string;
+  pairId: string;
+  value: number;
+  reason: string;
+  idempotencyKey?: string;
+}) {
+  const key = String(
+    idempotencyKey ?? `challenge:${pairId}:${Date.now()}:${Math.random().toString(36).slice(2)}`
+  );
+
+  const payload = {
+    idempotencyKey: key,
+    value,
+    source: 'challenge',
+    reason,
+    ownerId,
+    pairId,
+    createdAt: serverTimestamp(),
+    timestamp: Timestamp.now(),
+  };
+
+  await Promise.all([
+    setDoc(doc(db, 'points', key), payload, { merge: true }),
+    setDoc(doc(db, 'pairs', pairId, 'points', key), payload, { merge: true }),
+  ]);
+}
+
+// ---------- extractors ----------
+function normDiff(raw: any) {
   if (raw == null) return undefined;
   const n = Number(raw);
-  if (Number.isFinite(n)) return (['easy', 'medium', 'hard', 'pro'][Math.max(0, Math.min(3, n))] as DiffKey);
+  if (Number.isFinite(n)) return (['easy','medium','hard','pro'][Math.max(0, Math.min(3, n))] as DiffKey);
   const v = String(raw).trim().toLowerCase();
   if (v.startsWith('e')) return 'easy';
   if (v.startsWith('m')) return 'medium';
@@ -124,22 +159,15 @@ function normDiff(raw: any): DiffKey | undefined {
 }
 function extractDiffStrict(c: any): DiffKey | undefined {
   const tried = [c?.difficulty, c?.level, c?.diff, c?.difficultyLevel, c?.difficulty_label, c?.difficultyLabel, c?.d];
-  for (const t of tried) {
-    const k = normDiff(t);
-    if (k) return k;
-  }
+  for (const t of tried) { const k = normDiff(t); if (k) return k; }
   return undefined;
 }
-const extractTitleStrict = (c: any) =>
-  c?.title ?? c?.name ?? c?.heading ?? c?.prompt ?? c?.text ?? undefined;
-const extractDescriptionStrict = (c: any) =>
-  c?.description ?? c?.summary ?? c?.body ?? c?.details ?? undefined;
+const extractTitleStrict = (c: any) => c?.title ?? c?.name ?? c?.heading ?? c?.prompt ?? c?.text ?? undefined;
+const extractDescriptionStrict = (c: any) => c?.description ?? c?.summary ?? c?.body ?? c?.details ?? undefined;
 
 type CatKeyMaybe = CatKey | undefined;
 function extractCategoryStrict(c: any): CatKeyMaybe {
-  const candidates: Array<string | string[]> = [
-    c?.category, c?.cat, c?.type, c?.topic, c?.tag, c?.tags, c?.labels, c?.categories,
-  ];
+  const candidates: Array<string | string[]> = [c?.category, c?.cat, c?.type, c?.topic, c?.tag, c?.tags, c?.labels, c?.categories];
   const set: Record<string, CatKey> = {
     date: 'date', dates: 'date',
     kindness: 'kindness',
@@ -149,10 +177,7 @@ function extractCategoryStrict(c: any): CatKeyMaybe {
   };
   for (const cand of candidates) {
     if (Array.isArray(cand)) {
-      for (const s of cand) {
-        const key = set[String(s).trim().toLowerCase()];
-        if (key) return key as CatKey;
-      }
+      for (const s of cand) { const key = set[String(s).trim().toLowerCase()]; if (key) return key as CatKey; }
     } else if (cand != null) {
       const key = set[String(cand).trim().toLowerCase()];
       if (key) return key as CatKey;
@@ -160,8 +185,7 @@ function extractCategoryStrict(c: any): CatKeyMaybe {
   }
   return undefined;
 }
-
-function cleanTitleSuffix(raw?: string): string {
+function cleanTitleSuffix(raw?: string) {
   const title = (raw ?? '').trim();
   if (!title) return 'Challenge';
   const cats = ['date','dates','kindness','conversation','talk','surprise','play'];
@@ -190,8 +214,8 @@ function mergePreferBase<T extends Record<string, any>>(base: T, patch: Partial<
 // ---------- UTC week helpers ----------
 function weekKeyUTC(d = new Date()) {
   const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-  const day = (date.getUTCDay() + 6) % 7; // Mon..Sun
-  date.setUTCDate(date.getUTCDate() - day + 3); // Thu
+  const day = (date.getUTCDay() + 6) % 7;
+  date.setUTCDate(date.getUTCDate() - day + 3);
   const firstThursday = new Date(Date.UTC(d.getUTCFullYear(), 0, 4));
   const firstDay = (firstThursday.getUTCDay() + 6) % 7;
   firstThursday.setUTCDate(firstThursday.getUTCDate() - firstDay + 3);
@@ -226,6 +250,8 @@ export default function ChallengesScreen() {
 
   // Public entitlement (for partner to see my premium and vice versa)
   const [partnerPublicPremium, setPartnerPublicPremium] = useState<boolean>(false);
+  // Self entitlement mirror (so this device updates instantly when another device purchases)
+  const [selfPublicPremium, setSelfPublicPremium] = useState<boolean>(false);
 
   // Load pairId + partnerUid + partner entitlement mirror (read-only)
   useEffect(() => {
@@ -324,15 +350,79 @@ export default function ChallengesScreen() {
       }
     })();
 
-  return () => {
+    return () => {
       if (unsubscribePair) unsubscribePair();
+      if (unsubscribePartnerEnt) unsubscribePartnerEnt();
     };
   }, [user?.uid, isPremium, hasPro]);
 
+  // Watch my own public entitlement mirror (real-time across devices)
+  useEffect(() => {
+    if (!user?.uid) { setSelfPublicPremium(false); return; }
+
+    const entRef = doc(db, 'users', user.uid, 'public', 'entitlements');
+
+    // Prime current value
+    getDoc(entRef)
+      .then(s => setSelfPublicPremium(!!s.data()?.premiumActive))
+      .catch(() => setSelfPublicPremium(false));
+
+    // Live updates
+    const unsub = onSnapshot(
+      entRef,
+      s => setSelfPublicPremium(!!s.data()?.premiumActive),
+      () => setSelfPublicPremium(false)
+    );
+    return () => unsub();
+  }, [user?.uid]);
+
+  // Mirror my current plan into the public doc (ONE-WAY: only writes TRUE)
+  useEffect(() => {
+    if (!user?.uid) return;
+    const premiumNow = !!(isPremium || hasPro);
+    // Only write when we have a confirmed premium locally and the mirror isn't set yet
+    if (!premiumNow || selfPublicPremium) return;
+    (async () => {
+      try {
+        await setDoc(
+          doc(db, 'users', user.uid, 'public', 'entitlements'),
+          { premiumActive: true, updatedAt: serverTimestamp() },
+          { merge: true }
+        );
+      } catch {}
+    })();
+  }, [user?.uid, isPremium, hasPro, selfPublicPremium]);
+  // Force-refresh entitlement on screen focus
+  useFocusEffect(
+    useCallback(() => {
+      if (!user?.uid) return;
+      const entRef = doc(db, 'users', user.uid, 'public', 'entitlements');
+      getDoc(entRef)
+        .then((s) => setSelfPublicPremium(!!s.data()?.premiumActive))
+        .catch(() => {});
+    }, [user?.uid])
+  );
+
+  // Refresh entitlement when app returns to foreground
+  useEffect(() => {
+    if (!user?.uid) return;
+    const sub = AppState.addEventListener('change', (st) => {
+      if (st === 'active') {
+        const entRef = doc(db, 'users', user.uid, 'public', 'entitlements');
+        getDoc(entRef)
+          .then((s) => setSelfPublicPremium(!!s.data()?.premiumActive))
+          .catch(() => {});
+      }
+    });
+    return () => sub.remove();
+  }, [user?.uid]);
+
   const { isPremium: partnerIsPremium } = usePlanPlus(partnerUid ?? undefined);
 
-  // Effective plan: my premium OR partner's premium OR partner's mirrored entitlement
-  const effectivePremium = !!(isPremium || hasPro || partnerIsPremium || partnerPublicPremium);
+  // Effective plan: my premium OR partner's premium OR partner's mirrored entitlement OR my entitlement mirror
+  const effectivePremium = !!(
+    isPremium || hasPro || selfPublicPremium || partnerIsPremium || partnerPublicPremium
+  );
   const safePlan: 'free' | 'premium' = effectivePremium ? 'premium' : 'free';
 
   // Shared seed (for weekly selection variety)
@@ -353,7 +443,7 @@ export default function ChallengesScreen() {
     return 0;
   };
   const getPointDate = (data: any): Date | null => {
-    const when: any = data?.createdAt ?? data?.timestamp ?? data?.ts ?? data?.time;
+    const when: any = data?.timestamp ?? data?.createdAt ?? data?.ts ?? data?.time;
     if (!when) return null;
     try {
       if (typeof when?.toDate === 'function') return when.toDate();
@@ -366,49 +456,60 @@ export default function ChallengesScreen() {
     }
   };
   const dedupeKey = (data: any, id: string) => String(data?.idempotencyKey ?? id);
+  const putIntoBuf = (buf: Map<string, any>, key: string, incoming: any) => {
+    const prev = buf.get(key);
+    if (!prev) { buf.set(key, incoming); return; }
+    const prevDt = getPointDate(prev);
+    const newDt = getPointDate(incoming);
+    if (prevDt && !newDt) buf.set(key, { ...incoming, timestamp: prev.timestamp ?? prev.createdAt ?? prevDt });
+    else buf.set(key, { ...prev, ...incoming });
+  };
 
   /* ---------- MIRROR CHALLENGE COMPLETIONS INTO PAIR-SCOPED POINTS ---------- */
   useEffect(() => {
-    // Your rules only let BOTH partners read a point if it has the right pairId.
-    // Some challenge writes appear to be owner-only; we mirror them to /points with pairId.
     const sub = DeviceEventEmitter.addListener('lp.challenge.completed', async (payload: any) => {
       try {
-        const pts = Number(payload?.points ?? payload?.value ?? payload?.score ?? 0);
-        if (!pts || !user?.uid || !pairId) return;
+        if (payload?.__noWrite) return;
 
-        // Build a stable idempotency key per completion. Prefer provided one if exists.
-        const chId = String(payload?.challengeId ?? payload?.id ?? payload?.slug ?? 'challenge');
-        const key = String(payload?.idempotencyKey ?? `challenge:${pairId}:${chId}:${Date.now()}`);
+        const pts = Number(payload?.points ?? payload?.pts ?? payload?.value ?? payload?.score ?? 0);
+        if (!pts || !user?.uid) return;
 
-        const ref = doc(db, 'points', key);
-        await setDoc(ref, {
-          idempotencyKey: key,
-          value: pts,
-          source: 'challenge',
+        // Resolve pairId from payload → local state → DB lookup
+        let pid: string | null = (payload?.pairId as string | null) ?? pairId ?? null;
+        if (!pid) {
+          try { pid = await getPairId(user.uid); } catch { pid = null; }
+        }
+        if (!pid) {
+          Alert.alert('Link accounts first', 'Open Pairing to link with your partner so both of you get points for challenges.');
+          return;
+        }
+
+        const title =
+          payload?.title ??
+          payload?.challengeTitle ??
+          payload?.name ??
+          payload?.challengeId ??
+          'Completed challenge';
+
+        await writePairPointsDoc({
           ownerId: user.uid,
-          pairId,
-          createdAt: serverTimestamp(),
-        }, { merge: true });
-
-        // Mirror into subcollection as well for screens that read /pairs/{pairId}/points
-        const subRef = doc(db, 'pairs', pairId, 'points', key);
-        await setDoc(subRef, {
-          idempotencyKey: key,
+          pairId: pid,
           value: pts,
-          source: 'challenge',
-          ownerId: user.uid,
-          pairId,
-          createdAt: serverTimestamp(),
-        }, { merge: true });
-      } catch (e) {
-        console.warn('Pair mirror write failed:', e);
+          reason: `Challenge: ${title}`,
+          idempotencyKey: payload?.idempotencyKey,
+        });
+      } catch (e: any) {
+        console.warn('[Challenges] points write failed:', e);
+        Alert.alert('Points not saved', e?.message ?? 'Please try again.');
       }
     });
     return () => sub.remove();
   }, [user?.uid, pairId]);
 
-  /* ---------- WEEKLY TOTAL — PAIR-FIRST (identical for both) ---------- */
+  /* ---------- WEEKLY TOTAL — pair + both owners ---------- */
   const [weeklyLive, setWeeklyLive] = useState<number | null>(null);
+  const [weeklyFloor, setWeeklyFloor] = useState(0);
+  useEffect(() => { setWeeklyFloor(0); }, [weeklySeed, pairId, user?.uid, partnerUid]);
 
   useEffect(() => {
     if (!user?.uid) { setWeeklyLive(null); return; }
@@ -418,9 +519,7 @@ export default function ChallengesScreen() {
     const until = new Date(since);
     until.setUTCDate(until.getUTCDate() + 7);
 
-    const sinceTs = Timestamp.fromDate(since);
     const baseRef = collection(db, 'points');
-
     const buf = new Map<string, any>();
     const recompute = () => {
       let sum = 0;
@@ -434,47 +533,44 @@ export default function ChallengesScreen() {
 
     const unsubs: Array<() => void> = [];
 
-    // If paired: only count pair-scoped points (root + optional /pairs/{pairId}/points)
-    if (pairId) {
-      unsubs.push(
-        onSnapshot(
-          query(baseRef, where('pairId', '==', pairId), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')),
-          (snap) => { for (const d of snap.docs) buf.set(dedupeKey(d.data(), d.id), d.data()); recompute(); },
-          () => {
-            const off = onSnapshot(query(baseRef, where('pairId', '==', pairId)), (snap2) => {
-              for (const d of snap2.docs) buf.set(dedupeKey(d.data(), d.id), d.data()); recompute();
-            });
-            unsubs.push(off);
-          }
-        )
-      );
+    // mine
+    unsubs.push(
+      onSnapshot(query(baseRef, where('ownerId', '==', user.uid)), (snap) => {
+        for (const d of snap.docs) putIntoBuf(buf, dedupeKey(d.data(), d.id), d.data());
+        recompute();
+      })
+    );
 
+    if (pairId) {
+      // shared
       unsubs.push(
-        onSnapshot(collection(db, 'pairs', pairId, 'points'), (snap) => {
-          for (const d of snap.docs) buf.set(dedupeKey(d.data(), d.id), d.data());
+        onSnapshot(query(baseRef, where('pairId', '==', pairId)), (snap) => {
+          for (const d of snap.docs) putIntoBuf(buf, dedupeKey(d.data(), d.id), d.data());
           recompute();
         })
       );
-    } else {
-      // Not paired: fall back to owner-only
       unsubs.push(
-        onSnapshot(
-          query(baseRef, where('ownerId', '==', user.uid), where('createdAt', '>=', sinceTs), orderBy('createdAt', 'desc')),
-          (snap) => { for (const d of snap.docs) buf.set(dedupeKey(d.data(), d.id), d.data()); recompute(); },
-          () => {
-            const off = onSnapshot(query(baseRef, where('ownerId', '==', user.uid)), (snap2) => {
-              for (const d of snap2.docs) buf.set(dedupeKey(d.data(), d.id), d.data()); recompute();
-            });
-            unsubs.push(off);
-          }
-        )
+        onSnapshot(collection(db, 'pairs', pairId, 'points'), (snap) => {
+          for (const d of snap.docs) putIntoBuf(buf, dedupeKey(d.data(), d.id), d.data());
+          recompute();
+        })
       );
+
+      // partner legacy owner-only
+      if (partnerUid) {
+        unsubs.push(
+          onSnapshot(query(baseRef, where('ownerId', '==', partnerUid)), (snap) => {
+            for (const d of snap.docs) putIntoBuf(buf, dedupeKey(d.data(), d.id), d.data());
+            recompute();
+          })
+        );
+      }
     }
 
     return () => { unsubs.forEach((u) => u()); };
-  }, [user?.uid, pairId]);
+  }, [user?.uid, pairId, partnerUid]);
 
-  // Optimistic WEEKLY bump
+  // Optimistic WEEKLY bump (for UX only)
   const [weeklyOptimistic, setWeeklyOptimistic] = useState<{ bump: number; baseline: number } | null>(null);
   useEffect(() => {
     const sub = DeviceEventEmitter.addListener('lp.challenge.completed', (payload: any) => {
@@ -491,12 +587,26 @@ export default function ChallengesScreen() {
     if (live >= target) setWeeklyOptimistic(null);
   }, [weeklyLive, weeklyOptimistic]);
 
-  const weeklyDisplay =
+  const weeklyComputed =
     Math.max(0, weeklyOptimistic
       ? Math.max(weeklyLive ?? 0, weeklyOptimistic.baseline + weeklyOptimistic.bump)
       : (weeklyLive ?? 0));
 
-  /* ---------- TOTAL POINTS — PAIR-FIRST (identical for both) ---------- */
+  const weeklyDisplay = Math.max(weeklyComputed, weeklyFloor);
+  useEffect(() => { setWeeklyFloor((f) => Math.max(f, weeklyComputed)); }, [weeklyComputed]);
+
+  // Broadcast weekly total to Home screen "Weekly Goals"
+  useEffect(() => {
+    try {
+      DeviceEventEmitter.emit('lp.weekly.points.updated', {
+        value: weeklyDisplay,
+        week: weekKeyUTC(new Date()),
+        pairId: pairId ?? null,
+      });
+    } catch {}
+  }, [weeklyDisplay, pairId]);
+
+  /* ---------- TOTAL POINTS — pair + both owners (NO optimism) ---------- */
   const [totalLive, setTotalLive] = useState<number | null>(null);
 
   useEffect(() => {
@@ -515,52 +625,44 @@ export default function ChallengesScreen() {
 
     const unsubs: Array<() => void> = [];
 
+    // mine
+    unsubs.push(
+      onSnapshot(query(baseRef, where('ownerId', '==', user.uid)), (snap) => {
+        for (const d of snap.docs) putIntoBuf(buf, dedupeKey(d.data(), d.id), d.data());
+        recompute();
+      })
+    );
+
     if (pairId) {
+      // shared
       unsubs.push(
         onSnapshot(query(baseRef, where('pairId', '==', pairId)), (snap) => {
-          for (const d of snap.docs) buf.set(dedupeKey(d.data(), d.id), d.data());
+          for (const d of snap.docs) putIntoBuf(buf, dedupeKey(d.data(), d.id), d.data());
           recompute();
         })
       );
       unsubs.push(
         onSnapshot(collection(db, 'pairs', pairId, 'points'), (snap) => {
-          for (const d of snap.docs) buf.set(dedupeKey(d.data(), d.id), d.data());
+          for (const d of snap.docs) putIntoBuf(buf, dedupeKey(d.data(), d.id), d.data());
           recompute();
         })
       );
-    } else {
-      unsubs.push(
-        onSnapshot(query(baseRef, where('ownerId', '==', user.uid)), (snap) => {
-          for (const d of snap.docs) buf.set(dedupeKey(d.data(), d.id), d.data());
-          recompute();
-        })
-      );
+
+      // partner legacy owner-only
+      if (partnerUid) {
+        unsubs.push(
+          onSnapshot(query(baseRef, where('ownerId', '==', partnerUid)), (snap) => {
+            for (const d of snap.docs) putIntoBuf(buf, dedupeKey(d.data(), d.id), d.data());
+            recompute();
+          })
+        );
+      }
     }
 
     return () => { unsubs.forEach((u) => u()); };
-  }, [user?.uid, pairId]);
+  }, [user?.uid, pairId, partnerUid]);
 
-  const [totalOptimistic, setTotalOptimistic] = useState<{ bump: number; baseline: number } | null>(null);
-  useEffect(() => {
-    const sub = DeviceEventEmitter.addListener('lp.challenge.completed', (payload: any) => {
-      const pts = Number(payload?.points ?? payload?.value ?? 0);
-      if (!pts) return;
-      const baseline = (totalLive ?? 0);
-      setTotalOptimistic({ bump: pts, baseline });
-    });
-    return () => sub.remove();
-  }, [totalLive]);
-  useEffect(() => {
-    if (!totalOptimistic) return;
-    const live = totalLive ?? 0;
-    const target = totalOptimistic.baseline + totalOptimistic.bump;
-    if (live >= target) setTotalOptimistic(null);
-  }, [totalLive, totalOptimistic]);
-
-  const totalDisplay =
-    Math.max(0, totalOptimistic
-      ? Math.max(totalLive ?? 0, totalOptimistic.baseline + totalOptimistic.bump)
-      : (totalLive ?? 0));
+  const totalDisplay = Math.max(0, totalLive ?? 0);
 
   const [tab, setTab] = useState<DiffTabKey>('all');
 
@@ -693,9 +795,57 @@ export default function ChallengesScreen() {
     if (sections.length > 0) {
       steps.push({ id: 'ch-start-step', targetId: 'ch-start', title: 'Start here', text: 'Open a challenge, then mark it complete for points!', placement: 'top', padding: 12 });
     }
-    // Removed lock step from the tutorial
     return steps;
   }, [sections.length]);
+
+  // Write shared points for a completed challenge (pair-scoped)
+  const awardPairPointsChallenge = useCallback(
+    async (payload: any) => {
+      try {
+        const pts = Number(
+          payload?.points ?? payload?.pts ?? payload?.value ?? payload?.score ?? 0
+        );
+        if (!pts || !user?.uid) return;
+
+        const effectivePairId: string | null = payload?.pairId ?? pairId ?? null;
+        if (!effectivePairId) {
+          Alert.alert(
+            'Link accounts first',
+            'Open Pairing to link with your partner so both of you get points for challenges.'
+          );
+          return;
+        }
+
+        const title =
+          payload?.title ??
+          payload?.challengeTitle ??
+          payload?.name ??
+          payload?.challengeId ??
+          'Completed';
+
+        await writePairPointsDoc({
+          ownerId: user.uid,
+          pairId: effectivePairId,
+          value: pts,
+          reason: `Challenge: ${title}`,
+          idempotencyKey: payload?.idempotencyKey,
+        });
+      } catch (e: any) {
+        console.warn('awardPairPointsChallenge failed:', e);
+        Alert.alert('Points not saved', e?.message ?? 'Please try again.');
+      }
+    },
+    [user?.uid, pairId]
+  );
+
+  // Deterministic idempotency key
+  const makeIdemKey = useCallback(
+    (seed: SeedChallenge) => {
+      const cid = (seed as any)?.id ?? safeTitle(seed);
+      return `challenge:${pairId ?? 'solo'}:${cid}:${user?.uid ?? 'anon'}`;
+    },
+    [pairId, user?.uid]
+  );
 
   /* ---------- navigation ---------- */
 
@@ -706,7 +856,27 @@ export default function ChallengesScreen() {
         challengeId: (seed as any)?.id,
         seed,
         completionChannel: 'lp.challenge.completed' as const,
-        pairId, // ensure detail screen can write pair-scoped points
+        pairId,
+        defaultPoints: typeof (seed as any)?.points === 'number' ? (seed as any).points : 1,
+        // Single-writer: write first, then emit optimism-only event
+        onCompleted: async (payload?: any) => {
+          const pts = Number(
+            payload?.points ?? payload?.value ?? (seed as any)?.points ?? 1
+          );
+          const idempotencyKey = payload?.idempotencyKey ?? makeIdemKey(seed);
+          const writePayload = {
+            ...(payload ?? {}),
+            points: pts,
+            challengeId: (seed as any)?.id ?? safeTitle(seed),
+            title: safeTitle(seed),
+            pairId,
+            idempotencyKey,
+          };
+          await awardPairPointsChallenge(writePayload);
+          try {
+            DeviceEventEmitter.emit('lp.challenge.completed', { ...writePayload, __noWrite: true });
+          } catch {}
+        },
       };
       const targets = ['ChallengeDetail', 'ChallengeDetailScreen', 'Challenge', 'ChallengeDetails'];
       const navigators = [navRef, navRef.getParent?.()].filter(Boolean) as any[];
@@ -749,7 +919,7 @@ export default function ChallengesScreen() {
         Alert.alert('Challenge', 'Opening the challenge requires a "ChallengeDetail" screen in your navigator.');
       }
     },
-    [navRef, pairId]
+    [navRef, pairId, awardPairPointsChallenge, makeIdemKey]
   );
 
   /* ---------- header / footer ---------- */
@@ -790,7 +960,7 @@ export default function ChallengesScreen() {
             <View key={k} style={s.legendItem}>
               <View style={[s.legendDot, { backgroundColor: CAT_DOT[k] }]} />
               <ThemedText variant="caption" color="textDim">
-                {CATEGORY_LABEL[k]} {visibleByCat[k] ? `· ${visibleByCat[k]}` : ''}
+                {CATEGORY_LABEL[k]} 
               </ThemedText>
             </View>
           ))}
@@ -893,7 +1063,6 @@ export default function ChallengesScreen() {
           const pointsLock = unlocksByPoints && weeklyDisplay < (req as number);
           const premiumLock = safePlan === 'free' && !unlocksByPoints && dKey !== 'easy';
           const finalLocked = premiumLock || pointsLock;
-          const isFirstLocked = item.id === firstLockedKey;
 
           const isFirstCard =
             sections.length > 0 && section?.key === sections[0]?.key && index === 0;
@@ -949,43 +1118,22 @@ export default function ChallengesScreen() {
                     </>
                   ) : (
                     <View style={{ marginTop: t.spacing.s }}>
-                      {isFirstLocked ? (
-                        <SpotlightTarget id="ch-lock">
-                          <Pressable
-                            onPress={() => {
-                              const msg = premiumLock ? 'Premium required' : `Needs ${req}+ pts`;
-                              if (msg.includes('Premium')) {
-                                try { (nav.getParent?.() ?? nav).navigate('Paywall', { plan: 'monthly' }); }
-                                catch { Alert.alert('Premium', 'Purchases are coming soon ✨'); }
-                              }
-                            }}
-                            style={s.lockBtn}
-                            accessibilityRole="button"
-                          >
-                            <Ionicons name="lock-closed" size={16} color={t.colors.textDim} />
-                            <ThemedText variant="label" color="textDim" style={{ marginLeft: 8 }}>
-                              {premiumLock ? 'Premium required' : `Needs ${req}+ pts`}
-                            </ThemedText>
-                          </Pressable>
-                        </SpotlightTarget>
-                      ) : (
-                        <Pressable
-                          onPress={() => {
-                            const msg = premiumLock ? 'Premium required' : `Needs ${req}+ pts`;
-                            if (msg.includes('Premium')) {
-                              try { (nav.getParent?.() ?? nav).navigate('Paywall', { plan: 'monthly' }); }
-                              catch { Alert.alert('Premium', 'Purchases are coming soon ✨'); }
-                            }
-                          }}
-                          style={s.lockBtn}
-                          accessibilityRole="button"
-                        >
-                          <Ionicons name="lock-closed" size={16} color={t.colors.textDim} />
-                          <ThemedText variant="label" color="textDim" style={{ marginLeft: 8 }}>
-                            {premiumLock ? 'Premium required' : `Needs ${req}+ pts`}
-                          </ThemedText>
-                        </Pressable>
-                      )}
+                      <Pressable
+                        onPress={() => {
+                          const msg = premiumLock ? 'Premium required' : `Needs ${req}+ pts`;
+                          if (msg.includes('Premium')) {
+                            try { (nav.getParent?.() ?? nav).navigate('Paywall', { plan: 'monthly' }); }
+                            catch { Alert.alert('Premium', 'Purchases are coming soon ✨'); }
+                          }
+                        }}
+                        style={s.lockBtn}
+                        accessibilityRole="button"
+                      >
+                        <Ionicons name="lock-closed" size={16} color={t.colors.textDim} />
+                        <ThemedText variant="label" color="textDim" style={{ marginLeft: 8 }}>
+                          {premiumLock ? 'Premium required' : `Needs ${req}+ pts`}
+                        </ThemedText>
+                      </Pressable>
                     </View>
                   )}
                 </View>

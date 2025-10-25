@@ -16,7 +16,6 @@ import usePartnerReminderListener from './hooks/usePartnerReminderListener';
 import AppNavigator from './navigation/AppNavigator';
 import AuthNavigator from './navigation/AuthNavigator';
 
-
 import { ensurePushSetup, migrateMyTokensToPublic } from './utils/push';
 
 // Quiet known noisy logs without hiding real errors
@@ -76,23 +75,63 @@ function startOfWeekMonday(d = new Date()) {
   return copy;
 }
 
-function makeRandomWeeklyTriggers(targetCount: number): Date[] {
+// YYYY-MM-DD key for “one per calendar day” logic
+function dateKey(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${dd}`;
+}
+
+// Best-effort read of a Date from an Expo NotificationRequest trigger
+function extractTriggerDate(req: Notifications.NotificationRequest): Date | null {
+  const trig: any = req.trigger;
+  // For DATE triggers we expect a 'date' value (Date | number | string)
+  const raw = trig?.date ?? trig?.value ?? null;
+  if (!raw) return null;
+  try {
+    const d = new Date(raw);
+    return isNaN(d.getTime()) ? null : d;
+  } catch {
+    return null;
+  }
+}
+
+// Ensure 3–4 weekly hits, all on different days, and never clash with blockedDates
+function makeRandomWeeklyTriggers(targetCount: number, blockedDates: Set<string> = new Set()): Date[] {
   const out: Date[] = [];
-  const used = new Set<number>();
+  const usedTimestamps = new Set<number>();
   let week = 0;
 
-  while (out.length < targetCount && week < 26) {
+  while (out.length < targetCount && week < 52) {
     const base = startOfWeekMonday();
     base.setDate(base.getDate() + 7 * week);
 
-    const hitsThisWeek = 3 + (Math.random() < 0.5 ? 0 : 1);
-    const usedDays = new Set<number>();
+    const hitsThisWeek = 3 + (Math.random() < 0.5 ? 0 : 1); // 3 or 4
+    const usedDaysThisWeek = new Set<number>();
 
+    let attemptsThisWeek = 0;
     for (let i = 0; i < hitsThisWeek && out.length < targetCount; i++) {
-      let day = randInt(0, 6);
       let guard = 0;
-      while (usedDays.has(day) && guard++ < 10) day = randInt(0, 6);
-      usedDays.add(day);
+      let day = randInt(0, 6);
+
+      // Find a day-of-week not yet used this week AND not in blockedDates
+      while (guard++ < 30) {
+        if (!usedDaysThisWeek.has(day)) {
+          const check = new Date(base);
+          check.setDate(check.getDate() + day);
+          const key = dateKey(check);
+          if (!blockedDates.has(key)) break;
+        }
+        day = randInt(0, 6);
+      }
+      // If we never found a valid day, skip this slot and try next week
+      if (guard >= 30) {
+        attemptsThisWeek++;
+        continue;
+      }
+
+      usedDaysThisWeek.add(day);
 
       const hour = randInt(9, 20);
       const minute = randInt(0, 11) * 5;
@@ -101,17 +140,26 @@ function makeRandomWeeklyTriggers(targetCount: number): Date[] {
       when.setDate(when.getDate() + day);
       when.setHours(hour, minute, 0, 0);
 
-      if (when.getTime() <= Date.now()) continue;
-      const key = when.getTime();
-      if (used.has(key)) continue;
-      used.add(key); // ensure no duplicates
+      if (when.getTime() <= Date.now()) {
+        // try nudging it forward a day if today/past is hit
+        when.setDate(when.getDate() + 1);
+      }
+
+      const ts = when.getTime();
+      if (usedTimestamps.has(ts)) continue;
+
+      const k = dateKey(when);
+      if (blockedDates.has(k)) continue;
+
+      usedTimestamps.add(ts);
+      blockedDates.add(k); // block this calendar day for the rest of the run
       out.push(when);
     }
+
     week++;
   }
   return out.sort((a, b) => a.getTime() - b.getTime());
 }
-
 
 /** Schedules/tops-up local “kindness nudge” notifications */
 function useKindnessNudgesScheduler(userId: string | null | undefined) {
@@ -138,17 +186,68 @@ function useKindnessNudgesScheduler(userId: string | null | undefined) {
         }
 
         const TARGET = 48; // ~12 weeks @ 4/wk
-        const existing = await Notifications.getAllScheduledNotificationsAsync();
+
+        const allScheduled = await Notifications.getAllScheduledNotificationsAsync();
         if (cancelled) return;
 
-        const toAdd = Math.max(0, TARGET - existing.length);
+        // Consider ONLY our nudge notifications for counts/constraints
+        const nudgeRequests = allScheduled.filter(
+          (r) => (r?.content?.data as any)?.kind === 'lp:mtday'
+        );
+
+        // --- DEDUPE: ensure at most one nudge per calendar day among existing ---
+        const byDay = new Map<string, Notifications.NotificationRequest[]>();
+        for (const req of nudgeRequests) {
+          const when = extractTriggerDate(req);
+          if (!when || when.getTime() <= Date.now()) continue;
+          const key = dateKey(when);
+          const arr = byDay.get(key) ?? [];
+          arr.push(req);
+          byDay.set(key, arr);
+        }
+
+        // Cancel duplicates, keep the earliest time for that day
+        let duplicatesCancelled = 0;
+        for (const [, list] of byDay) {
+          if (list.length <= 1) continue;
+          list.sort((a, b) => {
+            const da = extractTriggerDate(a)?.getTime() ?? 0;
+            const db = extractTriggerDate(b)?.getTime() ?? 0;
+            return da - db;
+          });
+          const keep = list[0];
+          for (let i = 1; i < list.length; i++) {
+            try {
+              await Notifications.cancelScheduledNotificationAsync(list[i].identifier);
+              duplicatesCancelled++;
+            } catch {}
+          }
+        }
+
+        const uniqueExistingCount = nudgeRequests.length - duplicatesCancelled;
+
+        // Build blockedDates from remaining (unique) future nudge days
+        const blockedDates = new Set<string>();
+        for (const req of nudgeRequests) {
+          const when = extractTriggerDate(req);
+          if (!when || when.getTime() <= Date.now()) continue;
+          blockedDates.add(dateKey(when));
+        }
+
+        const toAdd = Math.max(0, TARGET - uniqueExistingCount);
         if (toAdd <= 0) return;
 
-        const times = makeRandomWeeklyTriggers(toAdd);
+        const times = makeRandomWeeklyTriggers(toAdd, blockedDates);
+
         for (const when of times) {
           const prompt = NUDGE_PROMPTS[randInt(0, NUDGE_PROMPTS.length - 1)];
           await Notifications.scheduleNotificationAsync({
-            content: { title: 'Make their day 💖', body: prompt, sound: false, data: { kind: 'lp:mtday' } },
+            content: {
+              title: 'Make their day 💖',
+              body: prompt,
+              sound: false,
+              data: { kind: 'lp:mtday' },
+            },
             trigger: {
               type: Notifications.SchedulableTriggerInputTypes.DATE,
               date: when,

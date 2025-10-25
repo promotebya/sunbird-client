@@ -47,34 +47,57 @@ const base = {
 // iOS-like blue used on both platforms
 const IOS_BLUE = '#3B82F6';
 
+/**
+ * Warmer, softer rose palettes:
+ * - Light: gentle blush background, desaturated rose primary, warmer dim text.
+ * - Dark: deep plum/rose neutrals, soft rose primary, warmer dim text.
+ */
 const THEMES: Record<ThemeName, ThemeTokens> = {
   'light-rose': {
     ...base,
     colors: {
-      bg: '#FFF6FA',
+      bg: '#FFF8FB',          // softer, slightly warmer than #FFF6FA
       card: '#FFFFFF',
-      text: '#1F1A1C',
-      textDim: '#6B5F67',
-      primary: '#FF2E74',
-      border: '#F1E6EB',
+      text: '#1E1519',        // warmer black
+      textDim: '#7E6B75',     // warmer dim text
+      primary: '#E86388',     // soft rose (less neon than #FF2E74)
+      border: '#F6EDEF',      // warmer hairline
       success: '#3CCB7F',
-      danger: '#EF4444',
+      danger: '#E15B66',      // softened danger
     },
-    bgGradient: { start: '#FFE8F1', end: '#FFF6FA' },
+    bgGradient: { start: '#FFEFF6', end: '#FFF8FB' },
+    shadow: {
+      card: {
+        ...base.shadow.card,
+        // subtle rose-tinted shadow for warmth
+        shadowColor: 'rgba(232, 99, 136, 0.12)',
+        shadowRadius: 14,
+        elevation: 4,
+      },
+    },
   },
   'dark-rose': {
     ...base,
     colors: {
-      bg: '#0B0F14',
-      card: '#111827',
-      text: '#F8FAFC',
-      textDim: '#A0AEC0',
-      primary: '#FF2E74',
-      border: '#1F2937',
+      bg: '#120E13',          // warm, soft charcoal with rose hint
+      card: '#1A141A',        // deep plum card
+      text: '#F8F4F6',
+      textDim: '#CBB7C1',     // warmer dim text
+      primary: '#FF86A6',     // softer, lighter rose for dark bg
+      border: '#2A2028',      // warm plum border
       success: '#22C55E',
-      danger: '#F87171',
+      danger: '#F27D88',      // softened danger
     },
-    bgGradient: { start: '#0B0F14', end: '#111827' },
+    bgGradient: { start: '#120E13', end: '#1A141A' },
+    shadow: {
+      card: {
+        ...base.shadow.card,
+        // keep subtle depth on dark while staying warm
+        shadowColor: 'rgba(255, 134, 166, 0.18)',
+        shadowRadius: 16,
+        elevation: 5,
+      },
+    },
   },
   ocean: {
     ...base,
@@ -83,7 +106,7 @@ const THEMES: Record<ThemeName, ThemeTokens> = {
       card: '#FFFFFF',
       text: '#14202A',
       textDim: '#5C6470',
-      primary: IOS_BLUE,        // ⬅ unified iOS-like blue
+      primary: IOS_BLUE,
       border: '#E3ECF7',
       success: '#10B981',
       danger: '#EF4444',

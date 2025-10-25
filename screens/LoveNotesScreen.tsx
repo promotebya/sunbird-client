@@ -7,6 +7,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
   FlatList,
+  InteractionManager,
   Keyboard,
   KeyboardAvoidingView,
   Platform,
@@ -70,6 +71,7 @@ const LoveNotesScreen: React.FC = () => {
   const [linked, setLinked] = useState<boolean | null>(null); // null = loading
 
   const [text, setText] = useState('');
+  const [sendingLock, setSendingLock] = useState(false); // short lock to avoid double taps
   const inputRef = useRef<any>(null);
 
   // ⚠️ Do NOT set a per-screen notification handler — the app-wide handler is registered in utils/push.
@@ -208,7 +210,8 @@ const LoveNotesScreen: React.FC = () => {
     }
   }
 
-  async function sendNote() {
+  // 🚀 Optimistic/instant send
+  const sendNote = useCallback(() => {
     if (!user) return;
     if (!linked) {
       Alert.alert('Link accounts first', 'Open Settings to link with your partner.');
@@ -219,29 +222,48 @@ const LoveNotesScreen: React.FC = () => {
       Alert.alert('Write something sweet…');
       return;
     }
-    try {
-      // Prepare a document reference up-front and push in parallel
-      const noteRef = doc(collection(db, 'notes'));
-      const partnerUidPromise = getPartnerUid(user.uid);
+    if (sendingLock) return; // prevent double-tap
 
-      const writePromise = setDoc(noteRef, {
-        ownerId: user.uid,
-        pairId,
-        text: tText,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
+    setSendingLock(true);
+    setTimeout(() => setSendingLock(false), 400); // short lock
+
+    // Clear input & close keyboard immediately so it feels instant
+    const previous = text;
+    setText('');
+    Keyboard.dismiss();
+
+    // Prepare doc ref + payload up front
+    const noteRef = doc(collection(db, 'notes'));
+    const payload = {
+      ownerId: user.uid,
+      pairId,
+      text: tText,
+      // Keep server clock as source of truth, but add a client time to help ordering if you render locally
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+      clientAt: Date.now(),
+    };
+
+    // Defer heavy work until after the UI has updated
+    requestAnimationFrame(() => {
+      InteractionManager.runAfterInteractions(() => {
+        const writePromise = setDoc(noteRef, payload).catch((e) => {
+          console.warn('[loveNotes] write failed', e);
+          // Restore input and surface error
+          setText(previous);
+          Alert.alert('Could not send', e?.message ?? 'Please try again.');
+        });
+
+        const pushPromise = getPartnerUid(user.uid)
+          .then((pUid) => sendPushToPartner(pUid ?? null, tText, noteRef.id))
+          .catch((e) => console.warn('[loveNotes] partner resolve/send failed', e));
+
+        // Fire and forget — do not block UI
+        void writePromise;
+        void pushPromise;
       });
-
-      const pushPromise = partnerUidPromise.then((pUid) => sendPushToPartner(pUid ?? null, tText, noteRef.id));
-
-      await Promise.all([writePromise, pushPromise]);
-
-      setText('');
-      Keyboard.dismiss();
-    } catch (e: any) {
-      Alert.alert('Could not send', e?.message ?? 'Please try again.');
-    }
-  }
+    });
+  }, [user, linked, text, pairId, sendingLock]);
 
   async function onPickSuggestion(sug: string) {
     if (linked) {
@@ -347,7 +369,7 @@ const LoveNotesScreen: React.FC = () => {
 
             <View style={{ flexDirection: 'row', gap: 12, marginTop: t.spacing.md }}>
               <SpotlightTarget id="ln-send">
-                <Button label="Send" onPress={sendNote} disabled={!text.trim()} />
+                <Button label="Send" onPress={sendNote} disabled={!text.trim() || sendingLock} />
               </SpotlightTarget>
               <SpotlightTarget id="ln-share">
                 <Button label="Send via Messages…" variant="outline" onPress={shareViaMessages} />
