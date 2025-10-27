@@ -10,6 +10,9 @@ import { getReactNativePersistence } from 'firebase/auth/react-native';
 // Firestore
 import { getFirestore, setLogLevel } from 'firebase/firestore';
 
+// Cloud Functions (needed for server-side upgrade + delete flow)
+import { getFunctions } from 'firebase/functions';
+
 const firebaseConfig = {
   apiKey: 'AIzaSyA9GMS43chgVSHXCH7i0A8FgACapq7uC38',
   authDomain: 'lovepointsapp-23880.firebaseapp.com',
@@ -22,11 +25,7 @@ const firebaseConfig = {
 
 // --- App (guard against re-init during Fast Refresh) ---
 let app: FirebaseApp;
-if (getApps().length === 0) {
-  app = initializeApp(firebaseConfig);
-} else {
-  app = getApps()[0]!;
-}
+app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 
 // --- Auth (React Native persistence with AsyncStorage) ---
 // IMPORTANT: initializeAuth must be called BEFORE getAuth(app) is used anywhere.
@@ -40,15 +39,27 @@ try {
   auth = getAuth(app);
 }
 
+// Localize Firebase system emails (verification/reset) where supported
+// @ts-ignore
+auth.useDeviceLanguage?.();
+
 // --- Firestore ---
 export const db = getFirestore(app);
 
-// 🔎 Verbose Firestore logs to see exact denied paths & rule evaluations
-setLogLevel('debug');
+// --- Functions ---
+// If you deployed functions in a specific region, set it here (default: us-central1).
+// Optionally use an env var to control region without code changes.
+const FUNCTIONS_REGION =
+  // @ts-ignore
+  process.env.EXPO_PUBLIC_FUNCTIONS_REGION || 'us-central1';
+export const functions = getFunctions(app, FUNCTIONS_REGION);
+
+// 🔎 Firestore logs (verbose in dev only)
+setLogLevel(__DEV__ ? 'debug' : 'error');
 
 // 🔧 Print the Firebase project/app used at runtime (helps avoid using wrong project)
 const { projectId, appId } = getApp().options as { projectId?: string; appId?: string };
 console.log('[Firebase] projectId:', projectId, 'appId:', appId);
 
+// Export ready-to-use instances
 export { app, auth };
-

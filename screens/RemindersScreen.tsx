@@ -215,19 +215,14 @@ async function scheduleYearlyTriplet(
 }
 
 /* ---------------- UI (screen) ---------------- */
+// removed the "rem-toggle" tutorial step per request
 const REMINDERS_TOUR_STEPS: SpotlightStep[] = [
   { id: 'rem-welcome', targetId: null, title: 'Reminders', text: "Set yearly dates and we'll handle the nudges for you.", placement: 'bottom', allowBackdropTapToNext: true },
   { id: 'rem-title',  targetId: 'rem-title',  title: 'Title', text: 'Pick a title or use a preset.' },
   { id: 'rem-date',   targetId: 'rem-date',   title: 'Date',  text: 'Choose the day and month.' },
   { id: 'rem-time',   targetId: 'rem-time',   title: 'Time',  text: 'Pick when the reminder should appear.' },
-  { id: 'rem-toggle', targetId: 'rem-toggle', title: 'For both', text: 'Switch this on to also add the reminder to your partner’s screen.', placement: 'top' },
   { id: 'rem-inbox',  targetId: 'rem-inbox',  title: 'Inbox', text: 'See pending partner items and your upcoming reminders here.' },
 ];
-
-/** iOS-only: render children without SpotlightTarget to avoid hit-test issues */
-const SpotlightMaybe: React.FC<{ id: string; children: React.ReactNode }> = ({ id, children }) => {
-  return Platform.OS === 'ios' ? <>{children}</> : <SpotlightTarget id={id}>{children}</SpotlightTarget>;
-};
 
 const RemindersScreen: React.FC = () => {
   const t = useTokens();
@@ -237,7 +232,6 @@ const RemindersScreen: React.FC = () => {
 
   // spotlight helpers
   const scrollRef = React.useRef<ScrollView>(null);
-  const toggleRef = React.useRef<any>(null);
   const saveRef = React.useRef<any>(null);
   const [scrollY, setScrollY] = useState(0);
 
@@ -261,7 +255,7 @@ const RemindersScreen: React.FC = () => {
 
   useEffect(() => {
     if (!currentStepId) return;
-    const map: Record<string, React.RefObject<View>> = { 'rem-toggle': toggleRef, 'rem-save': saveRef };
+    const map: Record<string, React.RefObject<View>> = { 'rem-save': saveRef };
     const r = map[currentStepId];
     if (r) setTimeout(() => ensureVisible(r), 50);
   }, [currentStepId]);
@@ -482,6 +476,15 @@ const RemindersScreen: React.FC = () => {
     await loadScheduled();
   }
 
+  // single source of truth for toggling the "for both" state
+  const toggleForBoth = useCallback(() => {
+    if (!canCreateForBoth) {
+      Alert.alert('Link accounts first', 'Open Pairing to link with your partner before sharing reminders.');
+      return;
+    }
+    setForBoth(v => !v);
+  }, [canCreateForBoth]);
+
   async function onSave() {
     if (!user) return;
     if (!dateOnly || !timeOnly) {
@@ -607,28 +610,25 @@ const RemindersScreen: React.FC = () => {
             {fixedSummary}
           </ThemedText>
 
-          <View ref={toggleRef}>
-            <SpotlightMaybe id="rem-toggle">
-              <Pressable
-                onPress={() => canCreateForBoth && setForBoth(v => !v)}
-                accessibilityRole="switch"
-                accessibilityState={{ checked: forBoth, disabled: !canCreateForBoth }}
-                style={[s.toggleRow, { marginTop: t.spacing.md }]}
-                hitSlop={8}
-              >
-                <ThemedText variant="body">Also create for partner</ThemedText>
-                <Switch
-                  value={forBoth}
-                  onValueChange={setForBoth}
-                  disabled={!canCreateForBoth}
-                  trackColor={{ false: withAlpha(t.colors.text, 0.15), true: withAlpha(t.colors.primary, 0.4) }}
-                  thumbColor={Platform.OS === 'android' ? (forBoth ? t.colors.primary : '#f4f3f4') : undefined}
-                  ios_backgroundColor={withAlpha(t.colors.text, 0.15)}
-                  style={{ marginLeft: 8 }}
-                />
-              </Pressable>
-            </SpotlightMaybe>
-          </View>
+          {/* Toggle row – press anywhere to toggle */}
+          <Pressable
+            onPress={toggleForBoth}
+            accessibilityRole="switch"
+            accessibilityState={{ checked: forBoth, disabled: !canCreateForBoth }}
+            style={[s.toggleRow, { marginTop: t.spacing.md }]}
+            hitSlop={8}
+          >
+            <ThemedText variant="body">Also create for partner</ThemedText>
+            <Switch
+              value={forBoth}
+              onValueChange={toggleForBoth}
+              disabled={!canCreateForBoth}
+              trackColor={{ false: withAlpha(t.colors.text, 0.15), true: withAlpha(t.colors.primary, 0.4) }}
+              thumbColor={Platform.OS === 'android' ? (forBoth ? t.colors.primary : '#f4f3f4') : undefined}
+              ios_backgroundColor={withAlpha(t.colors.text, 0.15)}
+              style={{ marginLeft: 8 }}
+            />
+          </Pressable>
 
           <View style={s.rowDivider} />
 

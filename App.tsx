@@ -5,10 +5,20 @@ import * as Notifications from 'expo-notifications';
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useRef, useState } from 'react';
-import { Animated, AppState, Easing, Image, LogBox, Platform, StyleSheet, View } from 'react-native';
+import {
+  Animated,
+  AppState,
+  Easing,
+  Image,
+  LogBox,
+  Platform,
+  StyleSheet,
+  View,
+} from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { ConfettiProvider } from './components/ConfettiProvider';
 import { ThemeProvider, useTokens } from './components/ThemeProvider';
 import { SpotlightProvider } from './components/spotlight';
 import useAuthListener from './hooks/useAuthListener';
@@ -86,7 +96,6 @@ function dateKey(d: Date): string {
 // Best-effort read of a Date from an Expo NotificationRequest trigger
 function extractTriggerDate(req: Notifications.NotificationRequest): Date | null {
   const trig: any = req.trigger;
-  // For DATE triggers we expect a 'date' value (Date | number | string)
   const raw = trig?.date ?? trig?.value ?? null;
   if (!raw) return null;
   try {
@@ -110,12 +119,10 @@ function makeRandomWeeklyTriggers(targetCount: number, blockedDates: Set<string>
     const hitsThisWeek = 3 + (Math.random() < 0.5 ? 0 : 1); // 3 or 4
     const usedDaysThisWeek = new Set<number>();
 
-    let attemptsThisWeek = 0;
     for (let i = 0; i < hitsThisWeek && out.length < targetCount; i++) {
       let guard = 0;
       let day = randInt(0, 6);
 
-      // Find a day-of-week not yet used this week AND not in blockedDates
       while (guard++ < 30) {
         if (!usedDaysThisWeek.has(day)) {
           const check = new Date(base);
@@ -125,11 +132,7 @@ function makeRandomWeeklyTriggers(targetCount: number, blockedDates: Set<string>
         }
         day = randInt(0, 6);
       }
-      // If we never found a valid day, skip this slot and try next week
-      if (guard >= 30) {
-        attemptsThisWeek++;
-        continue;
-      }
+      if (guard >= 30) continue;
 
       usedDaysThisWeek.add(day);
 
@@ -141,18 +144,15 @@ function makeRandomWeeklyTriggers(targetCount: number, blockedDates: Set<string>
       when.setHours(hour, minute, 0, 0);
 
       if (when.getTime() <= Date.now()) {
-        // try nudging it forward a day if today/past is hit
         when.setDate(when.getDate() + 1);
       }
 
       const ts = when.getTime();
-      if (usedTimestamps.has(ts)) continue;
-
       const k = dateKey(when);
-      if (blockedDates.has(k)) continue;
+      if (usedTimestamps.has(ts) || blockedDates.has(k)) continue;
 
       usedTimestamps.add(ts);
-      blockedDates.add(k); // block this calendar day for the rest of the run
+      blockedDates.add(k);
       out.push(when);
     }
 
@@ -289,7 +289,6 @@ function BottomInsetBackground() {
         bottom: 0,
         height: insets.bottom,
         backgroundColor: (t as any)?.colors?.card ?? '#FFFFFF',
-        // no zIndex — we want this behind the tab bar
       }}
     />
   );
@@ -298,7 +297,6 @@ function BottomInsetBackground() {
 export default function App() {
   const { user } = useAuthListener();
 
-  // Overlay like your original (this path was stable on Android)
   const [showIntro, setShowIntro] = useState(true);
   const overlayOpacity = useRef(new Animated.Value(1)).current;
   const logoOpacity = useRef(new Animated.Value(0)).current;
@@ -419,28 +417,35 @@ export default function App() {
     <GestureHandlerRootView style={{ flex: 1, backgroundColor: '#FFFFFF' }}>
       <SafeAreaProvider>
         <ThemeProvider>
-          {/* Status bar: light background with dark icons */}
-          <StatusBar style="dark" backgroundColor="#FFFFFF" />
+          <ConfettiProvider>
+            {/* Status bar: light background with dark icons */}
+            <StatusBar style="dark" backgroundColor="#FFFFFF" />
 
-          <SpotlightProvider>
-            {/* 👇 render the inset background BEHIND the navigator */}
-            <BottomInsetBackground />
+            <SpotlightProvider>
+              {/* 👇 render the inset background BEHIND the navigator */}
+              <BottomInsetBackground />
 
-            <NavigationContainer onReady={() => setNavReady(true)}>
-              {user ? <AppNavigator /> : <AuthNavigator />}
-            </NavigationContainer>
+              <NavigationContainer onReady={() => setNavReady(true)}>
+                {user ? <AppNavigator /> : <AuthNavigator />}
+              </NavigationContainer>
 
-            {/* Fullscreen overlay (logo fades IN, overlay fades OUT) */}
-            {showIntro && (
-              <Animated.View style={[styles.splashOverlay, { opacity: overlayOpacity }]} pointerEvents="none">
-                <Animated.Image
-                  source={SPLASH_SOURCE}
-                  resizeMode="contain"
-                  style={[styles.splashWordmark, { opacity: logoOpacity }]}
-                />
-              </Animated.View>
-            )}
-          </SpotlightProvider>
+              {/* Fullscreen overlay (logo fades IN, overlay fades OUT) */}
+              {showIntro && (
+                <Animated.View
+                  style={[styles.splashOverlay, { opacity: overlayOpacity }]}
+                  pointerEvents="none"
+                  renderToHardwareTextureAndroid
+                  shouldRasterizeIOS
+                >
+                  <Animated.Image
+                    source={SPLASH_SOURCE}
+                    resizeMode="contain"
+                    style={[styles.splashWordmark, { opacity: logoOpacity }]}
+                  />
+                </Animated.View>
+              )}
+            </SpotlightProvider>
+          </ConfettiProvider>
         </ThemeProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>

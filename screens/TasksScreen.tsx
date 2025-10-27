@@ -22,7 +22,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import Button from '../components/Button';
 import Card from '../components/Card';
-import ConfettiTiny from '../components/ConfettiTiny';
+import { useConfetti } from '../components/ConfettiProvider';
 import Input from '../components/Input';
 import ThemedText from '../components/ThemedText';
 import { useTokens, type ThemeTokens } from '../components/ThemeProvider';
@@ -187,61 +187,6 @@ const CONFETTI_MS_DEFAULT = 650;
 const PUSH_EXTRA_HOLD_MS = 350;
 const MIN_PUSH_DELAY_MS  = 450;
 
-// ─────────────────────────────────────────────
-// Confetti event bus + always-mounted overlay
-// ─────────────────────────────────────────────
-const CONFETTI_EVENT = 'lp:confetti:play';
-const playConfetti = (durationMs = CONFETTI_MS_DEFAULT) =>
-  DeviceEventEmitter.emit(CONFETTI_EVENT, { durationMs });
-
-const OVERLAY_STYLE = StyleSheet.create({
-  root: {
-    position: 'absolute',
-    top: 0, left: 0, right: 0, bottom: 0,
-    zIndex: 9999,
-    elevation: 9999,
-  },
-});
-
-/** Always-mounted overlay; only this re-renders when firing confetti */
-const ConfettiOverlay: React.FC = React.memo(() => {
-  const [visible, setVisible] = React.useState(false);
-  const [key, setKey] = React.useState(0);
-
-  React.useEffect(() => {
-    const sub = DeviceEventEmitter.addListener(
-      CONFETTI_EVENT,
-      ({ durationMs = CONFETTI_MS_DEFAULT } = {}) => {
-        setKey((k) => k + 1); // remount to replay instantly
-        setVisible(true);
-        requestAnimationFrame(() => {
-          setTimeout(() => setVisible(false), durationMs);
-        });
-      }
-    );
-    return () => sub.remove();
-  }, []);
-
-  // Prewarm so first play is hot
-  return (
-    <>
-      <View style={{ width: 0, height: 0, opacity: 0 }} pointerEvents="none">
-        <ConfettiTiny />
-      </View>
-      {visible && (
-        <View
-          pointerEvents="none"
-          style={OVERLAY_STYLE.root}
-          renderToHardwareTextureAndroid
-          shouldRasterizeIOS
-        >
-          <ConfettiTiny key={key} />
-        </View>
-      )}
-    </>
-  );
-});
-
 /** Apply Firestore docChanges to an existing array without rebuilding everything */
 function applyTaskDocChanges(prev: TaskDoc[], changes: any[]): TaskDoc[] {
   if (!changes?.length) return prev;
@@ -266,13 +211,12 @@ function applyTaskDocChanges(prev: TaskDoc[], changes: any[]): TaskDoc[] {
 }
 
 const TasksScreen: React.FC = () => {
-  // ──────────────────────────
-  // Celebration → hard gate
-  // ──────────────────────────
+  // Confetti from global provider (instant overlay)
+  const shootConfetti = useConfetti();
+
+  // Celebration gate (delays pushes/FS updates until after confetti + idle)
   const celebrationGateUntilRef = useRef<number>(0);
 
-  // Wait for current confetti window AND UI interactions to finish.
-  // Also enforce a minimum push delay even if no confetti ran.
   const afterConfettiIdle = React.useCallback(async () => {
     const minUntil = Date.now() + MIN_PUSH_DELAY_MS;
     if (minUntil > celebrationGateUntilRef.current) {
@@ -283,18 +227,16 @@ const TasksScreen: React.FC = () => {
     await new Promise<void>((resolve) => {
       InteractionManager.runAfterInteractions(() => resolve());
     });
-    await nextTick(); // let the frame commit
+    await nextTick();
   }, []);
 
-  // Start confetti immediately and extend the hold window; do not await.
   const showConfettiNow = React.useCallback((durationMs = CONFETTI_MS_DEFAULT) => {
     const holdUntil = Date.now() + durationMs + PUSH_EXTRA_HOLD_MS;
     if (holdUntil > celebrationGateUntilRef.current) {
       celebrationGateUntilRef.current = holdUntil;
     }
-    // Fire instantly without re-rendering TasksScreen
-    playConfetti(durationMs);
-  }, []);
+    try { shootConfetti(durationMs); } catch {}
+  }, [shootConfetti]);
 
   async function notifyRewardRedeemedLocal(
     actorUid: string,
@@ -367,7 +309,7 @@ const TasksScreen: React.FC = () => {
     toUid: string | null,
     msg: { title: string; body: string; data?: Record<string, any>; channelId?: string }
   ) => {
-    await afterConfettiIdle(); // 👈 hard guarantee: push happens after visuals
+    await afterConfettiIdle();
 
     if (!user?.uid) return;
     if (!toUid) {
@@ -379,10 +321,9 @@ const TasksScreen: React.FC = () => {
       return;
     }
 
-    let tokenCount = 0;
     try {
-      const tokens = await getUserExpoTokens(toUid);
-      tokenCount = tokens?.length || 0;
+      // prefetch tokens so Expo can deliver instantly (even if we don't use the values here)
+      await getUserExpoTokens(toUid);
     } catch (e) {
       console.log('[tasks] getUserExpoTokens failed:', e);
     }
@@ -406,7 +347,6 @@ const TasksScreen: React.FC = () => {
     }
 
     try {
-      // Fire-and-forget-ish: don't block UI thread’s next renders
       void sendToUid(toUid, {
         title: msg.title,
         body: msg.body,
@@ -465,7 +405,6 @@ const TasksScreen: React.FC = () => {
 
   const [toast, setToast] = useState<{ visible: boolean; msg: string; undo?: () => Promise<void> | void; }>({ visible: false, msg: '' });
   const showUndo = (message: string, undo?: () => Promise<void> | void) => setToast({ visible: true, msg: message, undo });
-
 
   const confettiSeenTodayRef = useRef(false);
   const { uid: _uid } = user ?? {};
@@ -829,10 +768,6 @@ const TasksScreen: React.FC = () => {
     ? Math.max(pairTotalLive ?? 0,  (totalOptimistic.baselinePair  + totalOptimistic.bump))
     : (pairTotalLive ?? 0);
 
-  const ownerSoloDisplay = totalOptimistic
-    ? Math.max(ownerSoloLive ?? 0, (totalOptimistic.baselineOwner + totalOptimistic.bump))
-    : (ownerSoloLive ?? 0);
-
   // ---- Rewards balances ----------------------
   const effectiveSpentShared = spentSharedSum;
   const effectiveSpentPersonalMine = spentPersonalSum;
@@ -904,16 +839,12 @@ const TasksScreen: React.FC = () => {
   async function handleToggleDoneShared(item: TaskDoc) {
     const nextDone = !item.done;
 
-    // Show confetti immediately
-    showConfettiNow(900);
-
-    // Move local UI update to the very next frame so confetti paints first
+    // Confetti onPressIn in the row; just update UI here
     requestAnimationFrame(() => {
       patchTaskLocal(item.id, { done: nextDone });
       LA();
     });
 
-    // Heavy work (and undo) after confetti + interactions
     void (async () => {
       try {
         await afterConfettiIdle();
@@ -944,15 +875,11 @@ const TasksScreen: React.FC = () => {
     })();
   }
 
-  // 🎉 Confetti first, local UI on next frame, heavy work AFTER confetti + interactions
   async function awardPointsShared(item: TaskDoc, amount: number) {
     if (!user) return;
     const nextPoints = (item.points ?? 0) + amount;
 
-    // Show confetti immediately
-    showConfettiNow(800);
-
-    // Local UI update on next frame ⇒ guarantees confetti paints first
+    // Local UI on next frame (confetti fires in onPressIn)
     requestAnimationFrame(() => {
       if ((React as any).startTransition) {
         (React as any).startTransition(() => {
@@ -965,11 +892,9 @@ const TasksScreen: React.FC = () => {
       }
     });
 
-    // Heavy work later, completely decoupled from UI frame
     void (async () => {
       try {
-        await afterConfettiIdle();
-
+        // Do DB work immediately (no confetti gate here)
         const pidToUse = item.pairId ?? pairId ?? null;
         const pointsId = await createPointsEntry({
           ownerId: user.uid,
@@ -988,9 +913,10 @@ const TasksScreen: React.FC = () => {
           pairId: item.pairId ?? null,
         });
 
-        await pushPointsAwardShared(item, amount);
-
         LA();
+
+        // Send push (sendPartnerPush itself waits for confetti/idle)
+        void pushPointsAwardShared(item, amount);
 
         showUndo(`+${amount} point${amount === 1 ? '' : 's'} added 🎉`, async () => {
           await deletePointsEntry(pointsId, pidToUse ?? undefined);
@@ -1061,16 +987,12 @@ const TasksScreen: React.FC = () => {
 
     const nextDone = !item.done;
 
-    // Confetti immediately
-    showConfettiNow(900);
-
-    // Local UI next frame
+    // Confetti onPressIn if allowed; update UI now
     requestAnimationFrame(() => {
       patchTaskLocal(item.id, { done: nextDone });
       LA();
     });
 
-    // Heavy work after confetti
     void (async () => {
       try {
         await afterConfettiIdle();
@@ -1104,10 +1026,7 @@ const TasksScreen: React.FC = () => {
 
     const nextPoints = (item.points ?? 0) + amount;
 
-    // Confetti immediately
-    showConfettiNow(800);
-
-    // Local UI next frame
+    // Local UI (confetti already fired onPressIn)
     requestAnimationFrame(() => {
       if ((React as any).startTransition) {
         (React as any).startTransition(() => {
@@ -1120,11 +1039,9 @@ const TasksScreen: React.FC = () => {
       }
     });
 
-    // Heavy work after confetti
     void (async () => {
       try {
-        await afterConfettiIdle();
-
+        // DB first (no confetti wait)
         const pointsId = await createPointsEntry({
           ownerId: recipientUid,
           pairId,
@@ -1143,10 +1060,12 @@ const TasksScreen: React.FC = () => {
           pairId: item.pairId ?? null,
         });
 
-        await pushPointsAwardPersonal(item, amount, recipientUid);
-
         LA();
 
+        // Push (sendPartnerPush waits behind confetti)
+        void pushPointsAwardPersonal(item, amount, recipientUid);
+
+        // Undo support
         showUndo(`+${amount} point${amount === 1 ? '' : 's'} added for your partner 🎉`, async () => {
           await deletePointsEntry(pointsId, pairId);
           const rolledBack = Math.max(0, (item.points ?? 0));
@@ -1348,19 +1267,37 @@ const TasksScreen: React.FC = () => {
       </View>
     );
     const AwardBtn = (
-      <Pressable onPress={() => handleAwardPointShared(item)} style={s.awardBtn} hitSlop={8} accessibilityLabel="Add point">
+      <Pressable
+        onPressIn={() => showConfettiNow(800)}
+        onPress={() => handleAwardPointShared(item)}
+        style={s.awardBtn}
+        hitSlop={8}
+        accessibilityLabel="Add point"
+        android_ripple={undefined}
+      >
         <Ionicons name="add-circle" size={20} color={t.colors.primary} />
       </Pressable>
     );
     const DeleteBtn = (
-      <Pressable onPress={() => handleDelete(item)} style={s.deleteBtn} hitSlop={8} accessibilityLabel="Delete task">
+      <Pressable
+        onPress={() => handleDelete(item)}
+        style={s.deleteBtn}
+        hitSlop={8}
+        accessibilityLabel="Delete task"
+      >
         <Ionicons name="trash-outline" size={20} color="#EF4444" />
       </Pressable>
     );
 
     return (
       <Card style={s.itemCard}>
-        <Pressable onPress={() => handleToggleDoneShared(item)} style={s.itemRow} accessibilityRole="button">
+        <Pressable
+          onPressIn={() => { if (!done) showConfettiNow(900); }}
+          onPress={() => handleToggleDoneShared(item)}
+          style={s.itemRow}
+          accessibilityRole="button"
+          android_ripple={undefined}
+        >
           {isFirst ? <SpotlightTarget id="ts-done">{Checkbox}</SpotlightTarget> : Checkbox}
 
           <View style={{ flex: 1 }}>
@@ -1396,7 +1333,14 @@ const TasksScreen: React.FC = () => {
       </View>
     );
     const AwardBtn = showAward ? (
-      <Pressable onPress={() => handleAwardPointPersonal(item)} style={s.awardBtn} hitSlop={8} accessibilityLabel="Add point for partner">
+      <Pressable
+        onPressIn={() => showConfettiNow(800)}
+        onPress={() => handleAwardPointPersonal(item)}
+        style={s.awardBtn}
+        hitSlop={8}
+        accessibilityLabel="Add point for partner"
+        android_ripple={undefined}
+      >
         <Ionicons name="add-circle" size={20} color={t.colors.primary} />
       </Pressable>
     ) : null;
@@ -1409,9 +1353,15 @@ const TasksScreen: React.FC = () => {
     return (
       <Card style={s.itemCard}>
         <Pressable
-          onPress={() => (canToggle ? handleToggleDonePersonal(item) : Alert.alert('Only assignee can complete', 'Your partner can mark this one as done.'))}
+          onPressIn={() => { if (canToggle && !done) showConfettiNow(900); }}
+          onPress={() =>
+            (canToggle
+              ? handleToggleDonePersonal(item)
+              : Alert.alert('Only assignee can complete', 'Your partner can mark this one as done.'))
+          }
           style={s.itemRow}
           accessibilityRole="button"
+          android_ripple={undefined}
         >
           {Checkbox}
 
@@ -1856,7 +1806,6 @@ const TasksScreen: React.FC = () => {
 
   return (
     <SafeAreaView style={[s.screen, { paddingTop: t.spacing.md }]} edges={['top', 'left', 'right']}>
-      <ConfettiOverlay />
 
       <KeyboardAvoidingView behavior={Platform.select({ ios: 'padding', android: undefined })} style={{ flex: 1 }}>
         <FlatList

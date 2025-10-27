@@ -20,7 +20,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.promotebya.LovePointsApp",
-      "buildNumber": "1.0.7",
+      "buildNumber": "1.0.10",
       "infoPlist": {
         "NSPhotoLibraryUsageDescription": "We need access to your photos to add memories.",
         "NSCameraUsageDescription": "We use your camera to capture memory photos and scan QR codes.",
