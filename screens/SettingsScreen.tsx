@@ -1,13 +1,13 @@
 // screens/SettingsScreen.tsx
-
 import { Ionicons } from '@expo/vector-icons';
 import { useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import * as Notifications from 'expo-notifications';
-import React, { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  KeyboardAvoidingView,
   Linking,
   Modal,
   Platform,
@@ -19,6 +19,7 @@ import {
   View,
 } from 'react-native';
 
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Button from '../components/Button';
 import Card from '../components/Card';
 import PairingQR from '../components/PairingQR';
@@ -40,20 +41,19 @@ import { showOpenSettingsAlert } from '../utils/permissions';
 
 import { useNavigation } from '@react-navigation/native';
 import {
-  createUserWithEmailAndPassword,
   deleteUser,
   EmailAuthProvider,
   fetchSignInMethodsForEmail,
   linkWithCredential,
   sendEmailVerification,
   sendPasswordResetEmail,
-  signInAnonymously,
   signOut,
   updateEmail,
   verifyBeforeUpdateEmail,
 } from 'firebase/auth';
+import { getFunctions, httpsCallable } from 'firebase/functions';
 import ToastUndo from '../components/ToastUndo';
-import { auth } from '../firebaseConfig';
+import { auth, app as fbApp, functions, FUNCTIONS_REGION } from '../firebaseConfig';
 
 type SimplePermissionStatus = 'granted' | 'denied' | 'undetermined' | 'checking';
 
@@ -114,6 +114,7 @@ const LinkButton = memo(({ title, onPress }: { title: string; onPress: () => voi
   );
 });
 
+/** Theme picker row – trimmed list (no “system”) */
 type AllowedTheme = 'light-rose' | 'ocean' | 'forest' | 'mono';
 
 const ThemeRow = memo(({ label, value }: { label: string; value: AllowedTheme }) => {
@@ -148,6 +149,8 @@ const permDot = (status: SimplePermissionStatus) => {
 const SettingsScreen: React.FC = () => {
   const nav = useNavigation<any>();
   const t = useTokens();
+  const insets = useSafeAreaInsets();
+  const confirmRef = useRef<TextInput>(null);
 
   const { user } = useAuthListener();
   const isDemo = !!user && user.isAnonymous === true;
@@ -175,6 +178,7 @@ const SettingsScreen: React.FC = () => {
   const [showUpgrade, setShowUpgrade] = useState(false);
   const [upgradeEmail, setUpgradeEmail] = useState('');
   const [upgradePassword, setUpgradePassword] = useState('');
+  const [upgradePassword2, setUpgradePassword2] = useState('');
   const [upgradeLoading, setUpgradeLoading] = useState(false);
   const [pendingVerifyEmail, setPendingVerifyEmail] = useState<string | null>(null);
   const [lastVerificationSentAt, setLastVerificationSentAt] = useState<number | null>(null);
@@ -326,6 +330,7 @@ const SettingsScreen: React.FC = () => {
     );
   }, [user?.uid]);
 
+  // Opens the native subscription management for App Store / Google Play
   function openManageSubscription() {
     if (Platform.OS === 'ios') {
       const iosDeepLink = 'itms-apps://apps.apple.com/account/subscriptions';
@@ -339,6 +344,7 @@ const SettingsScreen: React.FC = () => {
 
   /** Helpers */
 
+  /** Link email/password to the *current* (anonymous) user. */
   async function linkPassword(email: string, password: string) {
     const current = auth.currentUser!;
     const cred = EmailAuthProvider.credential(email, password);
@@ -346,22 +352,28 @@ const SettingsScreen: React.FC = () => {
     try { await current.reload(); await current.getIdToken(true); } catch {}
   }
 
+  /** Send verification to a *not-yet-set* email (works even before linking). */
   async function sendVerifyEmail(email: string) {
     const current = auth.currentUser;
     if (!current) throw new Error('No current user.');
     try { await current.reload(); } catch {}
+
     try {
+      // Preferred: send a “verify before update” email to the new address.
       await verifyBeforeUpdateEmail(current, email);
     } catch {
+      // Fallback: set the email (allowed for anonymous → upgrade) and send a standard verification.
       try {
         if (!current.email || current.email.toLowerCase() !== email.toLowerCase()) {
           await updateEmail(current, email);
         }
         await sendEmailVerification(current);
       } catch {
+        // Last resort: retry verifyBeforeUpdateEmail without any settings.
         await verifyBeforeUpdateEmail(current, email);
       }
     }
+
     setPendingVerifyEmail(email);
     setLastVerificationSentAt(Date.now());
   }
@@ -369,21 +381,31 @@ const SettingsScreen: React.FC = () => {
   /** Server-side fallback via callable function */
   async function serverUpgrade(email: string, password: string) {
     try {
-      // lazy import to avoid bundling if functions aren’t configured
-      // @ts-ignore
-      const { functions } = await import('../firebaseConfig');
-      // @ts-ignore
-      const { httpsCallable } = await import('firebase/functions');
-      if (!functions || !httpsCallable) throw new Error('Functions not available.');
-      const fn = httpsCallable(functions, 'upgradeAnonToPassword');
-      const res: any = await fn({ email, password });
+      const call = httpsCallable(functions, 'upgradeAnonToPassword');
+      const res: any = await call({ email, password });
       if (res?.data?.ok) {
         try { await auth.currentUser?.reload(); } catch {}
         return true;
       }
       throw new Error(res?.data?.error || 'Unknown error');
-    } catch (e: any) {
-      throw e;
+    } catch (err: any) {
+      if (err?.code === 'functions/not-found') {
+        try {
+          const currentRegion = FUNCTIONS_REGION as 'us-central1' | 'europe-west1';
+          const altRegion = currentRegion === 'us-central1' ? 'europe-west1' : 'us-central1';
+          const fallbackFunctions = getFunctions(fbApp, altRegion);
+          const call2 = httpsCallable(fallbackFunctions, 'upgradeAnonToPassword');
+          const res2: any = await call2({ email, password });
+          if (res2?.data?.ok) {
+            try { await auth.currentUser?.reload(); } catch {}
+            return true;
+          }
+          throw new Error(res2?.data?.error || 'Unknown error');
+        } catch (innerErr) {
+          throw innerErr;
+        }
+      }
+      throw err;
     }
   }
 
@@ -392,6 +414,10 @@ const SettingsScreen: React.FC = () => {
     const current = auth.currentUser;
     const email = upgradeEmail.trim().toLowerCase();
     const password = upgradePassword;
+    if (upgradePassword !== upgradePassword2) {
+      Alert.alert('Passwords don’t match', 'Please retype your password.');
+      return;
+    }
 
     if (!current) return Alert.alert('Not signed in', 'No current user. Please try again.');
     if (!current.isAnonymous) return Alert.alert('Already upgraded', 'You are already on a real account.');
@@ -403,23 +429,21 @@ const SettingsScreen: React.FC = () => {
       const methods = await fetchSignInMethodsForEmail(auth, email);
 
       if (methods.length === 0) {
-        // New email → try client link first
         try {
           await linkPassword(email, password);
           setShowUpgrade(false);
           setPendingVerifyEmail(null);
-          showToast('Account created! Your demo is now saved ✨');
-          Alert.alert('Success', 'You’re now on a real account. You can verify your email later in Settings.');
+          showToast('Account created! Your data is now saved ✨');
+          Alert.alert('Account created', 'You’re all set. Your data will sync across devices.');
           return;
         } catch (err: any) {
-          // If client provider is disabled, try the server route
           if (err?.code === 'auth/operation-not-allowed') {
             try {
               await serverUpgrade(email, password);
               setShowUpgrade(false);
               setPendingVerifyEmail(null);
-              showToast('Account created on server! ✨');
-              Alert.alert('Success', 'Upgraded via server. You can verify your email later in Settings.');
+              showToast('Account created! Your data is now saved ✨');
+              Alert.alert('Account created', 'You’re all set. Your data will sync across devices.');
               return;
             } catch (srvErr: any) {
               Alert.alert(
@@ -433,7 +457,6 @@ const SettingsScreen: React.FC = () => {
         }
       }
 
-      // Email exists already
       if (methods.includes('password')) {
         Alert.alert('Email already in use', 'Use Login with that email and password.');
         return;
@@ -447,100 +470,6 @@ const SettingsScreen: React.FC = () => {
     }
   }
 
-  /** Email-first flow (kept) */
-  async function onUpgradeAccount() {
-    const current = auth.currentUser;
-    const email = upgradeEmail.trim().toLowerCase();
-    const password = upgradePassword;
-
-    if (!current) return Alert.alert('Not signed in', 'No current user. Please try again.');
-    if (!email) return Alert.alert('Enter your email', 'Type your email so we can send you a link.');
-
-    setUpgradeLoading(true);
-    try {
-      const methods = await fetchSignInMethodsForEmail(auth, email);
-
-      if (methods.length > 0) {
-        if (methods.includes('password')) {
-          await sendPasswordResetEmail(auth, email);
-          setPendingVerifyEmail(email);
-          setLastVerificationSentAt(Date.now());
-          Alert.alert('Check your inbox', 'We sent you a password reset email.');
-          return;
-        } else {
-          const provLabel = methods.map((m) => (m === 'google.com' ? 'Google' : m === 'apple.com' ? 'Apple' : m)).join(', ');
-          Alert.alert('Use your existing sign-in', `This email is registered with: ${provLabel}.`);
-          return;
-        }
-      }
-
-      // New email path
-      if (!current.isAnonymous) {
-        await sendVerifyEmail(email);
-        Alert.alert('Verify your new email', `We sent a verification link to ${email}.`);
-        return;
-      }
-
-      if (password && password.length >= 6) {
-        try {
-          await linkPassword(email, password);
-          try { await sendEmailVerification(auth.currentUser!); } catch { await sendVerifyEmail(email); }
-          setPendingVerifyEmail(email);
-          setLastVerificationSentAt(Date.now());
-          showToast('Account created! Your demo is now saved ✨');
-          Alert.alert('Verify your email', `We sent a verification link to ${email}.`);
-        } catch (err: any) {
-          if (err?.code === 'auth/operation-not-allowed') {
-            // attempt server route here too
-            try {
-              await serverUpgrade(email, password);
-              setShowUpgrade(false);
-              setPendingVerifyEmail(null);
-              showToast('Account created on server! ✨');
-              Alert.alert('Success', 'Upgraded via server. You can verify your email later in Settings.');
-              return;
-            } catch (srvErr: any) {
-              Alert.alert('Password sign-in disabled', `Project: ${(auth.app?.options as any)?.projectId ?? 'unknown'}`);
-            }
-          } else {
-            throw err;
-          }
-        }
-      } else {
-        await sendVerifyEmail(email);
-        Alert.alert('Verify your email', `We sent a verification link to ${email}.`);
-      }
-    } catch (e: any) {
-      let msg = 'Please try again.';
-      switch (e?.code) {
-        case 'auth/invalid-email': msg = 'Please enter a valid email address.'; break;
-        case 'auth/weak-password': msg = 'Password should be at least 6 characters.'; break;
-        case 'auth/email-already-in-use': msg = 'That email already exists. Use Login or a password reset.'; break;
-        case 'auth/account-exists-with-different-credential': msg = 'This email is linked to a different provider (Google/Apple). Use that to sign in.'; break;
-        case 'auth/operation-not-allowed': msg = 'Email/Password sign-in may be restricted on this project.'; break;
-        case 'auth/network-request-failed': msg = 'Network error. Check your connection and try again.'; break;
-        default: msg = `${msg}\n\n(${e?.code ?? 'unknown'})`;
-      }
-      Alert.alert('Create account failed', msg);
-    } finally {
-      setUpgradeLoading(false);
-    }
-  }
-
-  // Dev sanity check (unchanged)
-  async function onAuthSanityTest() {
-    try {
-      const email = `devtest+${Date.now()}@example.com`;
-      const password = 'test123456';
-      const cred = await createUserWithEmailAndPassword(auth, email, password);
-      try { await deleteUser(cred.user); } catch {}
-      try { await signInAnonymously(auth); } catch {}
-      Alert.alert('Auth sanity test: success', `Created & deleted a throwaway user\nEmail: ${email}`);
-    } catch (e: any) {
-      Alert.alert('Auth sanity test: failed', `${e?.code ?? 'unknown'}\n${e?.message ?? e}`);
-    }
-  }
-
   const showNotifOpenSettings = notifStatus === 'denied';
   const showLibOpenSettings = libStatus === 'denied';
   const showCamOpenSettings = camStatus === 'denied';
@@ -549,6 +478,7 @@ const SettingsScreen: React.FC = () => {
     !upgradeLoading &&
     (!!lastVerificationSentAt ? Date.now() - lastVerificationSentAt > 15000 : true) &&
     !!pendingVerifyEmail;
+  const passwordsMatch = upgradePassword.length >= 6 && upgradePassword === upgradePassword2;
 
   return (
     <>
@@ -559,63 +489,6 @@ const SettingsScreen: React.FC = () => {
         <ThemedText variant="display" style={{ marginBottom: tokens.spacing.md }}>
           Settings
         </ThemedText>
-
-        {/* 🔧 Dev-only email debug helpers */}
-        {__DEV__ && (
-          <Card style={{ marginBottom: tokens.spacing.md }}>
-            <ThemedText variant="title">Email debug</ThemedText>
-            <ThemedText variant="caption" color={t.colors.textDim}>
-              Current: {user?.email ?? '(anonymous)'} • verified: {String(!!user?.emailVerified)}
-            </ThemedText>
-            <ThemedText variant="caption" color={t.colors.textDim}>
-              Project: {(auth.app?.options as any)?.projectId ?? 'unknown'} • API key: {(auth.app?.options as any)?.apiKey ?? 'unknown'}
-            </ThemedText>
-            <View style={{ flexDirection: 'row', gap: 8 as any, marginTop: 8 }}>
-              <Button
-                label="Send verify"
-                variant="outline"
-                onPress={async () => {
-                  try {
-                    if (!user?.email) {
-                      if (!upgradeEmail) {
-                        Alert.alert('Enter email above', 'Fill the email field in the modal first.');
-                        return;
-                      }
-                      await sendVerifyEmail(upgradeEmail.trim().toLowerCase());
-                    } else {
-                      await sendEmailVerification(auth.currentUser!);
-                    }
-                    Alert.alert('Sent', 'Verification email sent.');
-                  } catch (e: any) {
-                    Alert.alert('Verify failed', e?.message ?? 'Please try again.');
-                  }
-                }}
-              />
-              <Button
-                label="Send reset"
-                variant="outline"
-                onPress={async () => {
-                  try {
-                    const target = (user?.email ?? upgradeEmail).trim().toLowerCase();
-                    if (!target) {
-                      Alert.alert('Enter email', 'Provide an email in the modal first.');
-                      return;
-                    }
-                    await sendPasswordResetEmail(auth, target);
-                    Alert.alert('Sent', 'Password reset email sent.');
-                  } catch (e: any) {
-                    try {
-                      await sendPasswordResetEmail(auth, (user?.email ?? upgradeEmail).trim().toLowerCase());
-                      Alert.alert('Sent', 'Password reset email sent.');
-                    } catch (e2: any) {
-                      Alert.alert('Reset failed', e2?.message ?? 'Please try again.');
-                    }
-                  }
-                }}
-              />
-            </View>
-          </Card>
-        )}
 
         {/* Partner linking */}
         <Card>
@@ -767,39 +640,6 @@ const SettingsScreen: React.FC = () => {
             </>
           ) : null}
 
-          {/* Dev-only helpers */}
-          {__DEV__ && (
-            <>
-              <Row
-                icon="bug-outline"
-                title="Run auth sanity test"
-                subtitle="Creates & deletes a throwaway password user"
-                right={<Button label="Run" onPress={onAuthSanityTest} />}
-              />
-              {!isDemo && (
-                <Row
-                  icon="refresh"
-                  title="Switch to demo"
-                  subtitle="Sign out and sign in anonymously (dev)"
-                  right={
-                    <Button
-                      label="Switch"
-                      onPress={async () => {
-                        try {
-                          await signOut(auth);
-                          await signInAnonymously(auth);
-                          showToast('Switched to a demo session ✅');
-                        } catch (e: any) {
-                          Alert.alert('Could not switch', e?.message ?? 'Please try again.');
-                        }
-                      }}
-                    />
-                  }
-                />
-              )}
-            </>
-          )}
-
           <Row
             icon="card-outline"
             title="Manage subscription"
@@ -868,17 +708,18 @@ const SettingsScreen: React.FC = () => {
                       try {
                         try { await unlinkPair(user.uid); } catch {}
                         try {
-                          // @ts-ignore
-                          const { functions } = await import('../firebaseConfig');
-                          // @ts-ignore
-                          const { httpsCallable } = await import('firebase/functions');
-                          // @ts-ignore
-                          if (functions && httpsCallable) {
-                            // @ts-ignore
-                            const wipe = httpsCallable(functions, 'deleteUserData');
-                            await wipe({});
+                          const wipe = httpsCallable(functions, 'deleteUserData');
+                          await wipe({});
+                        } catch (fnErr: any) {
+                          if (fnErr?.code === 'functions/not-found') {
+                            try {
+                              const currentRegion = FUNCTIONS_REGION as 'us-central1' | 'europe-west1';
+                              const fallback = getFunctions(fbApp, currentRegion === 'us-central1' ? 'europe-west1' : 'us-central1');
+                              const wipe2 = httpsCallable(fallback, 'deleteUserData');
+                              await wipe2({});
+                            } catch {}
                           }
-                        } catch {}
+                        }
                         if (auth.currentUser) {
                           await deleteUser(auth.currentUser);
                         }
@@ -910,91 +751,121 @@ const SettingsScreen: React.FC = () => {
       {/* Upgrade modal */}
       <Modal visible={showUpgrade} transparent animationType="fade" onRequestClose={() => setShowUpgrade(false)}>
         <View style={styles.modalBackdrop}>
-          <View style={styles.modalCard}>
-            <ThemedText variant="h2" style={{ marginBottom: tokens.spacing.s }}>Create real account</ThemedText>
-            <ThemedText variant="caption" color="#6B7280" style={{ marginBottom: tokens.spacing.s }}>
-              Create a password account instantly. You can verify later in Settings.
-            </ThemedText>
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            keyboardVerticalOffset={insets.top + 24}
+            style={{ width: '100%' }}
+          >
+            <View style={styles.modalCard}>
+              <ScrollView
+                keyboardShouldPersistTaps="handled"
+                showsVerticalScrollIndicator={false}
+                contentInsetAdjustmentBehavior="always"
+                contentContainerStyle={{ paddingBottom: 16 }}
+              >
+                <ThemedText variant="h2" style={{ marginBottom: tokens.spacing.s }}>Create real account</ThemedText>
+                <ThemedText variant="caption" color="#6B7280" style={{ marginBottom: tokens.spacing.s }}>
+                  Create a password account instantly.
+                </ThemedText>
 
-            <ThemedText variant="label">Email</ThemedText>
-            <TextInput
-              style={styles.input}
-              value={upgradeEmail}
-              onChangeText={setUpgradeEmail}
-              placeholder="you@example.com"
-              autoCapitalize="none"
-              autoCorrect={false}
-              keyboardType="email-address"
-              textContentType="emailAddress"
-            />
-
-            <ThemedText variant="label" style={{ marginTop: tokens.spacing.s }}>
-              Password (min 6 characters)
-            </ThemedText>
-            <TextInput
-              style={styles.input}
-              value={upgradePassword}
-              onChangeText={setUpgradePassword}
-              placeholder="Minimum 6 characters"
-              secureTextEntry
-              textContentType="newPassword"
-            />
-
-            <View style={styles.modalBtnRow}>
-              <Button label="Cancel" variant="outline" onPress={() => setShowUpgrade(false)} />
-              {pendingVerifyEmail ? (
-                <Button
-                  variant="outline"
-                  label={upgradeLoading ? 'Resending…' : 'Resend email'}
-                  onPress={async () => {
-                    if (!canResend) return;
-                    try {
-                      setUpgradeLoading(true);
-                      const em = upgradeEmail.trim().toLowerCase();
-                      const methods = await fetchSignInMethodsForEmail(auth, em);
-                      if (methods.includes('password')) {
-                        await sendPasswordResetEmail(auth, em);
-                        Alert.alert('Sent', 'We resent the password reset email.');
-                      } else {
-                        await sendVerifyEmail(em);
-                        Alert.alert('Sent', 'We resent the verification email.');
-                      }
-                      setLastVerificationSentAt(Date.now());
-                    } catch (e: any) {
-                      try {
-                        const em2 = upgradeEmail.trim().toLowerCase();
-                        const methods2 = await fetchSignInMethodsForEmail(auth, em2);
-                        if (methods2.includes('password')) {
-                          await sendPasswordResetEmail(auth, em2);
-                          Alert.alert('Sent', 'We resent the password reset email.');
-                        } else {
-                          await sendEmailVerification(auth.currentUser!);
-                          Alert.alert('Sent', 'We resent the verification email.');
-                        }
-                        setLastVerificationSentAt(Date.now());
-                      } catch (e2: any) {
-                        Alert.alert('Resend failed', e2?.message ?? 'Please try again.');
-                      }
-                    } finally {
-                      setUpgradeLoading(false);
-                    }
-                  }}
-                  disabled={!canResend}
+                <ThemedText variant="label">Email</ThemedText>
+                <TextInput
+                  style={styles.input}
+                  value={upgradeEmail}
+                  onChangeText={setUpgradeEmail}
+                  placeholder="you@example.com"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  keyboardType="email-address"
+                  textContentType="emailAddress"
                 />
-              ) : null}
-              <Button
-                label={upgradeLoading ? 'Creating…' : 'Create instantly'}
-                onPress={onUpgradeAccountInstant}
-                disabled={upgradeLoading}
-              />
-              <Button
-                variant="outline"
-                label="Email me a link"
-                onPress={onUpgradeAccount}
-                disabled={upgradeLoading}
-              />
+
+                <ThemedText variant="label" style={{ marginTop: tokens.spacing.s }}>
+                  Password (min 6 characters)
+                </ThemedText>
+                <TextInput
+                  style={styles.input}
+                  value={upgradePassword}
+                  onChangeText={setUpgradePassword}
+                  placeholder="Minimum 6 characters"
+                  secureTextEntry
+                  textContentType="newPassword"
+                  autoComplete="password-new"
+                  returnKeyType="next"
+                  blurOnSubmit={false}
+                  onSubmitEditing={() => confirmRef.current?.focus()}
+                />
+                <ThemedText variant="label" style={{ marginTop: tokens.spacing.s }}>
+                  Confirm password
+                </ThemedText>
+                <TextInput
+                  ref={confirmRef}
+                  style={styles.input}
+                  value={upgradePassword2}
+                  onChangeText={setUpgradePassword2}
+                  placeholder="Re-enter password"
+                  secureTextEntry
+                  textContentType="newPassword"
+                  autoComplete="password-new"
+                  returnKeyType="done"
+                />
+                {upgradePassword2.length > 0 && upgradePassword !== upgradePassword2 ? (
+                  <ThemedText variant="caption" color="#EF4444" style={{ marginTop: 4 }}>
+                    Passwords don’t match
+                  </ThemedText>
+                ) : null}
+
+                <View style={styles.modalBtnRow}>
+                  <Button label="Cancel" variant="outline" onPress={() => setShowUpgrade(false)} />
+                  {pendingVerifyEmail ? (
+                    <Button
+                      variant="outline"
+                      label={upgradeLoading ? 'Resending…' : 'Resend email'}
+                      onPress={async () => {
+                        if (!canResend) return;
+                        try {
+                          setUpgradeLoading(true);
+                          const em = upgradeEmail.trim().toLowerCase();
+                          const methods = await fetchSignInMethodsForEmail(auth, em);
+                          if (methods.includes('password')) {
+                            await sendPasswordResetEmail(auth, em);
+                            Alert.alert('Sent', 'We resent the password reset email.');
+                          } else {
+                            await sendVerifyEmail(em);
+                            Alert.alert('Sent', 'We resent the verification email.');
+                          }
+                          setLastVerificationSentAt(Date.now());
+                        } catch (e: any) {
+                          try {
+                            const em2 = upgradeEmail.trim().toLowerCase();
+                            const methods2 = await fetchSignInMethodsForEmail(auth, em2);
+                            if (methods2.includes('password')) {
+                              await sendPasswordResetEmail(auth, em2);
+                              Alert.alert('Sent', 'We resent the password reset email.');
+                            } else {
+                              await sendEmailVerification(auth.currentUser!);
+                              Alert.alert('Sent', 'We resent the verification email.');
+                            }
+                            setLastVerificationSentAt(Date.now());
+                          } catch (e2: any) {
+                            Alert.alert('Resend failed', e2?.message ?? 'Please try again.');
+                          }
+                        } finally {
+                          setUpgradeLoading(false);
+                        }
+                      }}
+                      disabled={!canResend}
+                    />
+                  ) : null}
+                  <Button
+                    label={upgradeLoading ? 'Creating…' : 'Create instantly'}
+                    onPress={onUpgradeAccountInstant}
+                    disabled={upgradeLoading || !passwordsMatch}
+                  />
+                </View>
+              </ScrollView>
             </View>
-          </View>
+          </KeyboardAvoidingView>
         </View>
       </Modal>
 

@@ -1,16 +1,16 @@
-// firebaseConfig.ts (root)
+// firebaseConfig.ts — EU Functions region + RN persistence
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { FirebaseApp, getApp, getApps, initializeApp } from 'firebase/app';
+import { getApp, getApps, initializeApp, type FirebaseApp } from 'firebase/app';
 
 // Auth (RN)
-import { Auth, getAuth, initializeAuth } from 'firebase/auth';
+import { getAuth, initializeAuth, type Auth } from 'firebase/auth';
 import { getReactNativePersistence } from 'firebase/auth/react-native';
 
 // Firestore
 import { getFirestore, setLogLevel } from 'firebase/firestore';
 
-// Cloud Functions (needed for server-side upgrade + delete flow)
+// Functions (explicit region)
 import { getFunctions } from 'firebase/functions';
 
 const firebaseConfig = {
@@ -23,43 +23,28 @@ const firebaseConfig = {
   measurementId: 'G-2PCYJEGDT5',
 };
 
-// --- App (guard against re-init during Fast Refresh) ---
-let app: FirebaseApp;
-app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
+// Initialize app (guarded)
+let app: FirebaseApp = getApps().length ? getApp() : initializeApp(firebaseConfig);
 
-// --- Auth (React Native persistence with AsyncStorage) ---
-// IMPORTANT: initializeAuth must be called BEFORE getAuth(app) is used anywhere.
+// Initialize Auth BEFORE any getAuth(app) elsewhere
 let auth: Auth;
 try {
-  auth = initializeAuth(app, {
-    persistence: getReactNativePersistence(AsyncStorage),
-  });
+  auth = initializeAuth(app, { persistence: getReactNativePersistence(AsyncStorage) });
 } catch {
-  // If auth was already initialized (e.g., hot reload), fall back to getAuth.
   auth = getAuth(app);
 }
 
-// Localize Firebase system emails (verification/reset) where supported
-// @ts-ignore
-auth.useDeviceLanguage?.();
-
-// --- Firestore ---
+// Firestore
 export const db = getFirestore(app);
 
-// --- Functions ---
-// If you deployed functions in a specific region, set it here (default: us-central1).
-// Optionally use an env var to control region without code changes.
-const FUNCTIONS_REGION =
-  // @ts-ignore
-  process.env.EXPO_PUBLIC_FUNCTIONS_REGION || 'us-central1';
+// Functions region — annotate as union to avoid TS2367 warnings in comparisons
+export const FUNCTIONS_REGION: 'us-central1' | 'europe-west1' = 'europe-west1';
 export const functions = getFunctions(app, FUNCTIONS_REGION);
 
-// 🔎 Firestore logs (verbose in dev only)
+// Dev logging
 setLogLevel(__DEV__ ? 'debug' : 'error');
-
-// 🔧 Print the Firebase project/app used at runtime (helps avoid using wrong project)
 const { projectId, appId } = getApp().options as { projectId?: string; appId?: string };
-console.log('[Firebase] projectId:', projectId, 'appId:', appId);
+console.log('[Firebase] Using projectId:', projectId, 'appId:', appId, 'functionsRegion:', FUNCTIONS_REGION);
 
-// Export ready-to-use instances
+// Export
 export { app, auth };

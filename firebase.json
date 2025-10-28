@@ -4,6 +4,15 @@
     "indexes": "firestore.indexes.json"
   },
   "functions": {
-    "source": "functions"
+    "source": "functions",
+    "runtime": "nodejs20",
+    "predeploy": [
+      "npm --prefix \"$RESOURCE_DIR\" ci"
+    ],
+    "ignore": [
+      "node_modules",
+      ".git",
+      ".DS_Store"
+    ]
   }
 }

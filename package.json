@@ -14,7 +14,8 @@
     "lint": "expo lint",
     "doctor": "expo-doctor",
     "prebuild": "expo prebuild",
-    "reset-project": "node ./scripts/reset-project.js"
+    "reset-project": "node ./scripts/reset-project.js",
+    "functions:deploy": "npx firebase-tools deploy --only functions --project lovepointsapp-23880"
   },
   "dependencies": {
     "@expo/vector-icons": "^14.1.0",
@@ -48,7 +49,6 @@
     "expo-symbols": "~0.4.5",
     "expo-system-ui": "~5.0.11",
     "expo-updates": "~0.28.17",
-    "expo-web-browser": "~14.2.0",
     "firebase": "^9.23.0",
     "react": "19.0.0",
     "react-dom": "19.0.0",

@@ -1,18 +1,11 @@
 // index.js
 import 'expo-dev-client';
-import 'react-native-gesture-handler'; // 👈 must be first
+import 'react-native-gesture-handler'; // must be first before ANY React/Navigation import
 
 import { registerRootComponent } from 'expo';
 import App from './App';
 
-// Ensure notifications handler is registered on app start
+// Ensure your notifications handler is registered on app start
 import './utils/push';
-
-// Optional: log the Firebase project at runtime (helps catch wrong project)
-import { app as firebaseApp } from './firebaseConfig';
-try {
-  const { projectId, apiKey } = firebaseApp?.options ?? {};
-  console.log('[Startup] Firebase projectId:', projectId, 'apiKey:', apiKey);
-} catch {}
 
 registerRootComponent(App);

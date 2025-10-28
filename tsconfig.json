@@ -1,45 +1,26 @@
 {
   "compilerOptions": {
     "target": "ES2020",
-    "lib": [
-      "ES2020",
-      "DOM"
-    ],
+    "lib": ["ES2020", "DOM"],
     "jsx": "react-jsx",
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "baseUrl": ".",
     "paths": {
-      "components/*": [
-        "components/*"
-      ],
-      "screens/*": [
-        "screens/*"
-      ],
-      "navigation/*": [
-        "navigation/*"
-      ],
-      "utils/*": [
-        "utils/*"
-      ],
-      "hooks/*": [
-        "hooks/*"
-      ],
-      "assets/*": [
-        "assets/*"
-      ],
-      "types/*": [
-        "types/*"
-      ]
+      "components/*": ["components/*"],
+      "screens/*": ["screens/*"],
+      "navigation/*": ["navigation/*"],
+      "utils/*": ["utils/*"],
+      "hooks/*": ["hooks/*"],
+      "assets/*": ["assets/*"],
+      "types/*": ["types/*"]
     },
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": [
-    "**/*.ts",
-    "**/*.tsx"
-  ],
+  "include": ["**/*.ts", "**/*.tsx"],
+  "exclude": ["functions/**"],
   "extends": "expo/tsconfig.base"
 }

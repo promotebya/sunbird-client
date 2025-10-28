@@ -5,47 +5,28 @@ import { HttpsError, onCall } from "firebase-functions/v2/https";
 
 initializeApp();
 
-// Keep in sync with client. Use a simple string (no TS types in .js files).
-const REGION = "europe-west1";
+// Must match your client (firebaseConfig.ts → FUNCTIONS_REGION = 'europe-west1')
+const REGION: "europe-west1" | "us-central1" = "europe-west1";
 
-/**
- * upgradeAnonToPassword
- * Adds email+password to the current signed-in (anonymous) user.
- * Returns { ok: true } on success.
- */
 export const upgradeAnonToPassword = onCall({ region: REGION }, async (req) => {
   const uid = req.auth?.uid;
   if (!uid) throw new HttpsError("unauthenticated", "Sign in first.");
 
-  const data = req.data || {};
-  const email = typeof data.email === "string" ? data.email.trim().toLowerCase() : "";
-  const password = typeof data.password === "string" ? data.password : "";
-
+  const { email, password } = (req.data || {}) as { email?: string; password?: string };
   if (!email) throw new HttpsError("invalid-argument", "Provide 'email'.");
-  if (!password || password.length < 6) {
-    throw new HttpsError("invalid-argument", "Provide 'password' (>= 6 chars).");
-  }
+  if (!password || password.length < 6) throw new HttpsError("invalid-argument", "Provide 'password' (>= 6 chars).");
 
   try {
-    // Convert the current anon user to email/password (same uid).
-    await getAuth().updateUser(uid, { email, password, emailVerified: false });
+    await getAuth().updateUser(uid, { email: email.toLowerCase(), password, emailVerified: false });
     return { ok: true };
-  } catch (e) {
-    const code = e?.code;
-    if (code === "auth/email-already-exists") {
-      throw new HttpsError("already-exists", "Email already in use.");
-    }
-    if (code === "auth/operation-not-allowed") {
+  } catch (e: any) {
+    if (e?.code === "auth/email-already-exists") throw new HttpsError("already-exists", "Email already in use.");
+    if (e?.code === "auth/operation-not-allowed")
       throw new HttpsError("failed-precondition", "Password sign-in is not enabled for this project.");
-    }
     throw new HttpsError("internal", e?.message ?? "Unknown error");
   }
 });
 
-/**
- * deleteUserData
- * Minimal cleanup for your delete flow. Expand as needed.
- */
 export const deleteUserData = onCall({ region: REGION, timeoutSeconds: 120 }, async (req) => {
   const uid = req.auth?.uid;
   if (!uid) throw new HttpsError("unauthenticated", "Sign in first.");
@@ -69,10 +50,6 @@ export const deleteUserData = onCall({ region: REGION, timeoutSeconds: 120 }, as
     await batch.commit();
   }
 
-  try {
-    await db.collection("users").doc(uid).delete();
-  } catch {
-    // ignore
-  }
+  try { await db.collection("users").doc(uid).delete(); } catch {}
   return { ok: true };
 });
