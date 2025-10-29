@@ -2,9 +2,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import * as Notifications from 'expo-notifications';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
+  AppState,
   Dimensions,
   Platform,
   Pressable,
@@ -283,12 +284,65 @@ const RemindersScreen: React.FC = () => {
 
   const { badge } = usePendingRemindersBadge(user?.uid ?? null);
 
+  // --- fresh pairing: reliable state refresh + heartbeat poll ---
+  const pairPollRef = useRef<any>(null);
+
+  const refreshPairState = useCallback(async () => {
+    if (!user?.uid) {
+      setPairId(null);
+      setPartnerUid(null);
+      return { pid: null as string | null, puid: null as string | null };
+    }
+    try {
+      const [pid, puid] = await Promise.all([getPairId(user.uid), getPartnerUid(user.uid)]);
+      const nextPid = pid ?? null;
+      const nextPuid = puid ?? null;
+      setPairId(nextPid);
+      setPartnerUid(nextPuid);
+      return { pid: nextPid, puid: nextPuid };
+    } catch {
+      return { pid: null, puid: null };
+    }
+  }, [user?.uid]);
+
+  useEffect(() => {
+    // initial load
+    refreshPairState();
+    // short heartbeat: every 4s, up to ~2 minutes, stops early when both present
+    if (pairPollRef.current) clearInterval(pairPollRef.current);
+    let tries = 0;
+    pairPollRef.current = setInterval(async () => {
+      tries++;
+      const { pid, puid } = await refreshPairState();
+      if ((pid && puid) || tries >= 30) {
+        clearInterval(pairPollRef.current);
+        pairPollRef.current = null;
+      }
+    }, 4000);
+    return () => {
+      if (pairPollRef.current) clearInterval(pairPollRef.current);
+      pairPollRef.current = null;
+    };
+  }, [refreshPairState]);
+
+  useFocusEffect(
+    useCallback(() => {
+      refreshPairState();
+      return () => {};
+    }, [refreshPairState])
+  );
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (st) => {
+      if (st === 'active') refreshPairState();
+    });
+    return () => sub.remove();
+  }, [refreshPairState]);
+
+  // load local scheduled + selfIds and prune
   useEffect(() => {
     (async () => {
       if (!user) return;
-      const [pid, puid] = await Promise.all([getPairId(user.uid), getPartnerUid(user.uid)]);
-      setPairId(pid);
-      setPartnerUid(puid);
       // load self ids for this user
       try {
         const raw = await AsyncStorage.getItem(selfIdsKey(user.uid));
@@ -479,11 +533,22 @@ const RemindersScreen: React.FC = () => {
   // single source of truth for toggling the "for both" state
   const toggleForBoth = useCallback(() => {
     if (!canCreateForBoth) {
-      Alert.alert('Link accounts first', 'Open Pairing to link with your partner before sharing reminders.');
+      Alert.alert(
+        'Link accounts first',
+        'Open Pairing to link with your partner before sharing reminders.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Open Pairing', onPress: () => {
+              try { navigation.navigate('Pairing' as never); } catch {}
+              try { navigation.getParent?.()?.navigate('Settings', { screen: 'Pairing' }); } catch {}
+            } 
+          },
+        ]
+      );
       return;
     }
     setForBoth(v => !v);
-  }, [canCreateForBoth]);
+  }, [canCreateForBoth, navigation]);
 
   async function onSave() {
     if (!user) return;
@@ -508,6 +573,15 @@ const RemindersScreen: React.FC = () => {
       }).catch(() => {});
     }
 
+    // 🔄 First-run pairing race guard: if “for both” is ON but state isn’t ready yet, refresh once
+    if (forBoth && (!pairId || !partnerUid)) {
+      const { pid, puid } = await refreshPairState();
+      if (!pid || !puid) {
+        Alert.alert('Linking not finished yet', 'Give it a moment after linking, then try again—or open Pairing once.');
+        return;
+      }
+    }
+
     setSaving(true);
     try {
       const month = dateOnly.getMonth() + 1;
@@ -521,7 +595,7 @@ const RemindersScreen: React.FC = () => {
       // local schedule (report ids so Saved shows only mine)
       await scheduleYearlyTriplet({ title, month, day, hour, minute }, addSelfId);
 
-      // partner doc (unchanged behavior)
+      // partner doc
       if (forBoth && pairId && partnerUid) {
         const dueAt = nextOccurrence(month, day, hour, minute);
         await createPartnerReminderDoc({ forUid: partnerUid, ownerId: user.uid, pairId, title, dueAt });

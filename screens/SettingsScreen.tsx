@@ -33,13 +33,11 @@ import usePartnerUid from '../hooks/usePartnerUid';
 import {
   generatePairCode,
   getPairId,
-  redeemPairCode,
   unlinkPair,
   type PairCodeInfo,
 } from '../utils/pairing';
 import { showOpenSettingsAlert } from '../utils/permissions';
 
-import { useNavigation } from '@react-navigation/native';
 import {
   deleteUser,
   EmailAuthProvider,
@@ -147,7 +145,6 @@ const permDot = (status: SimplePermissionStatus) => {
 };
 
 const SettingsScreen: React.FC = () => {
-  const nav = useNavigation<any>();
   const t = useTokens();
   const insets = useSafeAreaInsets();
   const confirmRef = useRef<TextInput>(null);
@@ -241,28 +238,11 @@ const SettingsScreen: React.FC = () => {
     await Share.share({
       message:
         `Join me on LovePoints 💞\n\n` +
-        `Open the app → Settings → "Enter code" and paste:\n\n` +
+        `Open the app → Home → "Enter code" and paste:\n\n` +
         `${pairInfo.code}\n\n` +
         `This code links our accounts (expires in ~30 minutes).`,
     });
   }, [pairInfo]);
-
-  async function onRedeemPrompt() {
-    if (!user) return;
-    // iOS prompt (Android: navigate to your input screen if desired)
-    // @ts-ignore
-    Alert.prompt?.('Enter pairing code', 'Paste the code you received to link accounts.', async (code: string) => {
-      if (!code) return;
-      try {
-        await redeemPairCode(user.uid, code.trim());
-        Alert.alert('Linked', 'You are now linked 💞');
-        setPairInfo(null);
-        setPairId(await getPairId(user.uid));
-      } catch (e: any) {
-        Alert.alert('Could not link', e?.message ?? 'Try again.');
-      }
-    });
-  }
 
   const requestNotifications = useCallback(async () => {
     const res = await Notifications.requestPermissionsAsync();
@@ -532,8 +512,7 @@ const SettingsScreen: React.FC = () => {
 
               <View style={styles.rowBtns}>
                 <Button label="Share" onPress={onShareCode} />
-                <LinkButton title="Enter code" onPress={onRedeemPrompt} />
-                <LinkButton title="Scan code" onPress={() => nav.navigate('PairingScan')} />
+                {/* Removed: Enter code & Scan code (moved to Home) */}
               </View>
             </>
           ) : null}

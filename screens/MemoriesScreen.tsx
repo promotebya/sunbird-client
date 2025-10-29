@@ -2,12 +2,13 @@
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
-import { useNavigation } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import * as ImagePicker from 'expo-image-picker';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  AppState,
   FlatList,
   Image,
   Linking,
@@ -80,28 +81,116 @@ const MemoriesScreen: React.FC = () => {
   const [saving, setSaving] = useState(false);
   const [promptIdx, setPromptIdx] = useState(() => Math.floor(Math.random() * PROMPTS.length));
 
-  useEffect(() => {
-    (async () => {
-      if (!user) return setPairId(null);
+  const memUnsubRef = useRef<(() => void) | null>(null);
+
+  const pairPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const refreshPairId = useCallback(async () => {
+    if (!user) {
+      setPairId(null);
+      return;
+    }
+    try {
       const pid = await getPairId(user.uid);
       setPairId(pid ?? null);
-    })();
-  }, [user]);
+    } catch {}
+  }, [user?.uid]);
 
-  useEffect(() => {
-    if (!user) return;
-    if (!pairId) {
+  const attachMemListener = useCallback(() => {
+    // Clean up any previous listener
+    memUnsubRef.current?.();
+    memUnsubRef.current = null;
+
+    if (!user || !pairId) {
       setServerItems([]);
       return;
     }
-    const unsub = subscribeMemories(user.uid, { pairId }, (list) => {
+
+    memUnsubRef.current = subscribeMemories(user.uid, { pairId }, (list) => {
       setServerItems(list);
       setOptimistic((prev) =>
         prev.filter((o) => !list.some((s) => s.clientTag && s.clientTag === o.clientTag))
       );
     });
-    return () => unsub && unsub();
-  }, [user, pairId]);
+  }, [user?.uid, pairId]);
+
+  useEffect(() => {
+    refreshPairId();
+  }, [refreshPairId]);
+
+  // (Re)attach listener on mount/pair change
+  useEffect(() => {
+    attachMemListener();
+    return () => {
+      memUnsubRef.current?.();
+    };
+  }, [attachMemListener]);
+
+  // Re-attach whenever the screen gains focus
+  useFocusEffect(
+    useCallback(() => {
+      refreshPairId();     // ensure the latest link state
+      attachMemListener(); // then (re)attach listener
+      return () => {};
+    }, [refreshPairId, attachMemListener])
+  );
+
+  // Re-attach when app returns to foreground
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (st) => {
+      if (st === 'active') {
+        refreshPairId();
+        attachMemListener();
+      }
+    });
+    return () => sub.remove();
+  }, [refreshPairId, attachMemListener]);
+
+  useEffect(() => {
+    if (!user) return;
+
+    // Already linked? ensure any poll is cleared.
+    if (pairId) {
+      if (pairPollRef.current) {
+        clearInterval(pairPollRef.current);
+        pairPollRef.current = null;
+      }
+      return;
+    }
+
+    // Not linked yet → poll a bit so partner flips to linked without reopening
+    if (pairPollRef.current) return; // already polling
+
+    let tries = 0;
+    pairPollRef.current = setInterval(async () => {
+      tries++;
+      try {
+        const pid = await getPairId(user.uid);
+        if (pid) {
+          setPairId(pid);
+          attachMemListener();
+          if (pairPollRef.current) {
+            clearInterval(pairPollRef.current);
+            pairPollRef.current = null;
+          }
+          return;
+        }
+      } catch {}
+      if (tries >= 30) { // ~120s at 4s interval
+        if (pairPollRef.current) {
+          clearInterval(pairPollRef.current);
+          pairPollRef.current = null;
+        }
+      }
+    }, 4000);
+
+    return () => {
+      if (pairPollRef.current) {
+        clearInterval(pairPollRef.current);
+        pairPollRef.current = null;
+      }
+    };
+  }, [user?.uid, pairId, attachMemListener]);
 
   useEffect(() => {
     if (!pairId) return;
@@ -234,6 +323,7 @@ const MemoriesScreen: React.FC = () => {
           };
           setOptimistic((prev) => [opt, ...prev]);
           await createMemory({ ownerId: user.uid, pairId, kind: 'milestone', title: tTitle, note: tNote, clientTag });
+          attachMemListener();
           setTitle('');
           setNote('');
         }
@@ -271,7 +361,7 @@ const MemoriesScreen: React.FC = () => {
             photoURL: url,
             clientTag,
           });
-
+          attachMemListener();
           setTitle('');
           setNote('');
           setImageUri(null);
@@ -315,6 +405,16 @@ const MemoriesScreen: React.FC = () => {
 
   const renderItem = ({ item, index }: { item: MemoryDoc; index: number }) => {
     const km = KIND_META[item.kind];
+    const cacheKey =
+      (item as any)?.updatedAt?.seconds ??
+      (item as any)?.createdAt?.seconds ??
+      Math.floor(Date.now() / 1000);
+    const photoURL =
+      item.photoURL
+        ? item.photoURL.includes('?')
+          ? `${item.photoURL}&v=${cacheKey}`
+          : `${item.photoURL}?v=${cacheKey}`
+        : undefined;
     return (
       <>
         <View style={s.itemHeader}>
@@ -338,7 +438,7 @@ const MemoriesScreen: React.FC = () => {
               <MemoryShareCard
                 title={item.title ?? undefined}
                 note={item.note ?? undefined}
-                photoURL={item.photoURL ?? undefined}
+                photoURL={photoURL}
                 {...({ accentColor: t.colors.primary } as any)}
               />
             </Card>
@@ -348,7 +448,7 @@ const MemoriesScreen: React.FC = () => {
             <MemoryShareCard
               title={item.title ?? undefined}
               note={item.note ?? undefined}
-              photoURL={item.photoURL ?? undefined}
+              photoURL={photoURL}
               {...({ accentColor: t.colors.primary } as any)}
             />
           </Card>

@@ -248,10 +248,41 @@ export default function ChallengesScreen() {
   const [pairId, setPairId] = useState<string | null>(null);
   const [pairLoaded, setPairLoaded] = useState<boolean>(false);
 
+  // Pair-level premium propagation
+  const [pairPremium, setPairPremium] = useState<boolean>(false);
+
   // Public entitlement (for partner to see my premium and vice versa)
   const [partnerPublicPremium, setPartnerPublicPremium] = useState<boolean>(false);
   // Self entitlement mirror (so this device updates instantly when another device purchases)
   const [selfPublicPremium, setSelfPublicPremium] = useState<boolean>(false);
+
+  /* ---- NEW: refresh pairId on focus & on app foreground ---- */
+  const refreshPairIdNow = useCallback(async () => {
+    if (!user?.uid) {
+      setPairId(null);
+      setPartnerUid(null);
+      return;
+    }
+    try {
+      const pid = await getPairId(user.uid);
+      setPairId(pid ?? null);
+    } catch {
+      // noop
+    }
+  }, [user?.uid]);
+
+  useFocusEffect(
+    useCallback(() => {
+      refreshPairIdNow();
+    }, [refreshPairIdNow])
+  );
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (st) => {
+      if (st === 'active') refreshPairIdNow();
+    });
+    return () => sub.remove();
+  }, [refreshPairIdNow]);
 
   // Load pairId + partnerUid + partner entitlement mirror (read-only)
   useEffect(() => {
@@ -262,6 +293,7 @@ export default function ChallengesScreen() {
       try {
         setPairLoaded(false);
         setPartnerPublicPremium(false);
+        setPairPremium(false);
 
         if (!user?.uid) {
           setPartnerUid(null);
@@ -271,30 +303,36 @@ export default function ChallengesScreen() {
           return;
         }
 
-        const pid = await getPairId(user.uid).catch(() => null);
-        setPairId(pid ?? null);
+        // Also refresh pairId here for safety (will be a no-op if unchanged)
+        try {
+          const pidRefreshed = await getPairId(user.uid);
+          if (pidRefreshed !== pairId) setPairId(pidRefreshed ?? null);
+        } catch {}
 
-        if (!pid) {
+        if (!pairId) {
           setPartnerUid(null);
           setPairLoaded(true);
+          setPairPremium(false);
           if (unsubscribePartnerEnt) unsubscribePartnerEnt();
           return;
         }
 
-        const ref = doc(db, 'pairs', pid);
+        const ref = doc(db, 'pairs', pairId);
         unsubscribePair = onSnapshot(
           ref,
           async (snap) => {
             setPairLoaded(true);
             if (!snap.exists()) {
               setPartnerUid(null);
-              setPairId(null);
               setPartnerPublicPremium(false);
+              setPairPremium(false);
               if (unsubscribePartnerEnt) unsubscribePartnerEnt();
               return;
             }
 
             const data: any = snap.data();
+            setPairPremium(!!data?.premiumActive);
+
             const members: string[] = Array.isArray(data?.members) ? data.members : [];
             const other = members.find((m) => m && m !== user.uid) ?? null;
             setPartnerUid(other);
@@ -308,6 +346,19 @@ export default function ChallengesScreen() {
                   { premiumActive: true, updatedAt: serverTimestamp() },
                   { merge: true }
                 );
+              } catch {}
+            }
+
+            // Ensure pair doc reflects premium if I already have it when linking
+            if (iAmPremium && !data?.premiumActive) {
+              try {
+                await setDoc(
+                  ref,
+                  { premiumActive: true, premiumFrom: user.uid, updatedAt: serverTimestamp() },
+                  { merge: true }
+                );
+                // Optimistic local unlock
+                setPairPremium(true);
               } catch {}
             }
 
@@ -336,16 +387,16 @@ export default function ChallengesScreen() {
           () => {
             setPairLoaded(true);
             setPartnerUid(null);
-            setPairId(null);
             setPartnerPublicPremium(false);
+            setPairPremium(false);
             if (unsubscribePartnerEnt) unsubscribePartnerEnt();
           }
         );
       } catch {
         setPairLoaded(true);
         setPartnerUid(null);
-        setPairId(null);
         setPartnerPublicPremium(false);
+        setPairPremium(false);
         if (unsubscribePartnerEnt) unsubscribePartnerEnt();
       }
     })();
@@ -354,7 +405,8 @@ export default function ChallengesScreen() {
       if (unsubscribePair) unsubscribePair();
       if (unsubscribePartnerEnt) unsubscribePartnerEnt();
     };
-  }, [user?.uid, isPremium, hasPro]);
+    // IMPORTANT: also depend on pairId so we resubscribe when it changes
+  }, [user?.uid, isPremium, hasPro, pairId]);
 
   // Watch my own public entitlement mirror (real-time across devices)
   useEffect(() => {
@@ -380,7 +432,6 @@ export default function ChallengesScreen() {
   useEffect(() => {
     if (!user?.uid) return;
     const premiumNow = !!(isPremium || hasPro);
-    // Only write when we have a confirmed premium locally and the mirror isn't set yet
     if (!premiumNow || selfPublicPremium) return;
     (async () => {
       try {
@@ -392,6 +443,7 @@ export default function ChallengesScreen() {
       } catch {}
     })();
   }, [user?.uid, isPremium, hasPro, selfPublicPremium]);
+
   // Force-refresh entitlement on screen focus
   useFocusEffect(
     useCallback(() => {
@@ -419,9 +471,32 @@ export default function ChallengesScreen() {
 
   const { isPremium: partnerIsPremium } = usePlanPlus(partnerUid ?? undefined);
 
-  // Effective plan: my premium OR partner's premium OR partner's mirrored entitlement OR my entitlement mirror
+  // Backfill pair premium if any signal says "premium", but pair doc isn't marked yet
+  useEffect(() => {
+    if (!pairId) return;
+    const anyPremium =
+      !!(isPremium || hasPro || selfPublicPremium || partnerIsPremium || partnerPublicPremium);
+    if (!anyPremium || pairPremium) return;
+    (async () => {
+      try {
+        await setDoc(
+          doc(db, 'pairs', pairId),
+          {
+            premiumActive: true,
+            premiumFrom: (isPremium || hasPro || selfPublicPremium) ? (user?.uid ?? null) : (partnerUid ?? null),
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+        // Optimistic local unlock
+        setPairPremium(true);
+      } catch {}
+    })();
+  }, [pairId, pairPremium, isPremium, hasPro, selfPublicPremium, partnerIsPremium, partnerPublicPremium, user?.uid, partnerUid]);
+
+  // Effective plan now includes pair-level premium flag
   const effectivePremium = !!(
-    isPremium || hasPro || selfPublicPremium || partnerIsPremium || partnerPublicPremium
+    isPremium || hasPro || selfPublicPremium || partnerIsPremium || partnerPublicPremium || pairPremium
   );
   const safePlan: 'free' | 'premium' = effectivePremium ? 'premium' : 'free';
 
