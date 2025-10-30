@@ -6,7 +6,6 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
-
     "icon": "./assets/icon.png",
 
     "splash": {
@@ -20,7 +19,7 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.promotebya.LovePointsApp",
-      "buildNumber": "1.1.11",
+      "buildNumber": "1.1.13",
       "infoPlist": {
         "NSPhotoLibraryUsageDescription": "We need access to your photos to add memories.",
         "NSCameraUsageDescription": "We use your camera to capture memory photos and scan QR codes.",
