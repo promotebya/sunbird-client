@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Linking,
   Platform,
   Pressable,
   ScrollView,
@@ -23,6 +24,11 @@ import { usePlanPlus } from '../hooks/usePlan';
 import { purchase, restore, usePro } from '../utils/subscriptions';
 
 type Plan = 'monthly' | 'yearly';
+
+// Live policy links
+const PRIVACY_URL = 'https://promotebya.github.io/lovepoints-support/privacy';
+const TERMS_URL = 'https://promotebya.github.io/lovepoints-support/terms';
+const MANAGE_SUB_URL = 'itms-apps://apps.apple.com/account/subscriptions';
 
 function withAlpha(hex: string, alpha: number) {
   const h = hex.replace('#', '');
@@ -124,6 +130,12 @@ export default function PaywallScreen() {
     }
   }
 
+  function open(url: string) {
+    Linking.openURL(url).catch(() => {
+      Alert.alert('Unable to open link', url);
+    });
+  }
+
   return (
     <ScrollView
       style={{ backgroundColor: t.colors.bg }}
@@ -131,7 +143,7 @@ export default function PaywallScreen() {
       contentContainerStyle={{
         paddingHorizontal: t.spacing.md,
         paddingBottom: t.spacing.md,
-        paddingTop: insets.top + t.spacing.lg, // clear of notch
+        paddingTop: insets.top + t.spacing.lg,
       }}
     >
       {/* Hero */}
@@ -150,11 +162,8 @@ export default function PaywallScreen() {
         </ThemedText>
       </View>
 
-      {/* Premium box — single layer on Android (no borders at all) */}
-      <View
-        renderToHardwareTextureAndroid
-        style={[s.premiumBox, { marginTop: t.spacing.md }]}
-      >
+      {/* Premium box */}
+      <View renderToHardwareTextureAndroid style={[s.premiumBox, { marginTop: t.spacing.md }]}>
         {[
           '12 curated challenges every week',
           'New drops weekly — fun, romantic or surprising',
@@ -191,11 +200,7 @@ export default function PaywallScreen() {
             <ThemedText variant="label" color={plan === 'yearly' ? '#fff' : t.colors.text}>
               Yearly
             </ThemedText>
-            <ThemedText
-              variant="caption"
-              color={plan === 'yearly' ? '#fff' : t.colors.textDim}
-              style={{ marginTop: 2 }}
-            >
+            <ThemedText variant="caption" color={plan === 'yearly' ? '#fff' : t.colors.textDim} style={{ marginTop: 2 }}>
               {yearlyPrice}/yr
             </ThemedText>
             <View style={s.valueTagBelow}>
@@ -208,16 +213,13 @@ export default function PaywallScreen() {
 
         {/* CTA */}
         <Button
-          label={
-            busy
-              ? 'Unlocking…'
-              : plan === 'yearly' ? `${yearlyPrice}/year` : `${monthlyPrice}/month`
-          }
+          label={busy ? 'Unlocking…' : plan === 'yearly' ? `${yearlyPrice}/year` : `${monthlyPrice}/month`}
           onPress={() => handleBuy(plan)}
           disabled={busy || rcLoading || (!annual && !monthly)}
           style={{ marginTop: t.spacing.s }}
         />
 
+        {/* Restore */}
         <View style={{ marginTop: t.spacing.s, alignItems: 'center' }}>
           {busy ? <ActivityIndicator /> : (
             <Pressable onPress={handleRestore} accessibilityRole="button">
@@ -226,9 +228,25 @@ export default function PaywallScreen() {
           )}
         </View>
 
+        {/* Required notices & links */}
         <ThemedText variant="caption" color={t.colors.textDim} center style={{ marginTop: 8 }}>
-          Cancel anytime. Auto-renews until canceled in Settings.
+          Subscription auto-renews until canceled. Your Apple ID is charged at confirmation and within 24 hours before renewal.
+          You can cancel anytime in Settings → Subscriptions.
         </ThemedText>
+
+        <View style={s.linksRow}>
+          <Pressable onPress={() => open(PRIVACY_URL)}>
+            <ThemedText variant="caption" color={t.colors.primary}>Privacy Policy</ThemedText>
+          </Pressable>
+          <ThemedText variant="caption" color={t.colors.textDim}> • </ThemedText>
+          <Pressable onPress={() => open(TERMS_URL)}>
+            <ThemedText variant="caption" color={t.colors.primary}>Terms of Use</ThemedText>
+          </Pressable>
+          <ThemedText variant="caption" color={t.colors.textDim}> • </ThemedText>
+          <Pressable onPress={() => open(MANAGE_SUB_URL)}>
+            <ThemedText variant="caption" color={t.colors.primary}>Manage Subscription</ThemedText>
+          </Pressable>
+        </View>
       </View>
     </ScrollView>
   );
@@ -240,7 +258,6 @@ const styles = (t: ThemeTokens) =>
       flex: 1, alignItems: 'center', justifyContent: 'center',
       backgroundColor: t.colors.bg, padding: t.spacing.md,
     },
-
     hero: {
       alignItems: 'center',
       paddingVertical: t.spacing.lg,
@@ -261,13 +278,9 @@ const styles = (t: ThemeTokens) =>
       borderRadius: 999,
       backgroundColor: t.colors.primary,
     },
-
-    // bullets
     benefitRow: { flexDirection: 'row', alignItems: 'center', marginVertical: 6 },
     benefitIcon: { marginTop: 0 },
     benefitText: { marginLeft: 8, lineHeight: 22, flex: 1 },
-
-    // plan toggle
     planToggle: {
       flexDirection: 'row',
       backgroundColor: t.colors.card,
@@ -285,7 +298,6 @@ const styles = (t: ThemeTokens) =>
       borderRadius: t.radius.pill,
     },
     planChipActive: { backgroundColor: t.colors.primary },
-
     valueTagBelow: {
       marginTop: 6,
       paddingHorizontal: 8,
@@ -293,26 +305,26 @@ const styles = (t: ThemeTokens) =>
       borderRadius: t.radius.pill,
       backgroundColor: withAlpha('#000', 0.18),
     },
-
-    /**
-     * Single-layer premium box to avoid any rim on Android.
-     * - Android: solid baby-blue fill, no border, no elevation
-     * - iOS: normal card with border
-     */
     premiumBox: {
       borderRadius: t.radius.lg,
       padding: t.spacing.md,
       overflow: 'hidden',
       backgroundColor:
         Platform.OS === 'android'
-          ? mixWithWhite(t.colors.primary, 0.88) // solid baby-blue
+          ? mixWithWhite(t.colors.primary, 0.88)
           : t.colors.card,
-      // Hairline border matching the fill to kill the anti-alias rim
       borderWidth: Platform.OS === 'android' ? StyleSheet.hairlineWidth : 1,
       borderColor:
         Platform.OS === 'android'
           ? mixWithWhite(t.colors.primary, 0.88)
           : t.colors.border,
       elevation: 0,
+    },
+    linksRow: {
+      marginTop: t.spacing.s,
+      flexDirection: 'row',
+      justifyContent: 'center',
+      alignItems: 'center',
+      gap: 6,
     },
   });

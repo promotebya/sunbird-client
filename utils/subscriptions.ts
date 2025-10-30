@@ -1,15 +1,39 @@
 // utils/subscriptions.ts
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useEffect, useState } from 'react';
+import { Platform } from 'react-native';
+import Purchases, {
+  CustomerInfo,
+  PurchasesStoreProduct,
+} from 'react-native-purchases';
 
-// Flip to false once you wire RevenueCat/StoreKit
-const USE_MOCK = true;
+// ───────────────────────────────────────────────────────────────────────────────
+// CONFIG
+// ───────────────────────────────────────────────────────────────────────────────
+
+// Use mocks only in development; real StoreKit/RevenueCat in release.
+const USE_MOCK = __DEV__;
+
+// Your iOS product IDs (must match App Store Connect exactly).
+export const IOS_PRODUCT_IDS = ['lp_premium_monthly', 'lp_premium_yearly'] as const;
+
+// Optional Android product IDs (keep for parity later)
+// export const ANDROID_PRODUCT_IDS = ['lp_premium_monthly', 'lp_premium_yearly'] as const;
+
+// Public RC API keys via app.json -> expo.extra / EXPO_PUBLIC_* envs
+const RC_IOS_KEY = process.env.EXPO_PUBLIC_RC_IOS_KEY ?? '';
+const RC_ANDROID_KEY = process.env.EXPO_PUBLIC_RC_ANDROID_KEY ?? '';
+
+// ───────────────────────────────────────────────────────────────────────────────
+// TYPES
+// ───────────────────────────────────────────────────────────────────────────────
 
 export type Offering = { identifier: string; priceString: string };
 export type Offerings = { monthly?: Offering; annual?: Offering };
 
 /** Storage key scoped by UID so Premium is per-account (not per-device). */
-const keyFor = (uid: string | null | undefined) => `lp:pro_entitlement:${uid ?? 'anon'}`;
+const keyFor = (uid: string | null | undefined) =>
+  `lp:pro_entitlement:${uid ?? 'anon'}`;
 
 // --- module-level state so all hooks stay in sync (for the *current* UID) ---
 let currentUid: string | null = null;
@@ -40,9 +64,72 @@ export async function setCurrentSubscriptionsUser(uid: string | null) {
   proState = await loadOnce(currentUid);
   loaded = true;
   notify();
+
+  // Keep RevenueCat identity in sync (best effort, non-blocking)
+  if (!USE_MOCK) {
+    try {
+      await ensureRC();
+      if (currentUid) await Purchases.logIn(currentUid);
+      else await Purchases.logOut();
+    } catch {
+      // ignore
+    }
+  }
 }
 
-/** Hook: offerings + entitlement for the *passed* UID */
+// ───────────────────────────────────────────────────────────────────────────────
+// RevenueCat bootstrap
+// ───────────────────────────────────────────────────────────────────────────────
+
+let rcConfigured = false;
+
+async function ensureRC() {
+  if (rcConfigured) return;
+
+  const apiKey =
+    Platform.OS === 'ios' ? RC_IOS_KEY : RC_ANDROID_KEY;
+
+  if (!apiKey) {
+    throw new Error(
+      `RevenueCat API key missing for ${Platform.OS}. Set EXPO_PUBLIC_RC_IOS_KEY/EXPO_PUBLIC_RC_ANDROID_KEY.`
+    );
+  }
+
+  await Purchases.configure({ apiKey });
+  if (__DEV__) {
+    // Helpful in dev logs; no effect on release.
+    try {
+      // @ts-ignore older types
+      Purchases.setDebugLogsEnabled?.(true);
+    } catch {}
+  }
+
+  // Keep local state in sync if RC pushes updates (restore/upgrade elsewhere)
+  Purchases.addCustomerInfoUpdateListener((info) => {
+    const active = hasActive(info);
+    const k = keyFor(currentUid);
+    proState = active;
+    cache.set(k, { loaded: true, pro: active });
+    AsyncStorage.setItem(k, active ? '1' : '0').finally(() => notify());
+  });
+
+  rcConfigured = true;
+}
+
+function hasActive(info: CustomerInfo) {
+  // Easiest cross-project check without defining entitlements in RC:
+  const subs = info.activeSubscriptions ?? [];
+  return subs.includes('lp_premium_monthly') || subs.includes('lp_premium_yearly');
+}
+
+function mapProduct(p?: PurchasesStoreProduct): Offering | undefined {
+  return p ? { identifier: p.identifier, priceString: p.priceString } : undefined;
+}
+
+// ───────────────────────────────────────────────────────────────────────────────
+// Hook: offerings + entitlement for the *passed* UID
+// ───────────────────────────────────────────────────────────────────────────────
+
 export function usePro(uid?: string | null) {
   const [hasPro, setHasProLocal] = useState<boolean>(proState);
   const [loading, setLoading] = useState<boolean>(!loaded);
@@ -52,22 +139,40 @@ export function usePro(uid?: string | null) {
     let alive = true;
 
     (async () => {
-      // Scope module state to this uid
       await setCurrentSubscriptionsUser(uid ?? null);
       if (!alive) return;
 
-      setHasProLocal(proState);
-      setLoading(false);
-
       if (USE_MOCK) {
+        // Dev mocks use real product IDs so UI/paywall text matches screenshots.
         setOfferings({
-          monthly: { identifier: 'lp_plus_monthly', priceString: '€2.99' },
-          annual: { identifier: 'lp_plus_annual', priceString: '€19.99' },
+          monthly: { identifier: 'lp_premium_monthly', priceString: '€2.99' },
+          annual: { identifier: 'lp_premium_yearly', priceString: '€19.99' },
         });
-      } else {
-        // TODO RevenueCat:
-        // Purchases.getOfferings() -> setOfferings(...)
-        // Purchases.getCustomerInfo() -> setHasProLocal(active entitlement)
+        setHasProLocal(proState);
+        setLoading(false);
+        return;
+      }
+
+      try {
+        await ensureRC();
+
+        // Load products by IDs (keeps pricing localised & screenshot-consistent)
+        const ids = IOS_PRODUCT_IDS as unknown as string[];
+        const products = await Purchases.getProducts(ids);
+        const monthly = products.find((p) => p.identifier === 'lp_premium_monthly');
+        const annual = products.find((p) => p.identifier === 'lp_premium_yearly');
+        setOfferings({ monthly: mapProduct(monthly), annual: mapProduct(annual) });
+
+        // Get current entitlement
+        const info = await Purchases.getCustomerInfo();
+        const active = hasActive(info);
+        proState = active;
+        setHasProLocal(active);
+      } catch (err) {
+        // If RC fails, keep UI usable but don’t unlock
+        setOfferings(null);
+      } finally {
+        setLoading(false);
       }
     })();
 
@@ -80,7 +185,7 @@ export function usePro(uid?: string | null) {
     };
   }, [uid]);
 
-  // Expose a setter (used by mock purchase/restore)
+  // Expose a setter (used by mock purchase/restore only)
   const setHasPro = async (v: boolean) => {
     const k = keyFor(currentUid);
     proState = v;
@@ -92,9 +197,11 @@ export function usePro(uid?: string | null) {
   return { loading, hasPro, setHasPro, offerings };
 }
 
-// ---- actions (mocked) ------------------------------------------------------
+// ───────────────────────────────────────────────────────────────────────────────
+// Actions
+// ───────────────────────────────────────────────────────────────────────────────
 
-export async function purchase(_o: Offering): Promise<boolean> {
+export async function purchase(o: Offering): Promise<boolean> {
   if (USE_MOCK) {
     await new Promise((r) => setTimeout(r, 400)); // tiny “store” delay
     const k = keyFor(currentUid);
@@ -104,8 +211,16 @@ export async function purchase(_o: Offering): Promise<boolean> {
     notify();
     return true;
   }
-  // TODO RevenueCat: Purchases.purchasePackage(...) then set based on entitlement
-  return false;
+
+  await ensureRC();
+  const { customerInfo } = await Purchases.purchaseProduct(o.identifier); // v7 returns MakePurchaseResult
+  const active = hasActive(customerInfo);
+  const k = keyFor(currentUid);
+  proState = active;
+  cache.set(k, { loaded: true, pro: active });
+  await AsyncStorage.setItem(k, active ? '1' : '0');
+  notify();
+  return active;
 }
 
 export async function restore(): Promise<boolean> {
@@ -117,8 +232,16 @@ export async function restore(): Promise<boolean> {
     notify();
     return v;
   }
-  // TODO RevenueCat: Purchases.restorePurchases() then set based on entitlement
-  return false;
+
+  await ensureRC();
+  const info = await Purchases.restorePurchases();
+  const active = hasActive(info);
+  const k = keyFor(currentUid);
+  proState = active;
+  cache.set(k, { loaded: true, pro: active });
+  await AsyncStorage.setItem(k, active ? '1' : '0');
+  notify();
+  return active;
 }
 
 // Handy for local testing from a dev menu, optional:
