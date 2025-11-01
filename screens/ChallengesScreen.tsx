@@ -27,7 +27,6 @@ import {
   getWeeklyChallengeSet,
   type SeedChallenge,
 } from '../utils/seedchallenges';
-import { usePro } from '../utils/subscriptions';
 
 // Firestore (read + entitlement mirror)
 import {
@@ -241,7 +240,6 @@ export default function ChallengesScreen() {
 
   const { user } = useAuthListener();
   const { isPremium } = usePlanPlus(user?.uid);
-  const { hasPro } = usePro();
 
   // Pair state
   const [partnerUid, setPartnerUid] = useState<string | null>(null);
@@ -338,7 +336,7 @@ export default function ChallengesScreen() {
             setPartnerUid(other);
 
             // Mirror my premium flag into my public doc (so partner can read it)
-            const iAmPremium = !!(isPremium || hasPro);
+            const iAmPremium = !!isPremium;
             if (iAmPremium) {
               try {
                 await setDoc(
@@ -406,7 +404,7 @@ export default function ChallengesScreen() {
       if (unsubscribePartnerEnt) unsubscribePartnerEnt();
     };
     // IMPORTANT: also depend on pairId so we resubscribe when it changes
-  }, [user?.uid, isPremium, hasPro, pairId]);
+  }, [user?.uid, isPremium, pairId]);
 
   // Watch my own public entitlement mirror (real-time across devices)
   useEffect(() => {
@@ -431,7 +429,7 @@ export default function ChallengesScreen() {
   // Mirror my current plan into the public doc (ONE-WAY: only writes TRUE)
   useEffect(() => {
     if (!user?.uid) return;
-    const premiumNow = !!(isPremium || hasPro);
+    const premiumNow = !!isPremium;
     if (!premiumNow || selfPublicPremium) return;
     (async () => {
       try {
@@ -442,7 +440,7 @@ export default function ChallengesScreen() {
         );
       } catch {}
     })();
-  }, [user?.uid, isPremium, hasPro, selfPublicPremium]);
+  }, [user?.uid, isPremium, selfPublicPremium]);
 
   // Force-refresh entitlement on screen focus
   useFocusEffect(
@@ -475,7 +473,7 @@ export default function ChallengesScreen() {
   useEffect(() => {
     if (!pairId) return;
     const anyPremium =
-      !!(isPremium || hasPro || selfPublicPremium || partnerIsPremium || partnerPublicPremium);
+      !!(isPremium || selfPublicPremium || partnerIsPremium || partnerPublicPremium);
     if (!anyPremium || pairPremium) return;
     (async () => {
       try {
@@ -483,7 +481,7 @@ export default function ChallengesScreen() {
           doc(db, 'pairs', pairId),
           {
             premiumActive: true,
-            premiumFrom: (isPremium || hasPro || selfPublicPremium) ? (user?.uid ?? null) : (partnerUid ?? null),
+            premiumFrom: (isPremium || selfPublicPremium) ? (user?.uid ?? null) : (partnerUid ?? null),
             updatedAt: serverTimestamp(),
           },
           { merge: true }
@@ -492,11 +490,11 @@ export default function ChallengesScreen() {
         setPairPremium(true);
       } catch {}
     })();
-  }, [pairId, pairPremium, isPremium, hasPro, selfPublicPremium, partnerIsPremium, partnerPublicPremium, user?.uid, partnerUid]);
+  }, [pairId, pairPremium, isPremium, selfPublicPremium, partnerIsPremium, partnerPublicPremium, user?.uid, partnerUid]);
 
   // Effective plan now includes pair-level premium flag
   const effectivePremium = !!(
-    isPremium || hasPro || selfPublicPremium || partnerIsPremium || partnerPublicPremium || pairPremium
+    isPremium || selfPublicPremium || partnerIsPremium || partnerPublicPremium || pairPremium
   );
   const safePlan: 'free' | 'premium' = effectivePremium ? 'premium' : 'free';
 

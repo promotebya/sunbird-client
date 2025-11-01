@@ -1,3 +1,4 @@
+// screens/PaywallScreen.tsx
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useEffect, useMemo, useState } from 'react';
@@ -28,8 +29,11 @@ type Plan = 'monthly' | 'yearly';
 // Live policy links
 const PRIVACY_URL = 'https://promotebya.github.io/lovepoints-support/privacy';
 const TERMS_URL = 'https://promotebya.github.io/lovepoints-support/terms';
+const APPLE_EULA_URL =
+  'https://www.apple.com/legal/internet-services/itunes/dev/stdeula/';
 const MANAGE_SUB_URL = 'itms-apps://apps.apple.com/account/subscriptions';
 
+// ───────────────────────── helpers ─────────────────────────
 function withAlpha(hex: string, alpha: number) {
   const h = hex.replace('#', '');
   const full = h.length === 3 ? h.split('').map((c) => c + c).join('') : h;
@@ -46,6 +50,7 @@ function mixWithWhite(hex: string, ratio = 0.86) {
   return `#${toHex(m(r))}${toHex(m(g))}${toHex(m(b))}`;
 }
 
+// ───────────────────────── screen ─────────────────────────
 export default function PaywallScreen() {
   const t = useTokens();
   const insets = useSafeAreaInsets();
@@ -58,13 +63,17 @@ export default function PaywallScreen() {
   const [busy, setBusy] = useState(false);
 
   const { user } = useAuthListener();
-  const { hasPro, offerings, loading: rcLoading } = usePro(user?.uid);
+
+  // Local store (for prices) + entitlement mock in dev
+  const { hasPro, offerings, loading: storeLoading } = usePro(user?.uid);
   const annual = offerings?.annual;
   const monthly = offerings?.monthly;
 
+  // Server-side premium (the only source of truth to unlock UI)
   const { isPremium, loading: planLoading } = usePlanPlus(user?.uid);
-  const effectivePremium = !!(isPremium || hasPro);
+  const effectivePremium = !!isPremium;
 
+  // If already premium, bounce back
   useEffect(() => {
     if (!planLoading && effectivePremium) nav.goBack();
   }, [effectivePremium, planLoading, nav]);
@@ -73,7 +82,9 @@ export default function PaywallScreen() {
     return (
       <View style={s.center}>
         <Ionicons name="sparkles" size={22} color={t.colors.primary} />
-        <ThemedText variant="title" style={{ marginTop: 8 }}>You’re Premium 💖</ThemedText>
+        <ThemedText variant="title" style={{ marginTop: 8 }}>
+          You’re Premium 💖
+        </ThemedText>
         <ThemedText variant="caption" color={t.colors.textDim} style={{ marginTop: 4 }}>
           Thanks for supporting us!
         </ThemedText>
@@ -105,7 +116,7 @@ export default function PaywallScreen() {
       if (ok) {
         await markUserPremium();
       } else {
-        Alert.alert('Purchase canceled');
+        Alert.alert('Purchase not completed', 'No charge was made.');
       }
     } catch (e: any) {
       Alert.alert('Purchase failed', e?.message ?? 'Please try again.');
@@ -135,6 +146,9 @@ export default function PaywallScreen() {
       Alert.alert('Unable to open link', url);
     });
   }
+
+  const ctaDisabled =
+    busy || planLoading || storeLoading || (!annual && !monthly);
 
   return (
     <ScrollView
@@ -213,25 +227,35 @@ export default function PaywallScreen() {
 
         {/* CTA */}
         <Button
-          label={busy ? 'Unlocking…' : plan === 'yearly' ? `${yearlyPrice}/year` : `${monthlyPrice}/month`}
+          label={
+            busy
+              ? 'Unlocking…'
+              : plan === 'yearly'
+              ? `${yearlyPrice}/year`
+              : `${monthlyPrice}/month`
+          }
           onPress={() => handleBuy(plan)}
-          disabled={busy || rcLoading || (!annual && !monthly)}
+          disabled={ctaDisabled}
           style={{ marginTop: t.spacing.s }}
         />
 
         {/* Restore */}
         <View style={{ marginTop: t.spacing.s, alignItems: 'center' }}>
-          {busy ? <ActivityIndicator /> : (
+          {busy ? (
+            <ActivityIndicator />
+          ) : (
             <Pressable onPress={handleRestore} accessibilityRole="button">
-              <ThemedText variant="label" color={t.colors.primary}>Restore purchases</ThemedText>
+              <ThemedText variant="label" color={t.colors.primary}>
+                Restore purchases
+              </ThemedText>
             </Pressable>
           )}
         </View>
 
         {/* Required notices & links */}
         <ThemedText variant="caption" color={t.colors.textDim} center style={{ marginTop: 8 }}>
-          Subscription auto-renews until canceled. Your Apple ID is charged at confirmation and within 24 hours before renewal.
-          You can cancel anytime in Settings → Subscriptions.
+          Auto-renewing subscription. Your Apple ID is charged at confirmation and within 24 hours
+          before renewal. Manage or cancel anytime in Settings → Subscriptions.
         </ThemedText>
 
         <View style={s.linksRow}>
@@ -241,6 +265,10 @@ export default function PaywallScreen() {
           <ThemedText variant="caption" color={t.colors.textDim}> • </ThemedText>
           <Pressable onPress={() => open(TERMS_URL)}>
             <ThemedText variant="caption" color={t.colors.primary}>Terms of Use</ThemedText>
+          </Pressable>
+          <ThemedText variant="caption" color={t.colors.textDim}> • </ThemedText>
+          <Pressable onPress={() => open(APPLE_EULA_URL)}>
+            <ThemedText variant="caption" color={t.colors.primary}>Apple EULA</ThemedText>
           </Pressable>
           <ThemedText variant="caption" color={t.colors.textDim}> • </ThemedText>
           <Pressable onPress={() => open(MANAGE_SUB_URL)}>
@@ -255,8 +283,11 @@ export default function PaywallScreen() {
 const styles = (t: ThemeTokens) =>
   StyleSheet.create({
     center: {
-      flex: 1, alignItems: 'center', justifyContent: 'center',
-      backgroundColor: t.colors.bg, padding: t.spacing.md,
+      flex: 1,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: t.colors.bg,
+      padding: t.spacing.md,
     },
     hero: {
       alignItems: 'center',

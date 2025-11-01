@@ -52,8 +52,13 @@ import {
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import ToastUndo from '../components/ToastUndo';
 import { auth, app as fbApp, functions, FUNCTIONS_REGION } from '../firebaseConfig';
+import { _debugResetPro, setCurrentSubscriptionsUser } from '../utils/subscriptions';
 
-type SimplePermissionStatus = 'granted' | 'denied' | 'undetermined' | 'checking';
+// Legal links (used in Settings to satisfy App Store requirement)
+const PRIVACY_URL = 'https://promotebya.github.io/lovepoints-support/privacy';
+const TERMS_URL   = 'https://promotebya.github.io/lovepoints-support/terms';
+const APPLE_EULA_URL =
+  'https://www.apple.com/legal/internet-services/itunes/dev/stdeula/';
 
 /* ──────────────────────────────────────────────────────────── */
 /* Small UI primitives                                          */
@@ -131,6 +136,8 @@ const ThemeRow = memo(({ label, value }: { label: string; value: AllowedTheme })
 });
 
 /* ──────────────────────────────────────────────────────────── */
+
+type SimplePermissionStatus = 'granted' | 'denied' | 'undetermined' | 'checking';
 
 const PERM_BADGE: Record<SimplePermissionStatus, { c: string; t: string }> = {
   granted: { c: '#10B981', t: 'Granted' },
@@ -320,6 +327,10 @@ const SettingsScreen: React.FC = () => {
     } else {
       Linking.openURL('https://play.google.com/store/account/subscriptions');
     }
+  }
+
+  function openLink(url: string) {
+    Linking.openURL(url).catch(() => Alert.alert('Unable to open link', url));
   }
 
   /** Helpers */
@@ -512,7 +523,6 @@ const SettingsScreen: React.FC = () => {
 
               <View style={styles.rowBtns}>
                 <Button label="Share" onPress={onShareCode} />
-                {/* Removed: Enter code & Scan code (moved to Home) */}
               </View>
             </>
           ) : null}
@@ -644,7 +654,12 @@ const SettingsScreen: React.FC = () => {
                       text: 'Sign out anyway',
                       style: 'destructive',
                       onPress: async () => {
-                        try { await signOut(auth); } catch (e: any) {
+                        try {
+                          await signOut(auth);
+                          // Reset per-account premium cache so next user isn't auto-premium
+                          await setCurrentSubscriptionsUser(null);
+                          await _debugResetPro();
+                        } catch (e: any) {
                           Alert.alert('Sign out failed', e?.message ?? 'Please try again.');
                         }
                       },
@@ -658,7 +673,12 @@ const SettingsScreen: React.FC = () => {
                     text: 'Sign out',
                     style: 'destructive',
                     onPress: async () => {
-                      try { await signOut(auth); } catch (e: any) {
+                      try {
+                        await signOut(auth);
+                        // Reset per-account premium cache so next user isn't auto-premium
+                        await setCurrentSubscriptionsUser(null);
+                        await _debugResetPro();
+                      } catch (e: any) {
                         Alert.alert('Sign out failed', e?.message ?? 'Please try again.');
                       }
                     },
@@ -715,6 +735,31 @@ const SettingsScreen: React.FC = () => {
                 ]
               );
             }}
+          />
+        </Card>
+
+        {/* Legal */}
+        <Card style={{ marginTop: tokens.spacing.md }}>
+          <View style={styles.sectionHeader}>
+            <ThemedText variant="h2">Legal</ThemedText>
+          </View>
+          <Row
+            icon="document-text-outline"
+            title="Privacy Policy"
+            right={<Ionicons name="open-outline" size={22} color={t.colors.textDim} />}
+            onPress={() => openLink(PRIVACY_URL)}
+          />
+          <Row
+            icon="document-attach-outline"
+            title="Terms of Use"
+            right={<Ionicons name="open-outline" size={22} color={t.colors.textDim} />}
+            onPress={() => openLink(TERMS_URL)}
+          />
+          <Row
+            icon="shield-checkmark-outline"
+            title="Apple Standard EULA"
+            right={<Ionicons name="open-outline" size={22} color={t.colors.textDim} />}
+            onPress={() => openLink(APPLE_EULA_URL)}
           />
         </Card>
 

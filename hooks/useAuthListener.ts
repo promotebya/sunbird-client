@@ -9,7 +9,7 @@ import { ensureUserDoc } from '../utils/users';
 
 /**
  * Subscribes to Firebase Auth state and ensures a /users/{uid} doc exists
- * whenever someone signs in. Also scopes the mock subscription layer to this UID.
+ * whenever someone signs in. Also scopes the subscriptions layer to this UID.
  */
 export default function useAuthListener() {
   const [user, setUser] = useState<User | null>(null);
@@ -23,7 +23,7 @@ export default function useAuthListener() {
       setUser(u);
       setLoading(false);
 
-      // Scope mock subscriptions to the current uid so entitlements are per-account
+      // Scope subscriptions to the current uid so entitlements are per-account
       await setCurrentSubscriptionsUser(u?.uid ?? null);
 
       if (u && ensuredRef.current !== u.uid) {

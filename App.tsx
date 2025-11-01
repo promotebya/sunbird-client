@@ -1,4 +1,5 @@
 // App.tsx
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { NavigationContainer } from '@react-navigation/native';
 import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
@@ -106,6 +107,18 @@ function extractTriggerDate(req: Notifications.NotificationRequest): Date | null
   }
 }
 
+/* ---------- KINDNESS NUDGE IDENTIFICATION + KEYS ---------- */
+const MTDAY_KIND = 'lp:mtday';
+const LAST_MTDAY_KEY = 'lp:lastMtdayShown';
+const LAST_MTDAY_UID_KEY = 'lp:lastMtdayUid';
+
+const isMtdayTitle = (title?: string) => !!title && title.startsWith('Make their day');
+function isMtdayRequest(req: Notifications.NotificationRequest) {
+  const kind = (req?.content?.data as any)?.kind;
+  const title = req?.content?.title as string | undefined;
+  return kind === MTDAY_KIND || isMtdayTitle(title);
+}
+
 // Ensure 3–4 weekly hits, all on different days, and never clash with blockedDates
 function makeRandomWeeklyTriggers(targetCount: number, blockedDates: Set<string> = new Set()): Date[] {
   const out: Date[] = [];
@@ -161,7 +174,7 @@ function makeRandomWeeklyTriggers(targetCount: number, blockedDates: Set<string>
   return out.sort((a, b) => a.getTime() - b.getTime());
 }
 
-/** Schedules/tops-up local “kindness nudge” notifications */
+/** Schedules/tops-up local “kindness nudge” notifications (safe + cleans legacy) */
 function useKindnessNudgesScheduler(userId: string | null | undefined) {
   useEffect(() => {
     let cancelled = false;
@@ -169,6 +182,7 @@ function useKindnessNudgesScheduler(userId: string | null | undefined) {
       try {
         if (!Device.isDevice) return;
 
+        // permissions
         const perms = await Notifications.getPermissionsAsync();
         if (perms.status !== 'granted') {
           const req = await Notifications.requestPermissionsAsync();
@@ -185,17 +199,39 @@ function useKindnessNudgesScheduler(userId: string | null | undefined) {
           }).catch(() => {});
         }
 
-        const TARGET = 48; // ~12 weeks @ 4/wk
-
-        const allScheduled = await Notifications.getAllScheduledNotificationsAsync();
+        // --- ONE-TIME NORMALIZATION + ACCOUNT SWITCH CLEANUP ---
+        const uidNow = userId ?? 'anon';
+        const prevUid = (await AsyncStorage.getItem(LAST_MTDAY_UID_KEY)) ?? '';
+        let all = await Notifications.getAllScheduledNotificationsAsync();
         if (cancelled) return;
 
-        // Consider ONLY our nudge notifications for counts/constraints
-        const nudgeRequests = allScheduled.filter(
-          (r) => (r?.content?.data as any)?.kind === 'lp:mtday'
-        );
+        // Cancel "legacy" nudges that have the title but no kind
+        for (const req of all) {
+          const hasKind = (req?.content?.data as any)?.kind === MTDAY_KIND;
+          const looksLikeNudge = isMtdayTitle(req?.content?.title as any);
+          if (looksLikeNudge && !hasKind) {
+            try { await Notifications.cancelScheduledNotificationAsync(req.identifier); } catch {}
+          }
+        }
 
-        // --- DEDUPE: ensure at most one nudge per calendar day among existing ---
+        // If account changed, wipe ALL nudges for a clean per-account plan
+        if (prevUid !== uidNow) {
+          for (const req of all) {
+            if (isMtdayRequest(req)) {
+              try { await Notifications.cancelScheduledNotificationAsync(req.identifier); } catch {}
+            }
+          }
+          await AsyncStorage.setItem(LAST_MTDAY_UID_KEY, uidNow);
+          await AsyncStorage.removeItem(LAST_MTDAY_KEY); // allow one today if needed
+        }
+
+        // Refresh after cleanup
+        all = await Notifications.getAllScheduledNotificationsAsync();
+
+        // Only consider our nudges (title or kind)
+        const nudgeRequests = all.filter(isMtdayRequest);
+
+        // --- DEDUPE FUTURE DAYS (keep earliest per day) ---
         const byDay = new Map<string, Notifications.NotificationRequest[]>();
         for (const req of nudgeRequests) {
           const when = extractTriggerDate(req);
@@ -205,9 +241,6 @@ function useKindnessNudgesScheduler(userId: string | null | undefined) {
           arr.push(req);
           byDay.set(key, arr);
         }
-
-        // Cancel duplicates, keep the earliest time for that day
-        let duplicatesCancelled = 0;
         for (const [, list] of byDay) {
           if (list.length <= 1) continue;
           list.sort((a, b) => {
@@ -215,30 +248,32 @@ function useKindnessNudgesScheduler(userId: string | null | undefined) {
             const db = extractTriggerDate(b)?.getTime() ?? 0;
             return da - db;
           });
-          const keep = list[0];
           for (let i = 1; i < list.length; i++) {
-            try {
-              await Notifications.cancelScheduledNotificationAsync(list[i].identifier);
-              duplicatesCancelled++;
-            } catch {}
+            try { await Notifications.cancelScheduledNotificationAsync(list[i].identifier); } catch {}
           }
         }
 
-        const uniqueExistingCount = nudgeRequests.length - duplicatesCancelled;
+        // Recompute after dedupe
+        const stillScheduled = (await Notifications.getAllScheduledNotificationsAsync())
+          .filter(isMtdayRequest)
+          .filter((r) => {
+            const when = extractTriggerDate(r);
+            return !!when && when.getTime() > Date.now();
+          });
 
-        // Build blockedDates from remaining (unique) future nudge days
+        // Build blocked dates from remaining (unique) future nudge days
         const blockedDates = new Set<string>();
-        for (const req of nudgeRequests) {
-          const when = extractTriggerDate(req);
-          if (!when || when.getTime() <= Date.now()) continue;
+        for (const req of stillScheduled) {
+          const when = extractTriggerDate(req)!;
           blockedDates.add(dateKey(when));
         }
 
-        const toAdd = Math.max(0, TARGET - uniqueExistingCount);
+        // Target stock: ~12 weeks @ 4/wk
+        const TARGET = 48;
+        const toAdd = Math.max(0, TARGET - stillScheduled.length);
         if (toAdd <= 0) return;
 
         const times = makeRandomWeeklyTriggers(toAdd, blockedDates);
-
         for (const when of times) {
           const prompt = NUDGE_PROMPTS[randInt(0, NUDGE_PROMPTS.length - 1)];
           await Notifications.scheduleNotificationAsync({
@@ -246,7 +281,7 @@ function useKindnessNudgesScheduler(userId: string | null | undefined) {
               title: 'Make their day 💖',
               body: prompt,
               sound: false,
-              data: { kind: 'lp:mtday' },
+              data: { kind: MTDAY_KIND },
             },
             trigger: {
               type: Notifications.SchedulableTriggerInputTypes.DATE,
@@ -260,10 +295,7 @@ function useKindnessNudgesScheduler(userId: string | null | undefined) {
         // never block first render
       }
     })();
-
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [userId]);
 }
 
@@ -347,15 +379,38 @@ export default function App() {
     return () => clearTimeout(t);
   }, []);
 
-  // Global notifications handler
+  // Global notifications handler with runtime day-dedupe
   useEffect(() => {
     Notifications.setNotificationHandler({
-      handleNotification: async () => ({
-        shouldPlaySound: true,
-        shouldSetBadge: false,
-        shouldShowBanner: true,
-        shouldShowList: true,
-      }) as any,
+      handleNotification: async (n: Notifications.Notification) => {
+        try {
+          const kind = (n?.request?.content?.data as any)?.kind;
+          const title = n?.request?.content?.title as string | undefined;
+
+          if (kind === MTDAY_KIND || isMtdayTitle(title)) {
+            const today = dateKey(new Date());
+            const last = await AsyncStorage.getItem(LAST_MTDAY_KEY);
+            if (last === today) {
+              // swallow the 2nd nudge of the day
+              return {
+                shouldPlaySound: false,
+                shouldSetBadge: false,
+                shouldShowAlert: false as any,
+                shouldShowBanner: false as any,
+                shouldShowList: false as any,
+              };
+            }
+            await AsyncStorage.setItem(LAST_MTDAY_KEY, today);
+          }
+        } catch {}
+        return {
+          shouldPlaySound: true,
+          shouldSetBadge: false,
+          shouldShowAlert: true as any,
+          shouldShowBanner: true as any,
+          shouldShowList: true as any,
+        };
+      },
     });
   }, []);
 
